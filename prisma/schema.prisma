@@ -1,0 +1,453 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "mysql"
+  url = env("DATABASE_URL")
+}
+enum Role {
+  Administrator
+  Project_Leader
+  Project_Member
+}
+enum AccountStatus {
+  active
+  suspended
+  deactivated
+  removed
+  locked
+}
+enum ProjectRole {
+  Project_Leader
+  Project_Member
+}
+enum ProjectStatus {
+  active
+  completed
+  archived
+  on_hold
+}
+enum TaskStatus {
+  pending
+  ongoing
+  completed
+}
+enum TaskPriority {
+  low
+  medium
+  high
+}
+enum WorkflowEventType {
+  status_change
+  task_completed
+  assignment_change
+  progress_activity
+}
+enum IdeaStatus {
+  submitted
+  refined
+  selected
+  rejected
+}
+enum CalendarEventType {
+  meeting
+  work_session
+  presentation
+  activity
+}
+enum NotificationType {
+  task_assignment
+  task_update
+  project_change
+  group_activity
+  announcement
+  deadline_reminder
+  delay_risk
+  ai_suggestion
+}
+enum ProviderId {
+  google
+  microsoft
+  trello
+  asana
+  canva
+  figma
+}
+enum ConnectionStatus {
+  connected
+  expired
+  revoked
+  error
+}
+enum RiskLevel {
+  on_track
+  at_risk
+  critical
+}
+enum TicketCategory {
+  account_reactivation
+  account_deletion
+  password_concern
+  bug_report
+  other
+}
+enum TicketStatus {
+  pending
+  in_progress
+  resolved
+  rejected
+}
+model User {
+  id String @id @default(cuid())
+  email String @unique
+  passwordHash String
+  fullName String
+  institution String?
+  course String?
+  avatarUrl String?
+  role Role @default(Project_Member)
+  status AccountStatus @default(active)
+  tokenVersion Int @default(0)
+  failedLogins Int @default(0)
+  lockedAt DateTime?
+  createdAt DateTime @default(now())
+  groupMembers GroupMember[]
+  projectMembers ProjectMember[]
+  admin Admin?
+  notifications Notification[]
+  preference NotificationPreference?
+  toolConnections ToolConnection[]
+  votes Vote[]
+  aiInteractions AiInteraction[]
+  supportTickets SupportTicket[]
+}
+model Admin {
+  id String @id @default(cuid())
+  userId String @unique
+  user User @relation(fields: [userId], references: [id])
+  portalLevel String @default("standard")
+}
+model Group {
+  id String @id @default(cuid())
+  name String
+  createdBy String
+  createdAt DateTime @default(now())
+  members GroupMember[]
+  joinCodes JoinCode[]
+  ideas Idea[]
+  projects Project[]
+  messages ChatMessage[]
+}
+model GroupMember {
+  id String @id @default(cuid())
+  groupId String
+  userId String
+  role ProjectRole @default(Project_Member)
+  joinedAt DateTime @default(now())
+  group Group @relation(fields: [groupId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+  @@unique([groupId, userId])
+}
+model JoinCode {
+  id String @id @default(cuid())
+  groupId String
+  code String @unique
+  expiresAt DateTime?
+  active Boolean @default(true)
+  group Group @relation(fields: [groupId], references: [id])
+}
+model ChatMessage {
+  id String @id @default(cuid())
+  groupId String
+  senderId String
+  body String @db.Text
+  createdAt DateTime @default(now())
+  group Group @relation(fields: [groupId], references: [id])
+  @@index([groupId, createdAt])
+}
+model Project {
+  id String @id @default(cuid())
+  groupId String
+  ideaId String? @unique
+  title String
+  description String @db.Text
+  startDate DateTime?
+  deadline DateTime?
+  status ProjectStatus @default(active)
+  createdBy String
+  createdAt DateTime @default(now())
+  group Group @relation(fields: [groupId], references: [id])
+  idea Idea? @relation(fields: [ideaId], references: [id])
+  members ProjectMember[]
+  tasks Task[]
+  events CalendarEvent[]
+  workflow WorkflowEvent[]
+  snapshots AnalyticsSnapshot[]
+  linkedResources LinkedResource[]
+  embeddings Embedding[]
+}
+model ProjectMember {
+  id String @id @default(cuid())
+  projectId String
+  userId String
+  role ProjectRole @default(Project_Member)
+  responsibility String?
+  project Project @relation(fields: [projectId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+  @@unique([projectId, userId])
+}
+model Task {
+  id String @id @default(cuid())
+  projectId String
+  title String
+  description String @db.Text
+  deadline DateTime?
+  priority TaskPriority @default(medium)
+  status TaskStatus @default(pending)
+  createdBy String
+  startedAt DateTime?
+  completedAt DateTime?
+  expectedDurationHrs Float?
+  createdAt DateTime @default(now())
+  project Project @relation(fields: [projectId], references: [id])
+  assignments TaskAssignment[]
+  comments TaskComment[]
+  workflow WorkflowEvent[]
+  dependsOn TaskDependency[] @relation("dependent")
+  dependents TaskDependency[] @relation("prerequisite")
+  linkedResources LinkedResource[]
+  @@index([projectId, status])
+}
+model TaskDependency {
+  id String @id @default(cuid())
+  prerequisiteId String
+  dependentId String
+  prerequisite Task @relation("prerequisite", fields: [prerequisiteId], references: [id])
+  dependent Task @relation("dependent", fields: [dependentId], references: [id])
+  @@unique([prerequisiteId, dependentId])
+}
+model TaskAssignment {
+  id String @id @default(cuid())
+  taskId String
+  assigneeId String
+  assignerId String
+  assignedAt DateTime @default(now())
+  active Boolean @default(true)
+  task Task @relation(fields: [taskId], references: [id])
+  @@index([assigneeId, active])
+}
+model TaskComment {
+  id String @id @default(cuid())
+  taskId String
+  authorId String
+  body String @db.Text
+  createdAt DateTime @default(now())
+  task Task @relation(fields: [taskId], references: [id])
+}
+model WorkflowEvent {
+  id String @id @default(cuid())
+  projectId String
+  taskId String?
+  actorId String
+  type WorkflowEventType
+  fromValue String?
+  toValue String?
+  createdAt DateTime @default(now())
+  project Project @relation(fields: [projectId], references: [id])
+  task Task? @relation(fields: [taskId], references: [id])
+  @@index([projectId, createdAt])
+}
+model Idea {
+  id String @id @default(cuid())
+  groupId String
+  authorId String
+  title String
+  body String @db.Text
+  status IdeaStatus @default(submitted)
+  createdAt DateTime @default(now())
+  group Group @relation(fields: [groupId], references: [id])
+  polls IdeaPoll[]
+  project Project?
+}
+model IdeaPoll {
+  id String @id @default(cuid())
+  groupId String
+  ideaId String?
+  createdBy String
+  open Boolean @default(true)
+  createdAt DateTime @default(now())
+  idea Idea? @relation(fields: [ideaId], references: [id])
+  options PollOption[]
+}
+model PollOption {
+  id String @id @default(cuid())
+  pollId String
+  ideaId String
+  label String
+  poll IdeaPoll @relation(fields: [pollId], references: [id])
+  votes Vote[]
+}
+model Vote {
+  id String @id @default(cuid())
+  pollId String
+  optionId String
+  voterId String
+  createdAt DateTime @default(now())
+  option PollOption @relation(fields: [optionId], references: [id])
+  voter User @relation(fields: [voterId], references: [id])
+  @@unique([pollId, voterId])
+}
+model CalendarEvent {
+  id String @id @default(cuid())
+  ownerId String
+  projectId String?
+  title String
+  type CalendarEventType
+  startAt DateTime
+  endAt DateTime?
+  createdAt DateTime @default(now())
+  project Project? @relation(fields: [projectId], references: [id])
+  @@index([ownerId, startAt])
+}
+model Notification {
+  id String @id @default(cuid())
+  userId String
+  type NotificationType
+  message String
+  relatedId String?
+  relatedType String?
+  read Boolean @default(false)
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id])
+  @@index([userId, read, createdAt])
+}
+model NotificationPreference {
+  id String @id @default(cuid())
+  userId String @unique
+  tasks Boolean @default(true)
+  deadlines Boolean @default(true)
+  groupActivity Boolean @default(true)
+  aiSuggestions Boolean @default(true)
+  emailEnabled Boolean @default(true)
+  pushEnabled Boolean @default(true)
+  user User @relation(fields: [userId], references: [id])
+}
+model PushSubscription {
+  id String @id @default(cuid())
+  userId String
+  endpoint String @db.Text
+  p256dh String
+  auth String
+  createdAt DateTime @default(now())
+  @@index([userId])
+}
+model ConnectedTool {
+  id String @id @default(cuid())
+  provider ProviderId @unique
+  name String
+  category String
+  connections ToolConnection[]
+}
+model ToolConnection {
+  id String @id @default(cuid())
+  userId String
+  provider ProviderId
+  status ConnectionStatus @default(connected)
+  encAccessToken String @db.Text
+  encRefreshToken String? @db.Text
+  iv String
+  authTag String
+  expiresAt DateTime?
+  lastSyncedAt DateTime?
+  syncState String?
+  user User @relation(fields: [userId], references: [id])
+  tool ConnectedTool @relation(fields: [provider], references: [provider])
+  linkedResources LinkedResource[]
+  usage ToolUsage[]
+  @@unique([userId, provider])
+}
+model LinkedResource {
+  id String @id @default(cuid())
+  connectionId String
+  projectId String?
+  taskId String?
+  externalId String
+  externalUrl String @db.Text
+  title String
+  connection ToolConnection @relation(fields: [connectionId], references: [id])
+  project Project? @relation(fields: [projectId], references: [id])
+  task Task? @relation(fields: [taskId], references: [id])
+}
+model ToolUsage {
+  id String @id @default(cuid())
+  connectionId String
+  action String
+  createdAt DateTime @default(now())
+  connection ToolConnection @relation(fields: [connectionId], references: [id])
+}
+model AiInteraction {
+  id String @id @default(cuid())
+  userId String
+  scopeType String?
+  scopeId String?
+  prompt String @db.Text
+  response String @db.Text
+  moderated Boolean @default(false)
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id])
+}
+model Embedding {
+  id String @id @default(cuid())
+  projectId String?
+  sourceType String
+  sourceId String
+  content String @db.Text
+  vector Bytes
+  createdAt DateTime @default(now())
+  project Project? @relation(fields: [projectId], references: [id])
+  @@index([sourceType, sourceId])
+}
+model AnalyticsSnapshot {
+  id String @id @default(cuid())
+  projectId String
+  taskCompletionRate Float
+  overallEfficiency Float
+  riskScore Float
+  riskLevel RiskLevel
+  predictedCompletion DateTime?
+  deltaDays Int?
+  bottlenecks Json
+  memberPerf Json
+  factors Json
+  createdAt DateTime @default(now())
+  project Project @relation(fields: [projectId], references: [id])
+  @@index([projectId, createdAt])
+}
+model SupportTicket {
+  id String @id @default(cuid())
+  userId String
+  category TicketCategory
+  subject String
+  body String @db.Text
+  status TicketStatus @default(pending)
+  response String? @db.Text
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id])
+}
+model AuditLog {
+  id String @id @default(cuid())
+  actorId String?
+  module String
+  activity String
+  severity String
+  description String @db.Text
+  createdAt DateTime @default(now())
+  @@index([module, createdAt])
+}
+model SystemSetting {
+  id String @id @default(cuid())
+  key String @unique
+  value Json
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+}

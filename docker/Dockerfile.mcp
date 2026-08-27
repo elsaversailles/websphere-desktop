@@ -1,0 +1,5 @@
+FROM node:20-alpine
+WORKDIR /app
+COPY . .
+RUN corepack enable && pnpm install --no-frozen-lockfile && pnpm --filter @websphere/api exec prisma generate --schema ../../prisma/schema.prisma && pnpm --filter @websphere/mcp build
+CMD ["node", "apps/mcp/dist/index.js"]

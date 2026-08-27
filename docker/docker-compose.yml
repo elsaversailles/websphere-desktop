@@ -1,0 +1,31 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment: { MYSQL_DATABASE: websphere, MYSQL_USER: websphere, MYSQL_PASSWORD: websphere, MYSQL_ROOT_PASSWORD: rootpassword }
+    ports: ["3306:3306"]
+    volumes: [mysql_data:/var/lib/mysql]
+    healthcheck: { test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-prootpassword"], interval: 10s, timeout: 5s, retries: 10 }
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  api:
+    build: { context: .., dockerfile: docker/Dockerfile.api }
+    env_file: ../.env
+    environment: { DATABASE_URL: mysql://websphere:websphere@mysql:3306/websphere, REDIS_URL: redis://redis:6379, UPLOAD_DIR: /var/lib/websphere/uploads }
+    volumes: [websphere_uploads:/var/lib/websphere/uploads]
+    depends_on: { mysql: { condition: service_healthy }, redis: { condition: service_started } }
+  worker:
+    build: { context: .., dockerfile: docker/Dockerfile.worker }
+    env_file: ../.env
+    environment: { DATABASE_URL: mysql://websphere:websphere@mysql:3306/websphere, REDIS_URL: redis://redis:6379 }
+    depends_on: [mysql, redis]
+  mcp:
+    build: { context: .., dockerfile: docker/Dockerfile.mcp }
+    env_file: ../.env
+    environment: { DATABASE_URL: mysql://websphere:websphere@mysql:3306/websphere }
+    depends_on: [mysql]
+  web:
+    build: { context: .., dockerfile: docker/Dockerfile.web }
+    ports: ["8080:80"]
+    depends_on: [api]
+volumes: { mysql_data: {}, websphere_uploads: {} }

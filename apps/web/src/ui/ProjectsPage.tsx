@@ -1,0 +1,9 @@
+import { useEffect, useState } from 'react';
+import { request } from '../api';
+
+type Project = { id: string; title: string; description: string; status: string; deadline?: string | null; group: { name: string }; members?: Array<{ role: string }>; tasks: Array<{ id: string; status: string }> };
+export function ProjectsPage({ notify }: { notify: (message: string) => void }) {
+  const [projects, setProjects] = useState<Project[] | null>(null);
+  useEffect(() => { void request<Project[]>('/projects').then(setProjects).catch((error: Error) => notify(error.message)); }, [notify]);
+  return <section className="sp on"><div className="ph"><h2>My Projects</h2></div><section className="cc"><div className="cc-head"><h3>Existing Projects</h3></div>{projects === null ? <div className="legacy-empty">Loading projects…</div> : projects.length ? <table className="tbl"><thead><tr><th>Project</th><th>Group</th><th>Role</th><th>Progress</th><th>Deadline</th><th>Status</th></tr></thead><tbody>{projects.map((project) => { const complete = project.tasks.filter((task) => task.status === 'completed').length; const progress = project.tasks.length ? Math.round(complete / project.tasks.length * 100) : 0; return <tr key={project.id}><td><strong>{project.title}</strong></td><td>{project.group.name}</td><td><span className="bdg ac">{project.members?.[0]?.role === 'Project_Leader' ? 'Leader' : 'Member'}</span></td><td><div className="progress-cell"><div className="pb-wrap"><div className="pb" style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div></td><td>{project.deadline ? new Date(project.deadline).toLocaleDateString() : 'Not set'}</td><td><span className="bdg g">{project.status}</span></td></tr>; })}</tbody></table> : <div className="legacy-empty">Your projects will appear here. Create your first project to get started.</div>}</section></section>;
+}
