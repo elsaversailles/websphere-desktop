@@ -130,10 +130,14 @@ validate_runtime_config() {
     const databaseUser = decodeURIComponent(database.username);
     const databasePassword = decodeURIComponent(database.password);
     const databaseName = decodeURIComponent(database.pathname.replace(/^\//, ""));
+    const mysqlUser = process.env.MYSQL_USER || "websphere";
+    const mysqlPassword = process.env.MYSQL_PASSWORD || "websphere";
+    const mysqlDatabase = process.env.MYSQL_DATABASE || "websphere";
+    const mysqlRootPassword = process.env.MYSQL_ROOT_PASSWORD || "rootpassword";
     if (!databaseUser || !databasePassword) fail("DATABASE_URL_DOCKER must contain database credentials");
-    if (databaseUser !== required("MYSQL_USER") || databasePassword !== required("MYSQL_PASSWORD") || databaseName !== required("MYSQL_DATABASE")) fail("DATABASE_URL_DOCKER credentials and database must match MYSQL_USER, MYSQL_PASSWORD, and MYSQL_DATABASE");
+    if (databaseUser !== mysqlUser || databasePassword !== mysqlPassword || databaseName !== mysqlDatabase) fail("DATABASE_URL_DOCKER credentials and database must match the effective MYSQL_USER, MYSQL_PASSWORD, and MYSQL_DATABASE values");
     if (databasePassword === "websphere") console.warn("[config] WARNING: deploying with the insecure default MySQL application password");
-    if (required("MYSQL_ROOT_PASSWORD") === "rootpassword") console.warn("[config] WARNING: deploying with the insecure default MySQL root password");
+    if (mysqlRootPassword === "rootpassword") console.warn("[config] WARNING: deploying with the insecure default MySQL root password");
     const redis = new URL(required("REDIS_URL"));
     if (redis.protocol !== "redis:" || redis.hostname !== "redis") fail("REDIS_URL_DOCKER must use redis:6379 inside Docker");
     if (redis.port && redis.port !== "6379") fail("REDIS_URL_DOCKER must use Redis port 6379");
@@ -195,7 +199,7 @@ deploy_built_service() {
 
   if [[ "$service" == api ]]; then
     if ! validate_runtime_config; then
-      log 'production configuration validation failed; the existing API container was left running'
+      log 'production configuration validation failed; no API container was replaced'
       return 1
     fi
     log 'applying Prisma migrations before replacing the API container'
