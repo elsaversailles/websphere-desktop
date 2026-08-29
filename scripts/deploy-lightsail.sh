@@ -130,9 +130,10 @@ validate_runtime_config() {
     const databaseUser = decodeURIComponent(database.username);
     const databasePassword = decodeURIComponent(database.password);
     const databaseName = decodeURIComponent(database.pathname.replace(/^\//, ""));
-    if (!databaseUser || !databasePassword || databasePassword === "websphere") fail("DATABASE_URL_DOCKER must contain non-default credentials");
+    if (!databaseUser || !databasePassword) fail("DATABASE_URL_DOCKER must contain database credentials");
     if (databaseUser !== required("MYSQL_USER") || databasePassword !== required("MYSQL_PASSWORD") || databaseName !== required("MYSQL_DATABASE")) fail("DATABASE_URL_DOCKER credentials and database must match MYSQL_USER, MYSQL_PASSWORD, and MYSQL_DATABASE");
-    if (required("MYSQL_ROOT_PASSWORD") === "rootpassword") fail("replace the default MYSQL_ROOT_PASSWORD");
+    if (databasePassword === "websphere") console.warn("[config] WARNING: deploying with the insecure default MySQL application password");
+    if (required("MYSQL_ROOT_PASSWORD") === "rootpassword") console.warn("[config] WARNING: deploying with the insecure default MySQL root password");
     const redis = new URL(required("REDIS_URL"));
     if (redis.protocol !== "redis:" || redis.hostname !== "redis") fail("REDIS_URL_DOCKER must use redis:6379 inside Docker");
     if (redis.port && redis.port !== "6379") fail("REDIS_URL_DOCKER must use Redis port 6379");

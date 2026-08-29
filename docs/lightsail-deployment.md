@@ -65,7 +65,7 @@ Run host Nginx on ports 80/443 and proxy the site to `http://127.0.0.1:8080`. Th
 - Prisma migrations run after the API image builds and before the API container is replaced.
 - Migration execution first uses `pnpm exec prisma`, then automatically locates and invokes the image's local Prisma CLI if the pnpm executable is unavailable.
 - Deployment verifies that both `User` and `_prisma_migrations` exist before starting the API. A missing schema stops the deployment while leaving the old API container running.
-- Production preflight rejects `localhost` container URLs, localhost web origins, placeholder/default database credentials, and placeholder/reused JWT secrets.
+- Production preflight rejects `localhost` container URLs, localhost web origins, mismatched database settings, and placeholder/reused JWT secrets. Default MySQL passwords currently produce explicit warnings instead of blocking deployment and must be rotated as soon as possible.
 - API and web health checks exercise `/health`; worker and MCP must remain running for five consecutive checks.
 - Release source is retained under `releases/<commit-sha>` for diagnosis. Old release directories are not deleted automatically.
 
