@@ -1,7 +1,7 @@
 const apiBase = import.meta.env.VITE_API_URL || '/api';
 
 export type Role = 'Administrator' | 'Project_Leader' | 'Project_Member';
-export type User = { id: string; fullName: string; email: string; institution?: string | null; course?: string | null; role: Role };
+export type User = { id: string; fullName: string; email: string; institution?: string | null; course?: string | null; avatarUrl?: string | null; role: Role };
 export type Session = { access: string; refresh: string; role: Role; user: User };
 
 let access = sessionStorage.getItem('ws_access') ?? '';
@@ -33,13 +33,21 @@ export function clearSession() {
 }
 
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const formData = init.body instanceof FormData;
   const response = await fetch(`${apiBase}${path}`, {
     ...init,
-    headers: { 'content-type': 'application/json', ...(access ? { authorization: `Bearer ${access}` } : {}), ...init.headers },
+    headers: { ...(!formData ? { 'content-type': 'application/json' } : {}), ...(access ? { authorization: `Bearer ${access}` } : {}), ...init.headers },
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.message ?? 'Request failed');
+  if (!response.ok) throw new ApiRequestError(body.message ?? 'Request failed', body.code, body.fields);
   return body as T;
+}
+
+export class ApiRequestError extends Error {
+  constructor(message: string, readonly code?: string, readonly fields?: Record<string, string>) {
+    super(message);
+    this.name = 'ApiRequestError';
+  }
 }
 
 export async function authenticate(email: string, password: string, admin = false): Promise<Session> {

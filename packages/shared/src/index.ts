@@ -13,6 +13,23 @@ export const registerSchema = z.object({
   course: z.string().trim().min(2).max(160),
 });
 export const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
+export const passwordChangeSchema = z.object({
+  oldPassword: z.string().min(1),
+  password: z.string().min(8).max(128),
+  confirm: z.string().min(1),
+});
+export const passwordForgotSchema = z.object({ email: z.string().trim().email() });
+export const passwordResetSchema = z.object({
+  token: z.string().min(32).max(256),
+  password: z.string().min(8).max(128),
+  confirm: z.string().min(1),
+});
+export const profileUpdateSchema = z.object({
+  fullName: z.string().trim().min(2).max(120).optional(),
+  email: z.string().trim().email().optional(),
+  institution: z.string().trim().min(2).max(160).optional(),
+  course: z.string().trim().min(2).max(160).optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one profile field' });
 export const projectSchema = z.object({
   groupId: z.string().cuid(), title: z.string().trim().min(2).max(180), description: z.string().trim().min(1),
   startDate: z.coerce.date().optional(), deadline: z.coerce.date().optional(), memberIds: z.array(z.string().cuid()).default([]),
@@ -28,6 +45,9 @@ export const supportTicketSchema = z.object({ category: z.enum(['account_reactiv
 export const aiAskSchema = z.object({ prompt: z.string().trim().min(1).max(12000), scopeType: z.enum(['project','group','idea']).optional(), scopeId: z.string().cuid().optional(), parts: z.array(z.object({ type: z.string() })).optional() });
 
 export type RegisterDto = z.infer<typeof registerSchema>;
+export type PasswordChangeDto = z.infer<typeof passwordChangeSchema>;
+export type PasswordResetDto = z.infer<typeof passwordResetSchema>;
+export type ProfileUpdateDto = z.infer<typeof profileUpdateSchema>;
 export type CreateProjectDto = z.infer<typeof projectSchema>;
 export type CreateTaskDto = z.infer<typeof taskSchema>;
 export type TaskStatusDto = z.infer<typeof taskStatusSchema>;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { clearSession, request, type Session } from '../api';
+import { clearSession, request, saveSession, type Session, type User } from '../api';
 import { Dashboard } from './Dashboard';
 import { GroupChatPage } from './GroupChatPage';
 import { GroupsPage } from './GroupsPage';
@@ -9,7 +9,7 @@ import { ProjectsPage } from './ProjectsPage';
 import { AdminSettingsPage, CalendarPage, IntegrationsPage, NotificationsPage, ProfilePage, ProjectsAnalyticsPage, TasksPage, TrackerPage } from './LegacyPages';
 
 type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tools' | 'tracker' | 'notifications' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'settings';
-type WorkspaceProps = { session: Session; onLogout: () => void; notify: (message: string) => void };
+type WorkspaceProps = { session: Session; onSessionChange: (session: Session) => void; onLogout: () => void; notify: (message: string) => void };
 type Link = { id: Page; label: string; icon: string };
 
 const userSections: Array<{ title: string; links: Link[] }> = [
@@ -23,7 +23,7 @@ const adminSections: Array<{ title: string; links: Link[] }> = [
   { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
 ];
 
-export function Workspace({ session, onLogout, notify }: WorkspaceProps) {
+export function Workspace({ session, onSessionChange, onLogout, notify }: WorkspaceProps) {
   const administrator = session.role === 'Administrator';
   const [page, setPage] = useState<Page>(administrator ? 'admin' : 'dashboard');
   const [selectedGroupId, setSelectedGroupId] = useState('');
@@ -32,6 +32,12 @@ export function Workspace({ session, onLogout, notify }: WorkspaceProps) {
   async function logout() {
     try { await request('/auth/logout', { method: 'POST' }); } catch { /* local session is always cleared */ }
     clearSession(); onLogout();
+  }
+
+  function updateUser(user: User) {
+    const next = { ...session, user };
+    saveSession(next);
+    onSessionChange(next);
   }
 
   return <main className="page on"><div className="layout">
@@ -56,7 +62,7 @@ export function Workspace({ session, onLogout, notify }: WorkspaceProps) {
       {page === 'tools' ? <IntegrationsPage notify={notify} /> : null}
       {page === 'tracker' ? <TrackerPage notify={notify} /> : null}
       {page === 'notifications' ? <NotificationsPage notify={notify} /> : null}
-      {page === 'profile' ? <ProfilePage user={session.user} notify={notify} /> : null}
+      {page === 'profile' ? <ProfilePage user={session.user} onUserUpdated={updateUser} onSessionInvalidated={() => { clearSession(); onLogout(); }} notify={notify} /> : null}
       {page === 'settings' ? <AdminSettingsPage notify={notify} /> : null}
     </div></div>
   </div></main>;

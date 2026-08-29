@@ -1,0 +1,114 @@
+name: Deploy to Lightsail
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: lightsail-production
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Sequential container deployment
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 120
+    env:
+      LIGHTSAIL_SSH_PORT: ${{ vars.LIGHTSAIL_SSH_PORT || '22' }}
+      LIGHTSAIL_DEPLOY_PATH: ${{ vars.LIGHTSAIL_DEPLOY_PATH }}
+      LIGHTSAIL_COMPOSE_PROJECT: ${{ vars.LIGHTSAIL_COMPOSE_PROJECT || 'docker' }}
+
+    steps:
+      - name: Check out the release
+        uses: actions/checkout@v4
+
+      - name: Validate deployment configuration
+        shell: bash
+        env:
+          LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          LIGHTSAIL_USER: ${{ secrets.LIGHTSAIL_USER }}
+          LIGHTSAIL_SSH_PRIVATE_KEY: ${{ secrets.LIGHTSAIL_SSH_PRIVATE_KEY }}
+          LIGHTSAIL_SSH_KNOWN_HOSTS: ${{ secrets.LIGHTSAIL_SSH_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$LIGHTSAIL_HOST" ]] || { echo 'LIGHTSAIL_HOST is required' >&2; exit 1; }
+          [[ -n "$LIGHTSAIL_USER" ]] || { echo 'LIGHTSAIL_USER is required' >&2; exit 1; }
+          [[ -n "$LIGHTSAIL_SSH_PRIVATE_KEY" ]] || { echo 'LIGHTSAIL_SSH_PRIVATE_KEY is required' >&2; exit 1; }
+          [[ -n "$LIGHTSAIL_SSH_KNOWN_HOSTS" ]] || { echo 'LIGHTSAIL_SSH_KNOWN_HOSTS is required' >&2; exit 1; }
+          [[ "$LIGHTSAIL_HOST" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'LIGHTSAIL_HOST contains unsupported characters' >&2; exit 1; }
+          [[ "$LIGHTSAIL_USER" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'LIGHTSAIL_USER contains unsupported characters' >&2; exit 1; }
+          [[ "$LIGHTSAIL_SSH_PORT" =~ ^[0-9]+$ ]] || { echo 'LIGHTSAIL_SSH_PORT must be numeric' >&2; exit 1; }
+          if [[ -n "$LIGHTSAIL_DEPLOY_PATH" ]]; then
+            [[ "$LIGHTSAIL_DEPLOY_PATH" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo 'LIGHTSAIL_DEPLOY_PATH contains unsupported characters' >&2; exit 1; }
+          fi
+          [[ "$LIGHTSAIL_COMPOSE_PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo 'LIGHTSAIL_COMPOSE_PROJECT is invalid' >&2; exit 1; }
+
+      - name: Validate Compose configuration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp example.env .env
+          docker compose --env-file .env --file docker/docker-compose.yml config --quiet
+          rm -f .env
+
+      - name: Package the committed source
+        shell: bash
+        run: git archive --format=tar.gz --output="websphere-${GITHUB_SHA}.tar.gz" "${GITHUB_SHA}"
+
+      - name: Configure SSH
+        shell: bash
+        env:
+          LIGHTSAIL_SSH_PRIVATE_KEY: ${{ secrets.LIGHTSAIL_SSH_PRIVATE_KEY }}
+          LIGHTSAIL_SSH_KNOWN_HOSTS: ${{ secrets.LIGHTSAIL_SSH_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$LIGHTSAIL_SSH_PRIVATE_KEY" > "$HOME/.ssh/lightsail"
+          printf '%s\n' "$LIGHTSAIL_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/lightsail" "$HOME/.ssh/known_hosts"
+
+      - name: Upload release archive
+        shell: bash
+        env:
+          LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          LIGHTSAIL_USER: ${{ secrets.LIGHTSAIL_USER }}
+        run: |
+          set -Eeuo pipefail
+          scp -P "$LIGHTSAIL_SSH_PORT" -i "$HOME/.ssh/lightsail" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+            "websphere-${GITHUB_SHA}.tar.gz" \
+            "$LIGHTSAIL_USER@$LIGHTSAIL_HOST:/tmp/websphere-${GITHUB_SHA}.tar.gz"
+
+      - name: Build and start services sequentially
+        shell: bash
+        env:
+          LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          LIGHTSAIL_USER: ${{ secrets.LIGHTSAIL_USER }}
+        run: |
+          set -Eeuo pipefail
+          printf -v remote_command 'bash -s -- %q %q %q %q' \
+            "$LIGHTSAIL_DEPLOY_PATH" "$GITHUB_SHA" "/tmp/websphere-${GITHUB_SHA}.tar.gz" \
+            "$LIGHTSAIL_COMPOSE_PROJECT"
+          ssh -p "$LIGHTSAIL_SSH_PORT" -i "$HOME/.ssh/lightsail" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
+            "$LIGHTSAIL_USER@$LIGHTSAIL_HOST" "$remote_command" \
+            < scripts/deploy-lightsail.sh
+
+      - name: Deployment summary
+        if: success()
+        shell: bash
+        run: |
+          {
+            echo '### Lightsail deployment complete'
+            echo
+            echo "Release: \`${GITHUB_SHA}\`"
+            echo
+            echo 'Services were built and started in this order: `mysql → redis → api → worker → mcp → web`.'
+          } >> "$GITHUB_STEP_SUMMARY"

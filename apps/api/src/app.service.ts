@@ -7,6 +7,7 @@ import { CryptoService, validatePassword } from './security.js';
 import { PrismaService } from './prisma.service.js';
 import { ConfigService } from './config.service.js';
 import { RedisService } from './redis.service.js';
+import { EmailService } from './email.service.js';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
@@ -28,20 +29,23 @@ export class AppService {
   private readonly crypto: CryptoService;
   private readonly config: ConfigService;
   private readonly redis: RedisService;
+  private readonly email: EmailService;
 
-  constructor(prisma: PrismaService, config: ConfigService, crypto: CryptoService, redis: RedisService) {
+  constructor(prisma: PrismaService, config: ConfigService, crypto: CryptoService, redis: RedisService, email: EmailService) {
     this.prisma = prisma;
     this.accessSecret = new TextEncoder().encode(config.get('JWT_ACCESS_SECRET'));
     this.refreshSecret = new TextEncoder().encode(config.get('JWT_REFRESH_SECRET'));
     this.crypto = crypto;
     this.config = config;
     this.redis = redis;
+    this.email = email;
   }
   private refreshKey(jti: string) { return `auth:refresh:${jti}`; }
   private usedRefreshKey(jti: string) { return `auth:refresh:used:${jti}`; }
   private userRefreshKey(userId: string) { return `auth:refresh:user:${userId}`; }
   private failedLoginKey(userId: string) { return `auth:login-failures:${userId}`; }
   private resetKey(token: string) { return `auth:password-reset:${token}`; }
+  private userResetKey(userId: string) { return `auth:password-reset:user:${userId}`; }
   private refreshTtlSeconds() {
     const match = this.config.get('JWT_REFRESH_TTL').match(/^(\d+)(s|m|h|d)$/);
     if (!match) throw new Error('JWT_REFRESH_TTL must use a whole-number s, m, h, or d duration');
@@ -52,15 +56,46 @@ export class AppService {
     return new SignJWT({ role: user.role, tv: user.tokenVersion, ...(refresh ? { jti } : {}) }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt().setExpirationTime(refresh ? this.config.get('JWT_REFRESH_TTL') : this.config.get('JWT_ACCESS_TTL')).sign(refresh ? this.refreshSecret : this.accessSecret);
   }
   async issue(user: { id: string; role: Role; tokenVersion: number }) { const jti = randomBytes(16).toString('hex'); const [access, refresh] = await Promise.all([this.sign(user), this.sign(user, true, jti)]); const ttl = this.refreshTtlSeconds(); await Promise.all([this.redis.set(this.refreshKey(jti), JSON.stringify({ userId: user.id }), ttl), this.redis.addToSet(this.userRefreshKey(user.id), jti, ttl)]); return { access, refresh, role: user.role }; }
-  async caller(header?: string): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); if (!user || user.status !== 'active' || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
+  async caller(header?: string, options: { allowLocked?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
   async register(input: any) { const policy = validatePassword(input.password); if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`, 400, { password: policy.reason }); const exists = await this.prisma.user.findUnique({ where: { email: input.email } }); if (exists) fail('EMAIL_IN_USE', 'Email is already in use', 409, { email: 'already in use' }); const user = await this.prisma.user.create({ data: { ...input, passwordHash: await hash(input.password), password: undefined } as any }); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
   async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0 } })]); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
-  async refreshToken(token: string) { try { const verified = await jwtVerify(token, this.refreshSecret); const subject = verified.payload.sub; if (!subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const jti = String(verified.payload.jti); const stored = await this.redis.take(this.refreshKey(jti)); if (!stored) { if (await this.redis.get(this.usedRefreshKey(jti))) await this.prisma.user.update({ where: { id: subject }, data: { tokenVersion: { increment: 1 } } }); fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } const record = JSON.parse(stored!) as { userId: string }; if (record.userId !== subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const ttl = this.refreshTtlSeconds(); await Promise.all([this.redis.set(this.usedRefreshKey(jti), '1', ttl), this.redis.removeFromSet(this.userRefreshKey(record.userId), jti)]); const user = await this.prisma.user.findUniqueOrThrow({ where: { id: record.userId } }); return this.issue(user); } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } }
+  async refreshToken(token: string) { try { const verified = await jwtVerify(token, this.refreshSecret); const subject = verified.payload.sub; if (!subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const jti = String(verified.payload.jti); const stored = await this.redis.take(this.refreshKey(jti)); if (!stored) { if (await this.redis.get(this.usedRefreshKey(jti))) await this.prisma.user.update({ where: { id: subject }, data: { tokenVersion: { increment: 1 } } }); fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } const record = JSON.parse(stored!) as { userId: string }; if (record.userId !== subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const user = await this.prisma.user.findUnique({ where: { id: record.userId } }); if (!user || user.status !== 'active' || user.tokenVersion !== Number(verified.payload.tv)) { await this.redis.removeFromSet(this.userRefreshKey(record.userId), jti); fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } const ttl = this.refreshTtlSeconds(); await Promise.all([this.redis.set(this.usedRefreshKey(jti), '1', ttl), this.redis.removeFromSet(this.userRefreshKey(record.userId), jti)]); return this.issue(user); } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } }
   private async removeRefreshSessions(userId: string) { const key = this.userRefreshKey(userId); const jtis = await this.redis.setMembers(key); await this.redis.delete(...jtis.map((jti) => this.refreshKey(jti)), key); }
   async logout(user: Caller) { await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } }); return { ok: true }; }
-  async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); return { ok: true }; }
-  async forgot(email: string) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'locked') { const token = randomBytes(32).toString('hex'); await this.redis.set(this.resetKey(token), user.id, this.config.get('PASSWORD_RESET_TTL_SECONDS')); } return { ok: true }; } // Email delivery is handled by the notifications worker.
-  async resetPassword(token: string, password: string, confirm: string) { const userId = await this.redis.take(this.resetKey(token)); if (!userId) fail('AUTH_UNAUTHENTICATED', 'Reset token is invalid or expired', 401); const lockedUserId = userId!; if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match'); const policy = validatePassword(password); if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`); await Promise.all([this.removeRefreshSessions(lockedUserId), this.redis.delete(this.failedLoginKey(lockedUserId)), this.prisma.user.update({ where: { id: lockedUserId }, data: { passwordHash: await hash(password), status: 'active', lockedAt: null, failedLogins: 0, tokenVersion: { increment: 1 } } })]); return { ok: true }; }
+  async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`, 400, { password: policy.reason }); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); return { ok: true }; }
+  async forgot(email: string) {
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (user?.status !== 'locked') return { ok: true };
+    const oldToken = await this.redis.get(this.userResetKey(user.id));
+    if (oldToken) await this.redis.delete(this.resetKey(oldToken));
+    const token = randomBytes(32).toString('hex');
+    const ttl = this.config.get('PASSWORD_RESET_TTL_SECONDS');
+    await Promise.all([
+      this.redis.set(this.resetKey(token), user.id, ttl),
+      this.redis.set(this.userResetKey(user.id), token, ttl),
+    ]);
+    try {
+      const delivered = await this.email.sendPasswordReset(user.email, token);
+      return { ok: true, ...(delivered ? {} : { resetToken: token }) };
+    } catch (error) {
+      await this.redis.delete(this.resetKey(token), this.userResetKey(user.id));
+      throw error;
+    }
+  }
+  async resetPassword(token: string, password: string, confirm: string) {
+    if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' });
+    const policy = validatePassword(password);
+    if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`, 400, { password: policy.reason });
+    const userId = await this.redis.take(this.resetKey(token));
+    if (!userId) fail('AUTH_UNAUTHENTICATED', 'Reset token is invalid or expired', 401);
+    const lockedUserId = userId!;
+    await Promise.all([
+      this.removeRefreshSessions(lockedUserId),
+      this.redis.delete(this.failedLoginKey(lockedUserId), this.userResetKey(lockedUserId)),
+      this.prisma.user.update({ where: { id: lockedUserId }, data: { passwordHash: await hash(password), status: 'active', lockedAt: null, failedLogins: 0, tokenVersion: { increment: 1 } } }),
+    ]);
+    return { ok: true };
+  }
   publicUser(user: any) { const { passwordHash, ...safe } = user; return safe; }
   async me(caller: Caller) { return this.publicUser(await this.prisma.user.findUniqueOrThrow({ where: { id: caller.id } })); }
   async updateMe(caller: Caller, input: any) { if (input.email) { const duplicate = await this.prisma.user.findFirst({ where: { email: input.email, NOT: { id: caller.id } } }); if (duplicate) fail('EMAIL_IN_USE', 'Email is already in use', 409, { email: 'already in use' }); } return this.publicUser(await this.prisma.user.update({ where: { id: caller.id }, data: input })); }

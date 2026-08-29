@@ -66,6 +66,10 @@ export class RedisService implements OnModuleDestroy {
     return Number(results?.[0]?.[1]);
   }
 
+  duplicateClient() {
+    return this.client.duplicate({ lazyConnect: true, maxRetriesPerRequest: 1, enableOfflineQueue: false });
+  }
+
   async onModuleDestroy() {
     await this.client.quit();
   }

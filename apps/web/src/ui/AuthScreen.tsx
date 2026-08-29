@@ -2,7 +2,7 @@ import { FormEvent, useState } from 'react';
 import { authenticate, request, saveSession, type Session } from '../api';
 
 type AuthScreenProps = { onAuthenticated: (session: Session) => void; notify: (message: string) => void };
-type AuthMode = 'login' | 'register' | 'admin';
+type AuthMode = 'login' | 'register' | 'admin' | 'forgot' | 'reset';
 
 const courses = [
   'Bachelor of Science in Information Technology', 'Bachelor of Science in Computer Science',
@@ -17,7 +17,8 @@ const schools = [
 ];
 
 export function AuthScreen({ onAuthenticated, notify }: AuthScreenProps) {
-  const [mode, setMode] = useState<AuthMode>('register');
+  const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get('resetToken') ?? '');
+  const [mode, setMode] = useState<AuthMode>(() => resetToken ? 'reset' : 'register');
   const [busy, setBusy] = useState(false);
 
   async function submitLogin(event: FormEvent<HTMLFormElement>, admin: boolean) {
@@ -46,13 +47,39 @@ export function AuthScreen({ onAuthenticated, notify }: AuthScreenProps) {
     } catch (error: any) { notify(error.message); } finally { setBusy(false); }
   }
 
+  async function submitForgot(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const email = String(new FormData(event.currentTarget).get('email') ?? '').trim();
+    setBusy(true);
+    try {
+      const result = await request<{ ok: true; resetToken?: string }>('/auth/password/forgot', { method: 'POST', body: JSON.stringify({ email }) });
+      notify('If that locked account exists, a reset link has been sent.');
+      if (result.resetToken) { setResetToken(result.resetToken); setMode('reset'); }
+      else setMode('login');
+    } catch (error: any) { notify(error.message); } finally { setBusy(false); }
+  }
+
+  async function submitReset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    if (data.get('password') !== data.get('confirm')) return notify('Your password does not match.');
+    setBusy(true);
+    try {
+      await request('/auth/password/reset', { method: 'POST', body: JSON.stringify({ token: resetToken, password: data.get('password'), confirm: data.get('confirm') }) });
+      window.history.replaceState({}, '', window.location.pathname);
+      setResetToken('');
+      setMode('login');
+      notify('Password reset complete. You can sign in now.');
+    } catch (error: any) { notify(error.message); } finally { setBusy(false); }
+  }
+
   return <main className="auth-wrap">
     <div className="swirl s1" /><div className="swirl s2" />
     {mode === 'login' ? <form className="abox" onSubmit={(event) => void submitLogin(event, false)}>
       <h1 className="atitle">Welcome Back</h1><p className="asub">Sign in to your account to continue</p>
       <AuthField label="Email Address" name="email" type="email" placeholder="your@gmail.com" />
       <AuthField label="Password" name="password" type="password" placeholder="Enter your password" />
-      <button className="aforgot" type="button" onClick={() => notify('Password reset will be sent to your registered email.')}>Forgot password?</button>
+      <button className="aforgot" type="button" onClick={() => setMode('forgot')}>Forgot password?</button>
       <button className="abtn" disabled={busy}>{busy ? 'Signing In…' : 'Sign In'}</button>
       <p className="alink">Don&apos;t have an account? <button type="button" onClick={() => setMode('register')}>Register here</button></p>
       <p className="alink admin-link"><button type="button" onClick={() => setMode('admin')}>Admin login</button></p>
@@ -61,7 +88,7 @@ export function AuthScreen({ onAuthenticated, notify }: AuthScreenProps) {
       <h1 className="atitle admin-title">Administrator Login</h1>
       <AuthField label="Admin Email" name="email" type="email" placeholder="admin@gmail.com" />
       <AuthField label="Password" name="password" type="password" placeholder="Enter your password" />
-      <button className="aforgot" type="button" onClick={() => notify('Admin password reset will be sent to the registered email.')}>Forgot admin password?</button>
+      <button className="aforgot" type="button" onClick={() => setMode('forgot')}>Forgot admin password?</button>
       <button className="abtn" disabled={busy}>{busy ? 'Signing In…' : 'Sign In as Admin'}</button>
       <p className="alink admin-link"><button type="button" onClick={() => setMode('login')}>User login</button></p>
     </form> : null}
@@ -77,6 +104,19 @@ export function AuthScreen({ onAuthenticated, notify }: AuthScreenProps) {
       <AuthField label="Confirm Password" name="confirm" type="password" placeholder="Confirm your password" />
       <button className="abtn register-submit" disabled={busy}>{busy ? 'Creating Account…' : 'Create Account'}</button>
       <p className="alink">Already have an account? <button type="button" onClick={() => setMode('login')}>Sign in here</button></p>
+    </form> : null}
+    {mode === 'forgot' ? <form className="abox" onSubmit={(event) => void submitForgot(event)}>
+      <h1 className="atitle">Reset Password</h1><p className="asub">Locked accounts receive a one-time reset link by email.</p>
+      <AuthField label="Email Address" name="email" type="email" placeholder="your@email.com" />
+      <button className="abtn" disabled={busy}>{busy ? 'Sending…' : 'Send Reset Link'}</button>
+      <p className="alink"><button type="button" onClick={() => setMode('login')}>Back to sign in</button></p>
+    </form> : null}
+    {mode === 'reset' ? <form className="abox" onSubmit={(event) => void submitReset(event)}>
+      <h1 className="atitle">Choose a New Password</h1><p className="asub">Your reset link can only be used once.</p>
+      <AuthField label="New Password" name="password" type="password" placeholder="Enter a new password" />
+      <AuthField label="Confirm Password" name="confirm" type="password" placeholder="Confirm your new password" />
+      <button className="abtn" disabled={busy || !resetToken}>{busy ? 'Resetting…' : 'Reset Password'}</button>
+      <p className="alink"><button type="button" onClick={() => setMode('login')}>Back to sign in</button></p>
     </form> : null}
   </main>;
 }

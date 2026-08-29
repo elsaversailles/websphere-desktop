@@ -1,6 +1,7 @@
-import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, StreamableFile } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { z } from 'zod';
-import { aiAskSchema, calendarEventSchema, ideaSchema, loginSchema, projectSchema, registerSchema, supportTicketSchema, taskSchema, taskStatusSchema } from '@websphere/shared';
+import { aiAskSchema, calendarEventSchema, ideaSchema, loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, profileUpdateSchema, projectSchema, registerSchema, supportTicketSchema, taskSchema, taskStatusSchema } from '@websphere/shared';
 import { AppService } from './app.service.js';
 import { LocalStorageService } from './local-storage.service.js';
 import { RedisService } from './redis.service.js';
@@ -19,12 +20,13 @@ export class AppController {
   @Public() @Post('auth/admin/login') adminLogin(@Body() body: unknown) { const input = parse(loginSchema, body); return this.app.login(input.email, input.password, true); }
   @Public() @Post('auth/refresh') refresh(@Body('refresh') refresh: string) { return this.app.refreshToken(refresh); }
   @Post('auth/logout') async logout(@Headers('authorization') auth?: string) { return this.app.logout(await this.caller(auth)); }
-  @Post('auth/password/change') async change(@Headers('authorization') auth: string, @Body() body: { oldPassword: string; password: string; confirm: string }) { return this.app.changePassword(await this.caller(auth), body.oldPassword, body.password, body.confirm); }
-  @Public() @Post('auth/password/forgot') forgot(@Body('email') email: string) { return this.app.forgot(email); }
-  @Public() @Post('auth/password/reset') reset(@Body() body: { token: string; password: string; confirm: string }) { return this.app.resetPassword(body.token, body.password, body.confirm); }
+  @Public() @Post('auth/password/change') async change(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(passwordChangeSchema, body); return this.app.changePassword(await this.app.caller(auth, { allowLocked: true }), input.oldPassword, input.password, input.confirm); }
+  @Public() @Post('auth/password/forgot') forgot(@Body() body: unknown) { return this.app.forgot(parse(passwordForgotSchema, body).email); }
+  @Public() @Post('auth/password/reset') reset(@Body() body: unknown) { const input = parse(passwordResetSchema, body); return this.app.resetPassword(input.token, input.password, input.confirm); }
   @Get('users/me') async me(@Headers('authorization') auth: string) { return this.app.me(await this.caller(auth)); }
-  @Patch('users/me') async updateMe(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.updateMe(await this.caller(auth), z.object({ fullName: z.string().min(2).optional(), email: z.string().email().optional(), institution: z.string().min(2).optional(), course: z.string().min(2).optional() }).parse(body)); }
-  @Post('users/me/avatar') async avatar(@Headers('authorization') auth: string, @Body() body: { fileName: string; contentBase64: string }) { const avatarUrl = await this.storage.saveAvatar(body.fileName, body.contentBase64); return this.app.updateMe(await this.caller(auth), { avatarUrl }); }
+  @Patch('users/me') async updateMe(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.updateMe(await this.caller(auth), parse(profileUpdateSchema, body)); }
+  @Post('users/me/avatar') @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024, files: 1 } }))
+  async avatar(@Headers('authorization') auth: string, @UploadedFile() file?: { originalname: string; mimetype: string; buffer: Buffer }) { if (!file) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Choose an avatar image', fields: { file: 'required' } }, 400); const avatarUrl = await this.storage.saveAvatar(file); return this.app.updateMe(await this.caller(auth), { avatarUrl }); }
   @Public() @Get('uploads/:fileName') async upload(@Param('fileName') fileName: string) { return new StreamableFile(await this.storage.readPublicFile(fileName)); }
 
   @Post('groups') async createGroup(@Headers('authorization') auth: string, @Body('name') name: string) { return this.app.createGroup(await this.caller(auth), name); }

@@ -1,0 +1,486 @@
+WebSphere Docker + Nginx Deployment Troubleshooting Guide
+This documents the working setup, the actual root cause of the login failure, the commands used to diagnose it, and which configuration values should be kept or changed.
+1. Working architecture
+The deployment ended up looking like this:
+Internet
+   |
+   v
+Host Nginx
+websphere.fun :80/:443
+   |
+   v
+127.0.0.1:8080
+   |
+   v
+docker-web-1 :80
+   |
+   +---- /api/* ------> api:3000/*
+   |
+   +---- /uploads/* --> api:3000/uploads/*
+   |
+   +---- /socket.io/ -> api:3000/socket.io/*
+                         |
+                         v
+                   docker-api-1
+                    /         \
+                   v           v
+              mysql:3306    redis:6379
+Docker Compose service names are used for container-to-container networking:
+api
+mysql
+redis
+Do not use localhost for communication between these containers.
+
+2. Host Nginx configuration
+On Ubuntu/Debian, create or edit:
+sudo nano /etc/nginx/sites-available/websphere
+Recommended configuration:
+server {
+    listen 80;
+    server_name websphere.fun www.websphere.fun;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+Enable it:
+sudo ln -s /etc/nginx/sites-available/websphere \
+    /etc/nginx/sites-enabled/websphere
+Test:
+sudo nginx -t
+Reload:
+sudo systemctl reload nginx
+The host Nginx should proxy to:
+127.0.0.1:8080
+because Docker exposes:
+host:8080 -> docker-web-1:80
+
+3. Web-container Nginx configuration
+The working internal Nginx configuration was:
+server {
+    listen 80;
+
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://api:3000/;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /uploads/ {
+        proxy_pass http://api:3000/uploads/;
+
+        proxy_set_header Host $host;
+    }
+
+    location /socket.io/ {
+        proxy_pass http://api:3000/socket.io/;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+Important: keep the trailing slash
+This is correct for this application:
+location /api/ {
+    proxy_pass http://api:3000/;
+}
+It converts:
+/api/auth/login
+into:
+/auth/login
+on the API container.
+In this deployment, that is what the backend expects.
+Do not change it to:
+proxy_pass http://api:3000;
+unless the Node API itself is configured with routes beginning with /api.
+Without the trailing slash:
+/api/auth/login
+would remain:
+/api/auth/login
+when sent to Node.
+
+4. API environment configuration
+The working Docker configuration uses Docker DNS names:
+DATABASE_URL=mysql://websphere:YOUR_PASSWORD@mysql:3306/websphere
+
+REDIS_URL=redis://redis:6379
+
+PORT=3000
+
+JWT_ACCESS_SECRET=YOUR_RANDOM_SECRET
+JWT_REFRESH_SECRET=YOUR_OTHER_RANDOM_SECRET
+
+JWT_ACCESS_TTL=15m
+JWT_REFRESH_TTL=30d
+
+WEB_ORIGIN=http://websphere.fun
+If HTTPS is enabled, use:
+WEB_ORIGIN=https://websphere.fun
+Remove:
+WEB_ORIGIN=http://localhost:5173
+from the production configuration.
+Also do not use:
+DATABASE_URL=mysql://...@localhost:3306/...
+or:
+REDIS_URL=redis://localhost:6379
+because localhost inside docker-api-1 means the API container itself.
+Correct:
+mysql:3306
+redis:6379
+
+5. Original symptom
+Login returned:
+POST /api/auth/login
+500 Internal Server Error
+with:
+{
+  "code": "INTERNAL_ERROR",
+  "message": "An unexpected server error occurred."
+}
+Initially this looked like an Nginx or Docker networking problem.
+It wasn't.
+
+6. How we proved Nginx was working
+The host Nginx showed:
+136.158.x.x ... "POST /api/auth/login HTTP/1.1" 500
+The web container showed:
+172.18.0.1 ... "POST /api/auth/login HTTP/1.0" 500
+That established:
+Browser -> Host Nginx -> docker-web-1
+was working correctly.
+Also, if Nginx couldn't connect to the API upstream, a typical result would have been:
+502 Bad Gateway
+rather than the API's structured JSON 500 response.
+
+7. Inspecting the web-container proxy
+This command was useful:
+sudo docker exec docker-web-1 nginx -T 2>&1 \
+  | grep -A15 -B5 -E 'location /api|proxy_pass'
+It revealed:
+location /api/ {
+    proxy_pass http://api:3000/;
+}
+which confirmed the /api request was being routed internally.
+
+8. Check Docker DNS
+Verify that the API container can resolve MySQL:
+sudo docker exec docker-api-1 getent hosts mysql
+Verify Redis:
+sudo docker exec docker-api-1 getent hosts redis
+Verify the web container can resolve the API:
+sudo docker exec docker-web-1 getent hosts api
+If they return Docker IP addresses such as:
+172.18.0.x
+Docker DNS is working.
+
+9. Check environment variables
+The following command helped confirm the API configuration:
+sudo docker exec docker-api-1 env \
+  | grep -Ei 'DB|DATABASE|MYSQL|REDIS|PORT'
+It showed:
+DATABASE_URL=mysql://websphere:...@mysql:3306/websphere
+REDIS_URL=redis://redis:6379
+PORT=3000
+That eliminated Docker hostnames as the problem.
+
+10. Verify MySQL directly
+The database credentials were tested with:
+sudo docker exec docker-mysql-1 \
+  mysql -uwebsphere -p -D websphere -e 'SELECT 1;'
+Then:
+sudo docker exec docker-mysql-1 \
+  mysql -uwebsphere -p -D websphere -e 'SHOW TABLES;'
+MySQL itself was reachable and healthy.
+However, the required application tables were missing.
+
+11. Why docker logs initially showed nothing
+The API uses a NestJS global exception filter:
+/app/apps/api/dist/api-exception.filter.js
+It caught every unexpected exception and returned:
+{
+  "code": "INTERNAL_ERROR",
+  "message": "An unexpected server error occurred."
+}
+but it did not log the actual exception.
+The relevant behavior was essentially:
+catch(exception, host) {
+    // determine status/body
+
+    response
+        .status(status)
+        .json(body);
+}
+There was no:
+console.error(exception);
+So:
+sudo docker logs -f docker-api-1
+appeared silent.
+
+12. Temporary exception logging
+For troubleshooting, logging was added before the generic response:
+console.error("UNHANDLED API ERROR:", exception);
+The running compiled file was:
+/app/apps/api/dist/api-exception.filter.js
+A temporary container patch can be made with:
+sudo docker exec docker-api-1 sh -c \
+"sed -i '/response.status(status).json/i\
+        console.error(\"UNHANDLED API ERROR:\", exception);' \
+/app/apps/api/dist/api-exception.filter.js"
+Restart:
+sudo docker restart docker-api-1
+Then:
+sudo docker logs -f docker-api-1
+Retrying login finally revealed the real error.
+Important
+Editing:
+/app/apps/api/dist/*.js
+inside a running container should only be used for diagnostics.
+The change disappears when the container is recreated.
+If permanent error logging is wanted, change the original TypeScript source, probably something similar to:
+apps/api/src/api-exception.filter.ts
+and rebuild the Docker image.
+
+13. Actual root cause
+The real error was:
+PrismaClientKnownRequestError
+
+Invalid prisma.user.findUnique() invocation:
+
+The table `User` does not exist in the current database.
+
+code: P2021
+modelName: User
+table: User
+So the real problem was:
+API       OK
+Nginx     OK
+Docker    OK
+MySQL     OK
+Redis     OK
+
+Prisma database schema: MISSING
+The API connected successfully to MySQL but the initial Prisma migrations had never been applied.
+
+14. Prisma migration files
+The image contained:
+/app/prisma/schema.prisma
+
+/app/prisma/migrations/
+    migration_lock.toml
+    20260827000000_initial/
+        migration.sql
+
+/app/prisma/seed.ts
+This was checked with:
+sudo docker exec docker-api-1 sh -c \
+'find /app/prisma -maxdepth 3 -type f -print'
+
+15. The decisive fix: apply the Prisma migration
+The important fix was applying:
+20260827000000_initial
+to MySQL.
+Normally:
+sudo docker exec docker-api-1 sh -c \
+'cd /app && pnpm exec prisma migrate deploy --schema=prisma/schema.prisma'
+If pnpm exec prisma is unavailable, the reliable fallback for this image is to invoke the locally installed Prisma CLI directly:
+sudo docker exec docker-api-1 sh -c '
+PRISMA=$(find /app/node_modules/.pnpm \
+  -path "*/node_modules/prisma/build/index.js" \
+  -print -quit)
+
+node "$PRISMA" migrate deploy \
+  --schema=/app/prisma/schema.prisma
+'
+That is the command that addresses the actual failure:
+P2021: table User does not exist
+After migration:
+sudo docker restart docker-api-1
+
+16. Why npx prisma failed
+This command:
+npx prisma migrate status
+returned:
+sh: prisma: not found
+The Prisma package existed under the pnpm-managed node_modules, but the CLI executable was not available through the normal executable PATH expected by npx.
+Therefore either:
+pnpm exec prisma ...
+or direct execution of:
+node_modules/.pnpm/.../node_modules/prisma/build/index.js
+was needed.
+
+17. Verify migration success
+Check the tables:
+sudo docker exec docker-mysql-1 \
+  mysql -uwebsphere -p -D websphere \
+  -e 'SHOW TABLES;'
+You should see application tables including:
+User
+and normally:
+_prisma_migrations
+Check migration history:
+sudo docker exec docker-mysql-1 \
+  mysql -uwebsphere -p -D websphere \
+  -e 'SELECT migration_name, finished_at FROM _prisma_migrations;'
+You should see:
+20260827000000_initial
+with a completed finished_at.
+
+18. What the HTTP status codes told us
+Result
+Meaning
+502 Bad Gateway
+Nginx cannot reach its upstream
+500 INTERNAL_ERROR
+Request reached the Node API but application code crashed
+Prisma P2021
+Expected table does not exist
+401 Unauthorized
+API is now functioning; credentials/user are invalid
+Successful registration
+Database schema and auth path are functioning
+
+After migrations, login returning:
+401
+was actually progress.
+It meant the database error was gone and the authentication logic was now executing normally.
+
+19. Useful troubleshooting sequence
+For future deployments, use this order rather than changing several configurations at once:
+# 1. Check containers
+sudo docker ps
+
+# 2. Check public Nginx
+sudo tail -f /var/log/nginx/access.log /var/log/nginx/error.log
+
+# 3. Check frontend/container Nginx
+sudo docker logs -f docker-web-1
+
+# 4. Inspect internal proxy config
+sudo docker exec docker-web-1 nginx -T
+
+# 5. Verify Docker DNS
+sudo docker exec docker-web-1 getent hosts api
+sudo docker exec docker-api-1 getent hosts mysql
+sudo docker exec docker-api-1 getent hosts redis
+
+# 6. Verify API environment
+sudo docker exec docker-api-1 env \
+  | grep -Ei 'DATABASE|MYSQL|REDIS|PORT|ORIGIN'
+
+# 7. Check API
+sudo docker logs -f docker-api-1
+
+# 8. Check MySQL
+sudo docker exec docker-mysql-1 \
+  mysql -uwebsphere -p -D websphere -e 'SHOW TABLES;'
+
+# 9. Check Prisma migration files
+sudo docker exec docker-api-1 sh -c \
+'find /app/prisma/migrations -maxdepth 2 -type f -print'
+
+# 10. Apply migrations
+sudo docker exec docker-api-1 sh -c '
+PRISMA=$(find /app/node_modules/.pnpm \
+  -path "*/node_modules/prisma/build/index.js" \
+  -print -quit)
+
+node "$PRISMA" migrate deploy \
+  --schema=/app/prisma/schema.prisma
+'
+
+# 11. Restart API
+sudo docker restart docker-api-1
+
+20. Changes to keep
+Keep the host proxy:
+proxy_pass http://127.0.0.1:8080;
+Keep the internal API proxy:
+location /api/ {
+    proxy_pass http://api:3000/;
+}
+Keep Docker hostnames in application configuration:
+DATABASE_URL=mysql://...@mysql:3306/websphere
+REDIS_URL=redis://redis:6379
+Set production origin to the actual website:
+WEB_ORIGIN=https://websphere.fun
+or, until HTTPS is enabled:
+WEB_ORIGIN=http://websphere.fun
+
+21. Things to remove or avoid
+Do not use:
+WEB_ORIGIN=http://localhost:5173
+in production.
+Do not configure API → MySQL as:
+localhost:3306
+Do not configure API → Redis as:
+localhost:6379
+Do not permanently edit:
+/app/apps/api/dist/*.js
+inside a live container.
+Do not change the working:
+proxy_pass http://api:3000/;
+trailing-slash behavior unless the backend route structure changes.
+
+22. Recommended Docker startup improvement
+The deployment problem happened because the API started before the Prisma schema had been deployed.
+A production deployment should explicitly run migrations as part of deployment.
+For example:
+docker compose up -d mysql redis
+
+docker compose run --rm api \
+  pnpm exec prisma migrate deploy \
+  --schema=prisma/schema.prisma
+
+docker compose up -d
+If the image doesn't expose the Prisma CLI through pnpm, use a dedicated migration command/container instead.
+The important principle is:
+Start database
+      ↓
+Apply Prisma migrations
+      ↓
+Start API
+      ↓
+Start/expose frontend
+This prevents a fresh database from producing P2021 errors.
+
+23. Security cleanup
+The JWT access and refresh secrets were exposed during troubleshooting. They should now be replaced.
+Generate two new secrets:
+openssl rand -base64 48
+openssl rand -base64 48
+Update:
+JWT_ACCESS_SECRET=<new-secret-1>
+JWT_REFRESH_SECRET=<new-secret-2>
+Then recreate the API container so it receives the new values:
+sudo docker compose up -d --force-recreate api
+Also consider replacing the simple database password used during setup with a strong production password.
+
+Final root-cause summary
+The reverse proxies and Docker networking were working.
+The actual failure was:
+Prisma P2021
+The table `User` does not exist
+because the initial migration:
+20260827000000_initial
+had not been deployed to the websphere MySQL database.
+Applying the Prisma migration and restarting the API resolved the core authentication failure.

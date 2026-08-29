@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { request, type User } from '../api';
+import { ApiRequestError, request, type User } from '../api';
 
 type Notice = (message: string) => void;
 type Task = { id: string; title: string; projectId: string; deadline?: string | null; priority: string; status: string };
@@ -45,11 +45,39 @@ export function NotificationsPage({ notify }: { notify: Notice }) {
   return <section className="sp on"><Head title="Notifications" action={<button className="btn-o btn-sm" onClick={() => void markAll()}>Mark All Read</button>} /><div className="cc no-bottom">{items === null ? <Empty>Loading notifications…</Empty> : items.length ? items.map((item) => <div className="notif-item" key={item.id}><div className="ndot" style={{ opacity: item.read ? .35 : 1 }} /><div><div className="ntxt">{item.message}</div><div className="ntime">{new Date(item.createdAt).toLocaleString()}</div></div></div>) : <Empty>You have no notifications yet.</Empty>}</div></section>;
 }
 
-export function ProfilePage({ user, notify }: { user: User; notify: Notice }) {
+export function ProfilePage({ user, onUserUpdated, onSessionInvalidated, notify }: { user: User; onUserUpdated: (user: User) => void; onSessionInvalidated: () => void; notify: Notice }) {
+  const [profile, setProfile] = useState({ fullName: user.fullName, email: user.email, institution: user.institution ?? '', course: user.course ?? '' });
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
   const [prefs, setPrefs] = useState<Record<string, boolean>>({ tasks: true, groupActivity: true, deadlines: true, aiSuggestions: true, profileVisibility: true, activityStatus: true });
+  useEffect(() => { setProfile({ fullName: user.fullName, email: user.email, institution: user.institution ?? '', course: user.course ?? '' }); }, [user]);
   useEffect(() => { void request<Record<string, boolean>>('/notifications/preferences').then((value) => setPrefs((current) => ({ ...current, ...value }))).catch(() => undefined); }, []);
   const toggle = (key: string) => setPrefs((current) => ({ ...current, [key]: !current[key] }));
-  return <section className="sp on"><Head title="Profile & Settings" /><div className="profile-grid"><div className="cc no-bottom"><div className="profile-hero"><div className="profile-avatar">{initials(user.fullName)}</div><div><strong>{user.fullName}</strong><span>Member</span></div></div>{[['Full Name', user.fullName], ['Email', user.email], ['School', user.institution ?? ''], ['Course', user.course ?? '']].map(([label, value]) => <label className="profile-field" key={label}><span className="lbl">{label}</span><input readOnly value={value} placeholder={`Your ${label.toLowerCase()}`} /></label>)}</div><div className="cc no-bottom"><div className="cc-head"><h3>Settings</h3></div><SettingsTitle>Notifications</SettingsTitle><Toggle title="Task Reminders" description="Get notified before task deadlines" checked={prefs.tasks} onChange={() => toggle('tasks')} /><Toggle title="Group Chat Alerts" description="Notify me when someone messages the group" checked={prefs.groupActivity} onChange={() => toggle('groupActivity')} /><Toggle title="Deadline Alerts" description="Notify me 24 hours before project deadlines" checked={prefs.deadlines} onChange={() => toggle('deadlines')} /><Toggle title="AI Suggestions" description="Receive AI-generated project recommendations" checked={prefs.aiSuggestions} onChange={() => toggle('aiSuggestions')} /><SettingsTitle>Privacy</SettingsTitle><Toggle title="Profile Visibility" description="Allow group members to see your profile" checked={prefs.profileVisibility} onChange={() => toggle('profileVisibility')} /><Toggle title="Activity Status" description="Show others when you are online" checked={prefs.activityStatus} onChange={() => toggle('activityStatus')} /><SettingsTitle>Security</SettingsTitle><Security title="Change Password" description="Update your account password" action="Change" onClick={() => notify('Password reset instructions will be sent to your email.')} /><Security danger title="Delete Account" description="Permanently remove your WebSphere account" action="Delete" onClick={() => notify('Please contact your administrator to delete your account.')} /></div></div></section>;
+  const setField = (field: keyof typeof profile, value: string) => { setProfile((current) => ({ ...current, [field]: value })); setErrors((current) => ({ ...current, [field]: '' })); };
+  async function saveProfile(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setSaving(true); setErrors({});
+    try { const updated = await request<User>('/users/me', { method: 'PATCH', body: JSON.stringify(profile) }); onUserUpdated(updated); notify('Profile updated.'); }
+    catch (error) { if (error instanceof ApiRequestError && error.fields) setErrors(error.fields); notify(error instanceof Error ? error.message : 'Profile could not be updated.'); }
+    finally { setSaving(false); }
+  }
+  async function uploadAvatar(file?: File) {
+    if (!file) return;
+    const form = new FormData(); form.append('file', file); setUploading(true);
+    try { const updated = await request<User>('/users/me/avatar', { method: 'POST', body: form }); onUserUpdated(updated); notify('Profile photo updated.'); }
+    catch (error) { notify(error instanceof Error ? error.message : 'Avatar could not be uploaded.'); }
+    finally { setUploading(false); }
+  }
+  async function changePassword(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const data = new FormData(event.currentTarget);
+    if (data.get('password') !== data.get('confirm')) return notify('Your password does not match.');
+    setSaving(true);
+    try { await request('/auth/password/change', { method: 'POST', body: JSON.stringify({ oldPassword: data.get('oldPassword'), password: data.get('password'), confirm: data.get('confirm') }) }); notify('Password changed. Please sign in again.'); onSessionInvalidated(); }
+    catch (error) { notify(error instanceof Error ? error.message : 'Password could not be changed.'); }
+    finally { setSaving(false); }
+  }
+  return <section className="sp on"><Head title="Profile & Settings" /><div className="profile-grid"><form className="cc no-bottom" onSubmit={(event) => void saveProfile(event)}><div className="profile-hero">{user.avatarUrl ? <img className="profile-avatar profile-avatar-image" src={user.avatarUrl} alt="Profile" /> : <div className="profile-avatar">{initials(user.fullName)}</div>}<div><strong>{user.fullName}</strong><span>Member</span></div><label className={`btn-o btn-sm profile-avatar-action ${uploading ? 'disabled' : ''}`}>{uploading ? 'Uploading…' : 'Change photo'}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} onChange={(event) => void uploadAvatar(event.target.files?.[0])} /></label></div>{([['fullName', 'Full Name'], ['email', 'Email'], ['institution', 'School'], ['course', 'Course']] as const).map(([field, label]) => <label className="profile-field" key={field}><span className="lbl">{label}</span><input value={profile[field]} type={field === 'email' ? 'email' : 'text'} onChange={(event) => setField(field, event.target.value)} placeholder={`Your ${label.toLowerCase()}`} /><span className="profile-error">{errors[field]}</span></label>)}<button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save Profile'}</button></form><div className="cc no-bottom"><div className="cc-head"><h3>Settings</h3></div><SettingsTitle>Notifications</SettingsTitle><Toggle title="Task Reminders" description="Get notified before task deadlines" checked={prefs.tasks} onChange={() => toggle('tasks')} /><Toggle title="Group Chat Alerts" description="Notify me when someone messages the group" checked={prefs.groupActivity} onChange={() => toggle('groupActivity')} /><Toggle title="Deadline Alerts" description="Notify me 24 hours before project deadlines" checked={prefs.deadlines} onChange={() => toggle('deadlines')} /><Toggle title="AI Suggestions" description="Receive AI-generated project recommendations" checked={prefs.aiSuggestions} onChange={() => toggle('aiSuggestions')} /><SettingsTitle>Privacy</SettingsTitle><Toggle title="Profile Visibility" description="Allow group members to see your profile" checked={prefs.profileVisibility} onChange={() => toggle('profileVisibility')} /><Toggle title="Activity Status" description="Show others when you are online" checked={prefs.activityStatus} onChange={() => toggle('activityStatus')} /><SettingsTitle>Security</SettingsTitle><Security title="Change Password" description="Update your account password" action={changingPassword ? 'Cancel' : 'Change'} onClick={() => setChangingPassword((value) => !value)} />{changingPassword ? <form className="password-change-form" onSubmit={(event) => void changePassword(event)}><input className="ifield" required name="oldPassword" type="password" placeholder="Current password" /><input className="ifield" required minLength={8} name="password" type="password" placeholder="New password" /><input className="ifield" required minLength={8} name="confirm" type="password" placeholder="Confirm new password" /><button className="btn btn-sm" disabled={saving}>{saving ? 'Changing…' : 'Change Password'}</button></form> : null}<Security danger title="Delete Account" description="Permanently remove your WebSphere account" action="Delete" onClick={() => notify('Please contact your administrator to delete your account.')} /></div></div></section>;
 }
 
 export function TrackerPage({ notify }: { notify: Notice }) {

@@ -1,31 +1,45 @@
 services:
   mysql:
     image: mysql:8.4
-    environment: { MYSQL_DATABASE: websphere, MYSQL_USER: websphere, MYSQL_PASSWORD: websphere, MYSQL_ROOT_PASSWORD: rootpassword }
-    ports: ["3306:3306"]
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-websphere}
+      MYSQL_USER: ${MYSQL_USER:-websphere}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-websphere}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+    ports: ["127.0.0.1:3306:3306"]
     volumes: [mysql_data:/var/lib/mysql]
-    healthcheck: { test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-prootpassword"], interval: 10s, timeout: 5s, retries: 10 }
+    healthcheck: { test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping --host=127.0.0.1 --user=root --silent"], interval: 10s, timeout: 5s, retries: 18 }
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    restart: unless-stopped
+    ports: ["127.0.0.1:6379:6379"]
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 12 }
   api:
-    build: { context: .., dockerfile: docker/Dockerfile.api }
+    build: { context: .., dockerfile: docker/Dockerfile.api, args: { NODE_OPTIONS: "${DOCKER_BUILD_NODE_OPTIONS:---max-old-space-size=512}" } }
+    restart: unless-stopped
     env_file: ../.env
-    environment: { DATABASE_URL: mysql://websphere:websphere@mysql:3306/websphere, REDIS_URL: redis://redis:6379, UPLOAD_DIR: /var/lib/websphere/uploads }
+    environment: { DATABASE_URL: "${DATABASE_URL_DOCKER:-mysql://websphere:websphere@mysql:3306/websphere}", REDIS_URL: "${REDIS_URL_DOCKER:-redis://redis:6379}", UPLOAD_DIR: /var/lib/websphere/uploads }
     volumes: [websphere_uploads:/var/lib/websphere/uploads]
     depends_on: { mysql: { condition: service_healthy }, redis: { condition: service_started } }
+    healthcheck: { test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health || exit 1"], interval: 10s, timeout: 5s, retries: 18, start_period: 20s }
   worker:
-    build: { context: .., dockerfile: docker/Dockerfile.worker }
+    build: { context: .., dockerfile: docker/Dockerfile.worker, args: { NODE_OPTIONS: "${DOCKER_BUILD_NODE_OPTIONS:---max-old-space-size=512}" } }
+    restart: unless-stopped
     env_file: ../.env
-    environment: { DATABASE_URL: mysql://websphere:websphere@mysql:3306/websphere, REDIS_URL: redis://redis:6379 }
+    environment: { DATABASE_URL: "${DATABASE_URL_DOCKER:-mysql://websphere:websphere@mysql:3306/websphere}", REDIS_URL: "${REDIS_URL_DOCKER:-redis://redis:6379}" }
     depends_on: [mysql, redis]
   mcp:
-    build: { context: .., dockerfile: docker/Dockerfile.mcp }
+    build: { context: .., dockerfile: docker/Dockerfile.mcp, args: { NODE_OPTIONS: "${DOCKER_BUILD_NODE_OPTIONS:---max-old-space-size=512}" } }
+    restart: unless-stopped
     env_file: ../.env
-    environment: { DATABASE_URL: mysql://websphere:websphere@mysql:3306/websphere }
+    environment: { DATABASE_URL: "${DATABASE_URL_DOCKER:-mysql://websphere:websphere@mysql:3306/websphere}" }
+    stdin_open: true
     depends_on: [mysql]
   web:
-    build: { context: .., dockerfile: docker/Dockerfile.web }
-    ports: ["8080:80"]
+    build: { context: .., dockerfile: docker/Dockerfile.web, args: { NODE_OPTIONS: "${DOCKER_BUILD_NODE_OPTIONS:---max-old-space-size=512}" } }
+    restart: unless-stopped
+    ports: ["127.0.0.1:8080:80"]
     depends_on: [api]
+    healthcheck: { test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/api/health || exit 1"], interval: 10s, timeout: 5s, retries: 18, start_period: 10s }
 volumes: { mysql_data: {}, websphere_uploads: {} }

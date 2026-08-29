@@ -83,7 +83,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - `// Feature: websphere-platform, Property 2: Logout invalidates every prior token and cached session`
     - Generate random authenticated sessions; after logout assert all prior tokens rejected and session cache not readable (tv bumped)
     - _Requirements: US-007.1, 7.2, 7.3; Design: Property 2_
-  - [-] 2.10 Guided reset, lockout counter, and locked-out email reset path
+  - [x] 2.10 Guided reset, lockout counter, and locked-out email reset path
     - Implement `POST /auth/password/change` (requires old pw + new pw twice), `POST /auth/password/forgot` (email reset link when locked), `POST /auth/password/reset` (token completion); Redis failed-login counter with TTL flips account to `locked` at threshold → `423 ACCOUNT_LOCKED`; wrong old pw → `400 PASSWORD_INCORRECT`; no 2FA
     - Tests to write (integration): guided reset success/wrong-old/mismatch; locked account blocks guided reset; email token completes reset
     - _Requirements: US-006.3–6.6; Design: AuthModule (guidedReset/requestLockedReset), Error Handling (ACCOUNT_LOCKED, PASSWORD_INCORRECT)_
@@ -91,7 +91,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - `// Feature: websphere-platform, Property 3: Locked-out accounts can only reset via the email link`
     - Generate random locked accounts; assert guided reset always denied and only emailed token path succeeds
     - _Requirements: US-006.5; Design: Property 3_
-  - [ ]* 2.12 Unit tests for guided-reset branches
+  - [x]* 2.12 Unit tests for guided-reset branches
     - Cover correct old password, wrong old password, mismatched confirmation
     - _Requirements: US-006.3, 6.4; Design: Testing Strategy (unit tests)_
 
@@ -99,20 +99,20 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
   - Ensure all tests pass, ask the user if questions arise.
 
 - [-] 4. Phase 2 — Profile management and avatar upload
-  - [-] 4.1 Profile view and edit
+  - [x] 4.1 Profile view and edit
     - Implement `GET /users/me` and `PATCH /users/me` (name, email, institution, course) with Zod validation and field-level errors; build the web Profile page consuming the shared client
     - Tests to write (integration): display profile; valid edit persists + confirms; invalid edit identifies fields
     - _Requirements: US-005.1–5.3; Design: UsersModule_
-  - [-] 4.2 Avatar upload to Linux instance persistent volume
+  - [x] 4.2 Avatar upload to Linux instance persistent volume
     - Implement `POST /users/me/avatar` (upload → `StorageService`), persist `avatarUrl`; web upload control
     - Tests to write (integration): upload stores object and updates `avatarUrl`
     - _Requirements: US-005.1, 5.2; Design: UsersModule (avatar), SharedInfra (storage)_
-  - [ ]* 4.3 Unit tests for profile validation branches
+  - [x]* 4.3 Unit tests for profile validation branches
     - Invalid email/empty name rejection paths
     - _Requirements: US-005.3; Design: Testing Strategy_
 
 - [-] 5. Phase 3 — Real-time infrastructure (Socket.IO + Redis adapter + presence)
-  - [-] 5.1 Socket.IO gateway with Redis adapter and authenticated room management
+  - [x] 5.1 Socket.IO gateway with Redis adapter and authenticated room management
     - Implement `RealtimeModule` gateway (Socket.IO 4.7+) with Redis adapter, JWT handshake auth, and `group:join`/`project:join` ack handlers using the shared event contracts
     - Tests to write (integration): authenticated connect, room join ack, unauthorized handshake rejected
     - _Requirements: NFR 7; Design: RealtimeModule, Cross-cutting contracts (Socket.IO events)_

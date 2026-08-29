@@ -14,5 +14,5 @@ export function App() {
   const notify = useCallback((message: string) => setToast(message), []);
 
   if (restoring) return <main className="loading-shell">Loading WebSphere…</main>;
-  return <><>{session ? <Workspace session={session} onLogout={() => setSession(null)} notify={notify} /> : <AuthScreen onAuthenticated={setSession} notify={notify} />}</><Toast message={toast} onDismiss={() => setToast(null)} /></>;
+  return <><>{session ? <Workspace session={session} onSessionChange={setSession} onLogout={() => setSession(null)} notify={notify} /> : <AuthScreen onAuthenticated={setSession} notify={notify} />}</><Toast message={toast} onDismiss={() => setToast(null)} /></>;
 }
