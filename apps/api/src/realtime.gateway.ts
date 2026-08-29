@@ -2,7 +2,7 @@ import { HttpException, OnApplicationShutdown } from '@nestjs/common';
 import { ConnectedSocket, MessageBody, OnGatewayInit, SubscribeMessage, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import { createAdapter } from '@socket.io/redis-adapter';
 import type { Redis } from 'ioredis';
-import { Server, Socket } from 'socket.io';
+import { Namespace, Server, Socket } from 'socket.io';
 import type { AckDto, ApiError, ClientToServerEvents, ServerToClientEvents } from '@websphere/shared';
 import { AppService } from './app.service.js';
 import { RedisService } from './redis.service.js';
@@ -13,12 +13,13 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
   private readonly presence = new Map<string, Set<string>>();
   private adapterClients: Redis[] = [];
   constructor(private readonly app: AppService, private readonly redis: RedisService) {}
-  async afterInit(server: Server) {
+  async afterInit(server: Server | Namespace) {
     const publisher = this.redis.duplicateClient();
     const subscriber = this.redis.duplicateClient();
     this.adapterClients = [publisher, subscriber];
     await Promise.all([publisher.connect(), subscriber.connect()]);
-    server.adapter(createAdapter(publisher, subscriber));
+    const ioServer = 'server' in server ? server.server : server;
+    ioServer.adapter(createAdapter(publisher, subscriber));
   }
   async handleConnection(socket: Socket) { try { const token = socket.handshake.auth?.token; const caller = await this.app.caller(token ? `Bearer ${token}` : undefined); socket.data.caller = caller; this.presence.set(caller.id, new Set([...(this.presence.get(caller.id) ?? []), socket.id])); } catch { socket.disconnect(true); } }
   publishPollTally(groupId: string, tally: unknown) { this.server.to(`group:${groupId}`).emit('poll:tally', tally); }

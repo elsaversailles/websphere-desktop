@@ -7,6 +7,21 @@ const socket = (caller?: { id: string }) => ({
 }) as any;
 
 describe('RealtimeGateway room authorization', () => {
+  it('installs the Redis adapter on the underlying Socket.IO server for a namespace gateway', async () => {
+    const publisher = { connect: vi.fn().mockResolvedValue(undefined) };
+    const subscriber = { connect: vi.fn().mockResolvedValue(undefined) };
+    const redis = { duplicateClient: vi.fn().mockReturnValueOnce(publisher).mockReturnValueOnce(subscriber) };
+    const installAdapter = vi.fn();
+    const namespace = { adapter: {}, server: { adapter: installAdapter } };
+    const gateway = new RealtimeGateway({} as any, redis as any);
+
+    await gateway.afterInit(namespace as any);
+
+    expect(publisher.connect).toHaveBeenCalledOnce();
+    expect(subscriber.connect).toHaveBeenCalledOnce();
+    expect(installAdapter).toHaveBeenCalledWith(expect.any(Function));
+  });
+
   it('disconnects a socket whose JWT cannot be authenticated', async () => {
     const app = { caller: vi.fn().mockRejectedValue(new Error('invalid')) };
     const gateway = new RealtimeGateway(app as any, {} as any);
