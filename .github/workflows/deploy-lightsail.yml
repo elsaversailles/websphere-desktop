@@ -97,7 +97,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           remote_deploy_script="/tmp/websphere-deploy-${GITHUB_SHA}.sh"
-          printf -v remote_command 'bash %q -- %q %q %q %q' \
+          printf -v remote_command 'bash -- %q %q %q %q %q' \
             "$remote_deploy_script" "$LIGHTSAIL_DEPLOY_PATH" "$GITHUB_SHA" \
             "/tmp/websphere-${GITHUB_SHA}.tar.gz" "$LIGHTSAIL_COMPOSE_PROJECT"
           deploy_status=0
