@@ -110,5 +110,5 @@ jobs:
             echo
             echo "Release: \`${GITHUB_SHA}\`"
             echo
-            echo 'Services were built and started in this order: `mysql → redis → api → worker → mcp → web`.'
+            echo 'Services were built and started in this order: `mysql → redis → coturn (when enabled) → api → worker → mcp → web`.'
           } >> "$GITHUB_STEP_SUMMARY"

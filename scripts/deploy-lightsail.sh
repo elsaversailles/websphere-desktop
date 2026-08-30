@@ -244,6 +244,8 @@ for service in "${SERVICES[@]}"; do
   [[ "$(docker_cmd inspect --format '{{.State.Status}}' "$container_id")" == running ]] || fail "$service is not running after deployment"
 done
 
-ln -sfnT "$RELEASE_DIR" "$DEPLOY_ROOT/active-release" 2>/dev/null || true
+ACTIVE_RELEASE_LINK="$DEPLOY_ROOT/active-release"
+ln -sfnT "$RELEASE_DIR" "$ACTIVE_RELEASE_LINK" || fail 'could not update the active-release symlink'
+[[ "$(readlink -f "$ACTIVE_RELEASE_LINK")" == "$RELEASE_DIR" ]] || fail 'active-release does not point to the deployed release'
 compose ps
 log "release $RELEASE_ID deployed successfully; every service is running"
