@@ -33,7 +33,6 @@ services:
       - --cert=/etc/letsencrypt/live/${TURN_CERT_NAME:-}/fullchain.pem
       - --pkey=/etc/letsencrypt/live/${TURN_CERT_NAME:-}/privkey.pem
       - --no-cli
-      - --no-loopback-peers
       - --no-multicast-peers
     ports:
       - "3478:3478/tcp"
