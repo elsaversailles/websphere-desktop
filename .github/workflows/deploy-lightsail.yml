@@ -73,7 +73,7 @@ jobs:
           printf '%s\n' "$LIGHTSAIL_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/lightsail" "$HOME/.ssh/known_hosts"
 
-      - name: Upload release archive
+      - name: Upload release artifacts
         shell: bash
         env:
           LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
@@ -84,6 +84,10 @@ jobs:
             -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
             "websphere-${GITHUB_SHA}.tar.gz" \
             "$LIGHTSAIL_USER@$LIGHTSAIL_HOST:/tmp/websphere-${GITHUB_SHA}.tar.gz"
+          scp -P "$LIGHTSAIL_SSH_PORT" -i "$HOME/.ssh/lightsail" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+            scripts/deploy-lightsail.sh \
+            "$LIGHTSAIL_USER@$LIGHTSAIL_HOST:/tmp/websphere-deploy-${GITHUB_SHA}.sh"
 
       - name: Build and start services sequentially
         shell: bash
@@ -92,14 +96,21 @@ jobs:
           LIGHTSAIL_USER: ${{ secrets.LIGHTSAIL_USER }}
         run: |
           set -Eeuo pipefail
-          printf -v remote_command 'bash -s -- %q %q %q %q' \
-            "$LIGHTSAIL_DEPLOY_PATH" "$GITHUB_SHA" "/tmp/websphere-${GITHUB_SHA}.tar.gz" \
-            "$LIGHTSAIL_COMPOSE_PROJECT"
-          ssh -p "$LIGHTSAIL_SSH_PORT" -i "$HOME/.ssh/lightsail" \
+          remote_deploy_script="/tmp/websphere-deploy-${GITHUB_SHA}.sh"
+          printf -v remote_command 'bash %q -- %q %q %q %q' \
+            "$remote_deploy_script" "$LIGHTSAIL_DEPLOY_PATH" "$GITHUB_SHA" \
+            "/tmp/websphere-${GITHUB_SHA}.tar.gz" "$LIGHTSAIL_COMPOSE_PROJECT"
+          deploy_status=0
+          # Keep Docker Compose from consuming unread deployment commands from SSH stdin.
+          ssh -n -p "$LIGHTSAIL_SSH_PORT" -i "$HOME/.ssh/lightsail" \
             -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
-            "$LIGHTSAIL_USER@$LIGHTSAIL_HOST" "$remote_command" \
-            < scripts/deploy-lightsail.sh
+            "$LIGHTSAIL_USER@$LIGHTSAIL_HOST" "$remote_command" || deploy_status=$?
+          printf -v cleanup_command 'rm -f -- %q' "$remote_deploy_script"
+          ssh -n -p "$LIGHTSAIL_SSH_PORT" -i "$HOME/.ssh/lightsail" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+            "$LIGHTSAIL_USER@$LIGHTSAIL_HOST" "$cleanup_command" || true
+          exit "$deploy_status"
 
       - name: Deployment summary
         if: success()
