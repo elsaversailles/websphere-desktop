@@ -167,6 +167,12 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - `// Feature: websphere-platform, Property 9: Presence is scoped to the caller's group`
     - Generate random online-user/group graphs; assert returned presence only includes shared-group users
     - _Requirements: US-008.2; Design: Property 9_
+  - [x] 7.5 CGNAT-safe group voice and video calls
+    - Implement authenticated, group-scoped WebRTC mesh calls for up to six participants. Use Socket.IO only for authorized call invitations, join/leave cleanup, and offer/answer/ICE-candidate signaling; keep browser media peer-to-peer or relayed by TURN.
+    - Add voice mute, video camera on/off, leave-call, connection, and relay/setup-failure UI states. Fetch fresh ICE servers immediately before joining; reject non-members and joins beyond the six-participant limit without exposing credential details.
+    - Deploy self-hosted coturn on Lightsail with STUN/TURN UDP/TCP/TLS, a bounded relay range, Let’s Encrypt TLS reload support, and API-issued short-lived REST credentials derived from the server-only TURN shared secret.
+    - Tests verified: group authorization, credential format/expiry/signature, six-member capacity rejection, signaling authorization, invite delivery across joined group rooms, and leave/disconnect cleanup; API type-check and web production build pass. Production rollout verified.
+    - _Requirements: US-016.3, NFR 10, 11; Design: shared realtime contracts, WebRTC/TURN deployment_
 
 - [x] 8. Phase 6 — Ideas, voting, and idea-to-project conversion
   - [x] 8.1 Idea submit, view, and author-only revise
@@ -481,7 +487,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
 - All 25 correctness Properties have a dedicated fast-check sub-task (min 100 runs), tagged in the required comment format, placed in the phase where the behavior is built: Properties 1–4,6 (Phase 1 Auth), 5,7 (Phase 4 Groups), 8,9 (Phase 5 Chat/Presence), 10,12 (Phase 6 Ideas/Voting), 13,20 (Phase 8 Tasks), 11,25 (Phase 12 AI), 14–19 (Phase 13 Analytics), 21 (Phase 14 Notifications), 22 (Phase 15 Integrations), 23 (Phase 16 Support), 24 (Phase 17 Admin).
 - US-031 is intentionally never implemented; task 11.4 asserts no manual progress API/UI exists (Property 13 also enforces this).
 - Checkpoints ensure incremental validation; the system is runnable from Phase 0 and grows each phase.
-- The Expo mobile client and WebRTC audio/video remain later phases; only their enabling architecture (shared contracts, Socket.IO signaling seam, Expo shell) is built here.
+- The Expo mobile client remains a later phase. Browser WebRTC audio/video calling is implemented with shared Socket.IO contracts and CGNAT-safe coturn relay support; mobile feature parity remains out of scope.
 
 ## Task Dependency Graph
 
@@ -505,7 +511,7 @@ The waves below schedule leaf sub-tasks for parallel execution. Tasks in the sam
     { "id": 12, "tasks": ["6.2", "6.3", "6.4"] },
     { "id": 13, "tasks": ["6.5", "6.6", "7.1"] },
     { "id": 14, "tasks": ["7.2", "7.3"] },
-    { "id": 15, "tasks": ["7.4", "8.1"] },
+    { "id": 15, "tasks": ["7.4", "7.5", "8.1"] },
     { "id": 16, "tasks": ["8.2", "8.4"] },
     { "id": 17, "tasks": ["8.3", "8.5", "10.1"] },
     { "id": 18, "tasks": ["10.2", "10.3", "10.4"] },
