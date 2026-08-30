@@ -53,6 +53,38 @@ Optional environment variables:
 
 The Lightsail firewall should expose only the public host-Nginx ports (normally 80 and 443) plus the restricted SSH port. MySQL (`3306`), Redis (`6379`), and the Docker web port (`8080`) are bound to server loopback and must not be exposed by the Lightsail firewall.
 
+## CGNAT-safe voice and video calls
+
+WebRTC needs a TURN relay for users behind CGNAT or restrictive firewalls. WebSphere ships a self-hosted coturn profile; it is not proxied through Nginx. Add these production values to the shared `.env` file (do not commit it):
+
+```dotenv
+COMPOSE_PROFILES=turn
+TURN_HOST=turn.your-domain.example
+TURN_REALM=websphere
+TURN_SHARED_SECRET=generate-a-random-secret-of-at-least-32-characters
+TURN_EXTERNAL_IP=your-lightsail-static-public-ip
+TURN_CERT_DIR=/etc/letsencrypt
+TURN_CERT_NAME=turn.your-domain.example
+TURN_RELAY_MIN_PORT=49160
+TURN_RELAY_MAX_PORT=49200
+TURN_CREDENTIAL_TTL_SECONDS=3600
+```
+
+Point `turn.your-domain.example` to the instance's static public IP. `TURN_CERT_NAME` is the Let’s Encrypt certificate directory name under `TURN_CERT_DIR/live/`; coturn mounts the entire Let’s Encrypt tree read-only so its `live/` symlinks can resolve into `archive/`. Open the following **inbound** Lightsail and host-firewall rules in addition to the web ports:
+
+- TCP and UDP `3478` for STUN/TURN.
+- TCP and UDP `5349` for TLS TURN.
+- UDP `49160-49200` for relayed media.
+
+After every certificate renewal, reload coturn so the TLS listener uses the new files:
+
+```bash
+cd ~/websphere/current
+COMPOSE_FILE=docker/docker-compose.yml sh docker/reload-coturn-cert.sh
+```
+
+For Certbot, register that command as a deploy hook. The API creates a unique one-hour TURN REST credential only after authenticating the caller and verifying group membership; neither the TURN shared secret nor a reusable TURN password is sent to the browser.
+
 Run host Nginx on ports 80/443 and proxy the site to `http://127.0.0.1:8080`. The web-container Nginx keeps `proxy_pass http://api:3000/` with its trailing slash so `/api/auth/login` reaches the backend as `/auth/login`.
 
 ## Deployment behavior

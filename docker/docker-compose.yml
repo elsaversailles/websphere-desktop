@@ -15,6 +15,34 @@ services:
     restart: unless-stopped
     ports: ["127.0.0.1:6379:6379"]
     healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 12 }
+  coturn:
+    image: coturn/coturn:4.6.2
+    profiles: ["turn"]
+    restart: unless-stopped
+    env_file: ../.env
+    command:
+      - -n
+      - --log-file=stdout
+      - --fingerprint
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SHARED_SECRET:-}
+      - --realm=${TURN_REALM:-websphere}
+      - --external-ip=${TURN_EXTERNAL_IP:-}
+      - --min-port=${TURN_RELAY_MIN_PORT:-49160}
+      - --max-port=${TURN_RELAY_MAX_PORT:-49200}
+      - --cert=/etc/letsencrypt/live/${TURN_CERT_NAME:-}/fullchain.pem
+      - --pkey=/etc/letsencrypt/live/${TURN_CERT_NAME:-}/privkey.pem
+      - --no-cli
+      - --no-loopback-peers
+      - --no-multicast-peers
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "5349:5349/tcp"
+      - "5349:5349/udp"
+      - "${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}/udp"
+    volumes:
+      - "${TURN_CERT_DIR:-./certs}:/etc/letsencrypt:ro"
   api:
     build: { context: .., dockerfile: docker/Dockerfile.api, args: { NODE_OPTIONS: "${DOCKER_BUILD_NODE_OPTIONS:---max-old-space-size=512}" } }
     restart: unless-stopped

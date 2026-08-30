@@ -28,6 +28,9 @@ trap cleanup EXIT
 ENV_FILE="$DEPLOY_ROOT/shared/.env"
 [[ -f "$ENV_FILE" ]] || fail "create the production environment file first: $ENV_FILE"
 chmod 600 "$ENV_FILE"
+COMPOSE_PROFILES="$(sed -n 's/^COMPOSE_PROFILES=//p' "$ENV_FILE" | tail -n 1)"
+export COMPOSE_PROFILES
+if [[ ",$COMPOSE_PROFILES," == *,turn,* ]]; then SERVICES=(mysql redis coturn api worker mcp web); fi
 
 RELEASE_DIR="$DEPLOY_ROOT/releases/$RELEASE_ID"
 mkdir -p "$RELEASE_DIR"
@@ -229,6 +232,7 @@ log "deploying release $RELEASE_ID from $RELEASE_DIR"
 compose config --quiet
 start_infrastructure_service mysql
 start_infrastructure_service redis
+if [[ ",$COMPOSE_PROFILES," == *,turn,* ]]; then start_infrastructure_service coturn; fi
 deploy_built_service api
 deploy_built_service worker
 deploy_built_service mcp

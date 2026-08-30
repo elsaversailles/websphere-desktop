@@ -7,12 +7,13 @@ import { LocalStorageService } from './local-storage.service.js';
 import { RedisService } from './redis.service.js';
 import { GroupScope, ProjectScope, Public, Roles } from './auth.decorators.js';
 import { RealtimeGateway } from './realtime.gateway.js';
+import { TurnService } from './turn.service.js';
 
 const parse = <T>(schema: z.ZodType<T>, value: unknown) => { const result = schema.safeParse(value); if (!result.success) { const fields = Object.fromEntries(result.error.issues.map((issue) => [String(issue.path[0] ?? 'body'), issue.message])); throw new HttpException({ code: 'VALIDATION_FAILED', message: 'One or more fields are invalid', fields }, 400); } return result.data; };
 
 @Controller()
 export class AppController {
-  constructor(private readonly app: AppService, private readonly storage: LocalStorageService, private readonly redis: RedisService, private readonly realtime: RealtimeGateway) {}
+  constructor(private readonly app: AppService, private readonly storage: LocalStorageService, private readonly redis: RedisService, private readonly realtime: RealtimeGateway, private readonly turn: TurnService) {}
   private caller(auth?: string) { return this.app.caller(auth); }
   @Public() @Get('health') async health() { await this.app.prisma.$queryRaw`SELECT 1`; await this.redis.ping(); return { ok: true, database: 'up', redis: 'up', timestamp: new Date().toISOString() }; }
   @Public() @Post(['users', 'auth/register']) register(@Body() body: unknown) { return this.app.register(parse(registerSchema, body)); }
@@ -37,6 +38,7 @@ export class AppController {
   @GroupScope() @Delete('groups/:id/members/:userId') async removeMember(@Headers('authorization') auth: string, @Param() p: any) { return this.app.removeGroupMember(await this.caller(auth), p.id, p.userId); }
   @GroupScope() @Get('groups/:id/hub') async hub(@Headers('authorization') auth: string, @Param('id') id: string) { const caller = await this.caller(auth); await this.app.member(id, caller.id); const [group, ideas, messages, poll] = await Promise.all([this.app.group(caller, id), this.app.ideas(caller, id), this.app.prisma.chatMessage.findMany({ where: { groupId: id }, orderBy: { createdAt: 'desc' }, take: 50 }), this.app.prisma.ideaPoll.findFirst({ where: { groupId: id, open: true }, orderBy: { createdAt: 'desc' }, select: { id: true } })]); return { group, ideas, messages, poll: poll ? await this.app.pollResults(caller, poll.id) : null }; }
   @GroupScope() @Get('groups/:id/messages') async messages(@Headers('authorization') auth: string, @Param('id') id: string, @Query('cursor') cursor?: string) { const caller = await this.caller(auth); await this.app.member(id, caller.id); return this.app.prisma.chatMessage.findMany({ where: { groupId: id, ...(cursor ? { id: { lt: cursor } } : {}) }, orderBy: { createdAt: 'desc' }, take: 50 }); }
+  @GroupScope() @Get('groups/:id/realtime/ice-servers') async iceServers(@Headers('authorization') auth: string, @Param('id') id: string) { const caller = await this.caller(auth); await this.app.member(id, caller.id); return { iceServers: this.turn.iceServers(caller.id) }; }
 
   @GroupScope() @Post('groups/:id/ideas') async idea(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.idea(await this.caller(auth), id, parse(ideaSchema, body)); }
   @GroupScope() @Get('groups/:id/ideas') async ideas(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.ideas(await this.caller(auth), id); }

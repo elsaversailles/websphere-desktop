@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { RealtimeGateway } from './realtime.gateway.js';
 
 const socket = (caller?: { id: string }) => ({
-  id: 'socket-1', data: { caller }, handshake: { auth: {} }, join: vi.fn(), disconnect: vi.fn(),
+  id: 'socket-1', data: { caller }, handshake: { auth: {} }, join: vi.fn(), leave: vi.fn(), to: vi.fn(() => ({ emit: vi.fn() })), rooms: new Set<string>(['socket-1']), disconnect: vi.fn(),
 }) as any;
 
 describe('RealtimeGateway room authorization', () => {
@@ -44,5 +44,30 @@ describe('RealtimeGateway room authorization', () => {
     const gateway = new RealtimeGateway(app as any, {} as any);
     const result = await gateway.projectJoin(socket({ id: 'user-1' }), 'project-1');
     expect(result).toEqual({ ok: false, error: { code: 'RBAC_FORBIDDEN', message: 'Denied' } });
+  });
+
+  it('creates an authorized group call and notifies the group without exposing a media stream to the server', async () => {
+    const groupEmit = vi.fn();
+    const gateway = new RealtimeGateway({ member: vi.fn().mockResolvedValue({}) } as any, {} as any);
+    gateway.server = { in: vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) })), to: vi.fn(() => ({ emit: groupEmit })) } as any;
+    const client = socket({ id: 'user-1' });
+
+    const result = await gateway.callJoin(client, { groupId: 'group-1', kind: 'video' });
+
+    expect(result).toEqual({ ok: true, participants: [] });
+    expect(client.join).toHaveBeenCalledWith('call:group-1');
+    expect(gateway.server.to).toHaveBeenCalledWith('group:group-1');
+    expect(groupEmit).toHaveBeenCalledWith('call:invite', expect.objectContaining({ groupId: 'group-1', kind: 'video' }));
+  });
+
+  it('rejects a seventh participant before joining the call room', async () => {
+    const gateway = new RealtimeGateway({ member: vi.fn().mockResolvedValue({}) } as any, {} as any);
+    gateway.server = { in: vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue(Array.from({ length: 6 }, (_, index) => ({ id: `socket-${index}`, data: { caller: { id: `user-${index}` } } }))) })) } as any;
+    const client = socket({ id: 'user-7' });
+
+    const result = await gateway.callJoin(client, { groupId: 'group-1', kind: 'voice' });
+
+    expect(result).toEqual({ ok: false, error: { code: 'CALL_FULL', message: 'This call has reached its six-participant limit' } });
+    expect(client.join).not.toHaveBeenCalled();
   });
 });

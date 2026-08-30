@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import { clearSession, request, saveSession, type Session, type User } from '../api';
+import { io } from 'socket.io-client';
+import type { CallKind } from '@websphere/shared';
+import { clearSession, getAccessToken, request, saveSession, socketBaseUrl, type Session, type User } from '../api';
 import { Dashboard } from './Dashboard';
 import { GroupChatPage } from './GroupChatPage';
 import { GroupsPage } from './GroupsPage';
@@ -27,7 +29,19 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const administrator = session.role === 'Administrator';
   const [page, setPage] = useState<Page>(administrator ? 'admin' : 'dashboard');
   const [selectedGroupId, setSelectedGroupId] = useState('');
+  const [incomingCall, setIncomingCall] = useState<{ groupId: string; kind: CallKind } | null>(null);
   const sections = administrator ? adminSections : userSections;
+
+  useEffect(() => {
+    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
+    socket.on('connect', () => {
+      void request<Array<{ id: string }>>('/groups').then((groups) => groups.forEach((group) => socket.emit('group:join', group.id, () => undefined))).catch(() => undefined);
+    });
+    socket.on('call:invite', (event: { groupId: string; kind: CallKind; initiatorUserId: string }) => {
+      if (event.initiatorUserId !== session.user.id) setIncomingCall({ groupId: event.groupId, kind: event.kind });
+    });
+    return () => socket.disconnect();
+  }, [session.access, session.user.id]);
 
   async function logout() {
     try { await request('/auth/logout', { method: 'POST' }); } catch { /* local session is always cleared */ }
@@ -40,7 +54,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     onSessionChange(next);
   }
 
-  return <main className="page on"><div className="layout">
+  return <main className="page on">{incomingCall && (page !== 'chat' || incomingCall.groupId !== selectedGroupId) ? <div className="workspace-call-invite call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => { setSelectedGroupId(incomingCall.groupId); setPage('chat'); }}>Join call</button><button className="btn-o btn-sm" onClick={() => setIncomingCall(null)}>Dismiss</button></div> : null}<div className="layout">
     <aside className="sidebar">
       <button className="sb-brand" onClick={() => setPage(administrator ? 'admin' : 'dashboard')}><GlobeIcon />WebSphere</button>
       <nav aria-label="Main navigation">{sections.map((section) => <div className="sb-group" key={section.title}><div className="sb-sec">{section.title}</div>{section.links.map((link) => <button className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => setPage(link.id)}><span className="sb-ico"><NavIcon page={link.id} /></span>{link.label}</button>)}</div>)}</nav>
@@ -54,7 +68,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'assistant' ? <AssistantPage notify={notify} /> : null}
       {page === 'admin' ? <AdminPage notify={notify} /> : null}
       {page === 'accounts' ? <AdminAccounts notify={notify} /> : null}
-      {page === 'chat' ? <GroupChatPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} /> : null}
+      {page === 'chat' ? <GroupChatPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} incomingCall={incomingCall?.groupId === selectedGroupId ? incomingCall : null} onIncomingCallHandled={() => setIncomingCall(null)} /> : null}
       {page === 'tasks' ? <TasksPage notify={notify} /> : null}
       {page === 'workflow' ? <ProjectsAnalyticsPage kind="workflow" notify={notify} /> : null}
       {page === 'predictive' ? <ProjectsAnalyticsPage kind="predictive" notify={notify} /> : null}

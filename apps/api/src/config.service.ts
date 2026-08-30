@@ -24,6 +24,21 @@ const environmentSchema = z.object({
   UPLOAD_PUBLIC_PATH: z.string().startsWith('/').default('/uploads'),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-4.1-mini'),
+  TURN_HOST: z.string().min(1).optional(),
+  TURN_REALM: z.string().min(1).default('websphere'),
+  TURN_SHARED_SECRET: z.string().min(32).optional(),
+  TURN_CREDENTIAL_TTL_SECONDS: z.coerce.number().int().min(60).max(86_400).default(3600),
+  TURN_STUN_URL: z.string().min(1).optional(),
+  TURN_EXTERNAL_IP: z.string().min(1).optional(),
+  TURN_CERT_DIR: z.string().min(1).optional(),
+  TURN_CERT_NAME: z.string().min(1).optional(),
+  TURN_RELAY_MIN_PORT: z.coerce.number().int().min(1024).max(65_535).default(49160),
+  TURN_RELAY_MAX_PORT: z.coerce.number().int().min(1024).max(65_535).default(49200),
+}).superRefine((value, context) => {
+  if (value.TURN_RELAY_MIN_PORT > value.TURN_RELAY_MAX_PORT) context.addIssue({ code: z.ZodIssueCode.custom, path: ['TURN_RELAY_MAX_PORT'], message: 'must be greater than or equal to TURN_RELAY_MIN_PORT' });
+  if (value.NODE_ENV === 'production') {
+    for (const key of ['TURN_HOST', 'TURN_SHARED_SECRET', 'TURN_EXTERNAL_IP', 'TURN_CERT_DIR', 'TURN_CERT_NAME'] as const) if (!value[key]) context.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: 'is required in production for CGNAT-safe calls' });
+  }
 });
 
 export type AppConfig = z.infer<typeof environmentSchema>;
