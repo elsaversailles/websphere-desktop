@@ -8,6 +8,16 @@ type Props = { userId: string; selectedGroupId: string; onSelectGroup: (id: stri
 type ActiveCall = { groupId: string; kind: CallKind };
 type RemoteStream = { socketId: string; userId: string; stream: MediaStream };
 
+function mediaDeviceErrorMessage(error: unknown, kind: CallKind) {
+  const name = error instanceof DOMException ? error.name : '';
+  const deviceName = kind === 'video' ? 'microphone or camera' : 'microphone';
+  if (name === 'NotAllowedError' || name === 'SecurityError') return `Please allow ${deviceName} access to join the call.`;
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return `No ${deviceName} was found. Connect or enable one, then try again.`;
+  if (name === 'NotReadableError' || name === 'TrackStartError') return `Your ${deviceName} is being used by another application. Close it, then try again.`;
+  if (name === 'AbortError') return `Could not start the ${deviceName}. Please try again.`;
+  return error instanceof Error ? error.message : 'Could not start the call.';
+}
+
 function MediaTile({ label, stream, muted, local }: { label: string; stream: MediaStream; muted?: boolean; local?: boolean }) {
   const media = useRef<HTMLVideoElement | null>(null);
   const hasVideo = stream.getVideoTracks().some((track) => track.enabled);
@@ -116,6 +126,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
   async function joinCall(kind: CallKind) {
     if (!selectedGroupId || !socketRef.current || callRef.current) return;
     try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('Calling is not supported by this browser. Use a current version of Chrome, Edge, Firefox, or Safari.');
       const relay = await request<{ iceServers: RTCIceServer[] }>(`/groups/${selectedGroupId}/realtime/ice-servers`);
       iceServersRef.current = relay.iceServers;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: kind === 'video' });
@@ -123,14 +134,15 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
       const active = { groupId: selectedGroupId, kind };
       callRef.current = active;
       setCall(active);
+      setCameraEnabled(stream.getVideoTracks().some((track) => track.enabled));
       const result = await new Promise<{ ok: boolean; participants?: CallParticipant[]; error?: { message?: string } }>((resolve) => socketRef.current?.emit('call:join', active, resolve));
       if (!result?.ok) throw new Error(result?.error?.message ?? 'Could not join the call.');
       onIncomingCallHandled();
       // Existing callers create the offer when this socket joins; the joiner waits for it to avoid offer glare.
       for (const participant of result.participants ?? []) await createPeer(participant, false);
-    } catch (error: any) {
+    } catch (error: unknown) {
       clearCall();
-      notify(error?.name === 'NotAllowedError' ? 'Please allow microphone and camera access to join the call.' : error?.message ?? 'Could not start the call.');
+      notify(mediaDeviceErrorMessage(error, kind));
     }
   }
 

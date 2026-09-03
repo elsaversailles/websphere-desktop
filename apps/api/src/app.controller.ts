@@ -55,6 +55,7 @@ export class AppController {
   @ProjectScope() @Patch('projects/:id') async updateProject(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.updateProject(await this.caller(auth), id, body); }
   @ProjectScope() @Patch('projects/:id/status') async statusProject(@Headers('authorization') auth: string, @Param('id') id: string, @Body('status') status: string) { return this.app.updateProject(await this.caller(auth), id, { status }); }
   @ProjectScope() @Get('projects/:id/team') async team(@Headers('authorization') auth: string, @Param('id') id: string) { const project = await this.app.project(await this.caller(auth), id); return project.members; }
+  @ProjectScope() @Post('projects/:id/members') async addProjectMember(@Headers('authorization') auth: string, @Param('id') id: string, @Body('userId') userId: string) { return this.app.addProjectMember(await this.caller(auth), id, userId); }
   @ProjectScope() @Get('projects/:id/progress') async progress(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.projectProgress(await this.caller(auth), id); }
   @ProjectScope() @Post('projects/:id/tasks') async createTask(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.createTask(await this.caller(auth), id, parse(taskSchema, body)); }
   @ProjectScope() @Get('projects/:id/tasks/tracker') async tracker(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.tracker(await this.caller(auth), id); }
