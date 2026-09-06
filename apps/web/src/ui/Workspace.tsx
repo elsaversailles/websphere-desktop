@@ -40,8 +40,9 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     socket.on('call:invite', (event: { groupId: string; kind: CallKind; initiatorUserId: string }) => {
       if (event.initiatorUserId !== session.user.id) setIncomingCall({ groupId: event.groupId, kind: event.kind });
     });
+    socket.on('notification:new', (notification: { message?: string }) => { if (notification?.message) notify(notification.message); });
     return () => socket.disconnect();
-  }, [session.access, session.user.id]);
+  }, [session.access, session.user.id, notify]);
 
   async function logout() {
     try { await request('/auth/logout', { method: 'POST' }); } catch { /* local session is always cleared */ }
@@ -89,9 +90,10 @@ function AssistantPage({ notify }: { notify: (message: string) => void }) {
 }
 
 function AdminPage({ notify }: { notify: (message: string) => void }) {
-  const [data, setData] = useState<{ users: number; activeProjects: number; health: string } | null>(null);
-  useEffect(() => { void request<{ users: number; activeProjects: number; health: string }>('/admin/monitoring').then(setData).catch((error: Error) => notify(error.message)); }, [notify]);
-  return <section className="sp on"><div className="ph"><div><h2>User Activity</h2></div></div><div className="krow">{data ? <><Kpi label="Total Projects" value={data.activeProjects} /><Kpi label="Active Users" value={data.users} /><Kpi label="Flagged Inactive" value={0} tone="yel" /><Kpi label="Uptime" value={data.health === 'up' ? 'Online' : data.health} tone="grn" /></> : <div className="cc">Loading system activity…</div>}</div><div className="g2"><div className="cc"><div className="cc-head"><h3>System Health</h3></div><Health label="Database" detail="Connected to the WebSphere database" /><Health label="AI Service" detail="Configured through the WebSphere backend" /><Health label="File Storage" detail="Linux instance storage" /></div><div className="cc"><div className="cc-head"><h3>Recent User Activity</h3></div><div className="empty-message">Live audit activity will appear here.</div></div></div></section>;
+  type Monitoring = { users: { total: number; active: number; locked: number; suspended: number; newSignups7d: number }; projects: { active: number; completed: number }; activity: { tasksCompleted24h: number; openSupportTickets: number }; health: { database: string; redis: string; overall: string } };
+  const [data, setData] = useState<Monitoring | null>(null);
+  useEffect(() => { void request<Monitoring>('/admin/monitoring').then(setData).catch((error: Error) => notify(error.message)); }, [notify]);
+  return <section className="sp on"><div className="ph"><div><h2>User Activity</h2></div></div><div className="krow">{data ? <><Kpi label="Active Projects" value={data.projects.active} /><Kpi label="Active Users" value={data.users.active} /><Kpi label="Flagged Inactive" value={data.users.locked + data.users.suspended} tone="yel" /><Kpi label="System Status" value={data.health.overall === 'up' ? 'Online' : 'Degraded'} tone={data.health.overall === 'up' ? 'grn' : 'red'} /></> : <div className="cc">Loading system activity…</div>}</div><div className="g2"><div className="cc"><div className="cc-head"><h3>System Health</h3></div><Health label="Database" detail="Connected to the WebSphere database" ok={data?.health.database === 'up'} /><Health label="Redis" detail="Session and job queue store" ok={data?.health.redis === 'up'} /><Health label="File Storage" detail="Linux instance storage" ok /></div><div className="cc"><div className="cc-head"><h3>Recent User Activity</h3></div>{data ? <><Health label="New signups (7 days)" detail={`${data.users.newSignups7d} accounts created`} ok /><Health label="Tasks completed (24h)" detail={`${data.activity.tasksCompleted24h} tasks marked complete`} ok /><Health label="Open support tickets" detail={`${data.activity.openSupportTickets} awaiting response`} ok={data.activity.openSupportTickets === 0} /><Health label="Completed projects" detail={`${data.projects.completed} projects completed`} ok /></> : <div className="empty-message">Live audit activity will appear here.</div>}</div></div></section>;
 }
 
 function AdminAccounts({ notify }: { notify: (message: string) => void }) {
@@ -120,5 +122,5 @@ function NavIcon({ page }: { page: Page }) {
   return <svg {...common}><circle cx="12" cy="12" r="9"/></svg>;
 }
 function Kpi({ label, value, tone }: { label: string; value: string | number; tone?: string }) { return <div className="kpi"><div className={`kval ${tone ?? ''}`}>{value}</div><div className="klbl">{label}</div></div>; }
-function Health({ label, detail }: { label: string; detail: string }) { return <div className="health-row"><span><strong>{label}</strong><small>{detail}</small></span><span className="bdg g">● Healthy</span></div>; }
+function Health({ label, detail, ok = true }: { label: string; detail: string; ok?: boolean }) { return <div className="health-row"><span><strong>{label}</strong><small>{detail}</small></span><span className={`bdg ${ok ? 'g' : 'r'}`}>{ok ? '● Healthy' : '● Attention'}</span></div>; }
 function initials(name: string) { return name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase(); }
