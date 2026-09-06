@@ -151,7 +151,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - _Requirements: US-017.1, 17.2; Design: GroupsModule (hub)_
 
 - [-] 7. Phase 5 — Real-time chat and presence scoping
-  - [ ] 7.1 Real-time group chat with retained history
+  - [x] 7.1 Real-time group chat with retained history
     - Implement `/chat` namespace: `chat:send` → persist `ChatMessage` → broadcast `chat:message` to group room; `GET /groups/:id/messages?cursor=` for history; reserve WebRTC signaling events as a documented later-phase stub
     - Tests to write (integration): message delivered to group room; history returns persisted messages
     - _Requirements: US-016.1, 16.2, 16.3; Design: ChatModule_
@@ -199,20 +199,20 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
 - [ ] 9. Checkpoint — Collaboration core (groups, chat, ideas, voting)
   - Ensure all tests pass, ask the user if questions arise.
 
-- [-] 10. Phase 7 — Project management
-  - [ ] 10.1 Create project from My Projects and Dashboard
+- [x] 10. Phase 7 — Project management
+  - [x] 10.1 Create project from My Projects and Dashboard
     - Implement `POST /projects` (title, description, members, dates, deadline; optional external tools; creator → Project_Leader); expose creation from both entry points in the web app
     - Tests to write (integration): project created with members; creator is leader; optional tools associated
     - _Requirements: US-019.1–19.4; Design: ProjectsModule_
-  - [ ] 10.2 List projects and project details
+  - [x] 10.2 List projects and project details
     - Implement `GET /projects` (each with group, role, progress, deadline, status) and `GET /projects/:id` (scope, dates, members, status, progress) gated to project members
     - Tests to write (integration): list scoping; details denied to non-members
     - _Requirements: US-020.1, 20.2, US-021.1, 21.2; Design: ProjectsModule_
-  - [ ] 10.3 Edit project (leader-only) and manage deadline/status
+  - [x] 10.3 Edit project (leader-only) and manage deadline/status
     - Implement `PATCH /projects/:id` (leader-only; members denied) and `PATCH /projects/:id/status` (active/completed/approved states); store/display deadline in My Projects
     - Tests to write (integration): member edit denied; leader edit persists; status transitions recorded
     - _Requirements: US-022.1, 22.2, US-023.1, 23.2; Design: ProjectsModule, Error Handling (RBAC_FORBIDDEN)_
-  - [ ] 10.4 Team responsibilities view
+  - [x] 10.4 Team responsibilities view
     - Implement `GET /projects/:id/team` returning members + `responsibility`; update when responsibilities change
     - Tests to write (integration): responsibilities displayed and updated
     - _Requirements: US-024.1, 24.2; Design: ProjectsModule, Data Models (ProjectMember.responsibility)_
@@ -220,20 +220,20 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - Leader-allowed vs member-denied edit paths
     - _Requirements: US-022.2; Design: Testing Strategy_
 
-- [-] 11. Phase 8 — Task management, workflow recording, real-time updates
-  - [ ] 11.1 Task create/edit and assign/reassign
+- [x] 11. Phase 8 — Task management, workflow recording, real-time updates
+  - [x] 11.1 Task create/edit and assign/reassign
     - Implement `POST /projects/:id/tasks`, `PATCH /tasks/:id` (leader), `POST /tasks/:id/assign` (eligible-member check, flips prior assignment inactive, notifies assignee); reassign notifies affected members; ineligible assignment denied
     - Tests to write (integration): create/edit; assign notifies; reassign updates + notifies; ineligible denied
     - _Requirements: US-026.1, 26.2, US-027.1–27.3; Design: TasksModule_
-  - [ ] 11.2 My tasks and task details
+  - [x] 11.2 My tasks and task details
     - Implement `GET /tasks/mine` (filter/sort by project/deadline/priority/status) and `GET /tasks/:id` (description, project, assignee, assigner, deadline, priority, status, progress) gated to project members
     - Tests to write (integration): filtering/sorting; details denied to non-project-members
     - _Requirements: US-028.1, 28.2, US-029.1, 29.2; Design: TasksModule_
-  - [ ] 11.3 Task status update with automatic workflow recording
+  - [x] 11.3 Task status update with automatic workflow recording
     - Implement `PATCH /tasks/:id/status` (assignee; pending/ongoing/completed) that persists status, sets `startedAt`/`completedAt`, and writes a `WorkflowEvent` (status_change/task_completed/assignment_change/progress_activity) automatically — no manual tracking
     - Tests to write (integration): status change persists + writes workflow event; completion recorded
     - _Requirements: US-030.1, 30.2, US-033.1–33.4; Design: TasksModule, WorkflowModule (event recording)_
-  - [ ] 11.4 Task progress tracker and no-manual-progress guard
+  - [x] 11.4 Task progress tracker and no-manual-progress guard
     - Implement `GET /projects/:id/tasks/tracker` (completed/ongoing/pending counts + derived %); confirm there is no route or UI control that sets a progress percentage manually (US-031)
     - Tests to write (integration): tracker counts/derived %; a guard test asserts no `setProgress`/progress-percentage endpoint or UI control exists
     - _Requirements: US-031.1, 31.2, US-032.1, 32.2; Design: TasksModule (tracker), Scope boundaries (US-031 excluded)_
@@ -241,7 +241,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - `// Feature: websphere-platform, Property 13: Progress is a pure function of workflow/task data with no manual input path`
     - Generate random task/workflow datasets; assert progress is deterministic, depends only on that data, recompute equals fresh compute, and no manual progress API exists
     - _Requirements: US-025.1, 25.2, 31.1, 31.2, 33.1–33.4; Design: Property 13_
-  - [ ] 11.6 Real-time task updates and reconnect reconciliation
+  - [x] 11.6 Real-time task updates and reconnect reconciliation
     - On every status/assignment change emit `task:updated` to the project room; implement `sync:request` (cursor) → `sync:reconcile` (authoritative task states) and a disconnected/reconnecting indicator
     - Tests to write (integration): live update pushed without refresh; reconnect reconciles missed changes
     - _Requirements: US-035.1, 35.2, NFR 18; Design: TasksModule (live updates), Error Handling (reconnect)_
@@ -249,13 +249,13 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - `// Feature: websphere-platform, Property 20: Reconnect reconciles to authoritative server state`
     - Generate random task-change sequences during disconnect; assert reconciled client state equals server state
     - _Requirements: US-035.1, 35.2; Design: Property 20_
-  - [ ] 11.8 Per-member task analytics
+  - [x] 11.8 Per-member task analytics
     - Implement `GET /projects/:id/tasks/by-member` deriving completed/ongoing/pending per member from task + progress data
     - Tests to write (integration): per-member breakdown matches underlying data
     - _Requirements: US-034.1, 34.2; Design: TasksModule (by-member)_
 
-- [-] 12. Phase 9 — Overall project progress via workflow function
-  - [ ] 12.1 Computed project progress read model
+- [x] 12. Phase 9 — Overall project progress via workflow function
+  - [x] 12.1 Computed project progress read model
     - Implement `GET /projects/:id/progress` computing overall progress from tasks + workflow events (pure function in `WorkflowModule`); recompute on change; return on-track indication
     - Tests to write (integration): progress reflects task completion; recompute on change; on-track flag correct
     - _Requirements: US-025.1–25.3, NFR 15; Design: ProjectsModule (progress), WorkflowModule_
@@ -273,16 +273,16 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - Tests to write (integration): online users group-scoped; previews update on change
     - _Requirements: US-008.2, 8.4, US-011.1, 11.2; Design: DashboardModule_
 
-- [-] 15. Phase 11 — Calendar and scheduling
-  - [ ] 15.1 Calendar view/navigation with project/task date hints
+- [x] 15. Phase 11 — Calendar and scheduling
+  - [x] 15.1 Calendar view/navigation with project/task date hints
     - Implement `GET /calendar?from=&to=` returning events plus projected project-deadline/task-timeline hints (colored, clickable), and period navigation + return-to-today; hints update automatically when dates change
     - Tests to write (integration): navigation returns period; project/task hints projected live
     - _Requirements: US-048.1–48.3, US-049.1, 49.2; Design: CalendarModule_
-  - [ ] 15.2 Create and manage calendar events
+  - [x] 15.2 Create and manage calendar events
     - Implement `POST /calendar/events` (optional project link), `PATCH /calendar/events/:id`, `DELETE /calendar/events/:id` with project-event authorization
     - Tests to write (integration): create with/without project; edit persists; delete removes; unauthorized project-event modify denied
     - _Requirements: US-050.1, 50.2, US-051.1–51.3; Design: CalendarModule_
-  - [ ] 15.3 Upcoming schedules and deadline push/email triggers
+  - [x] 15.3 Upcoming schedules and deadline push/email triggers
     - Implement `GET /calendar/upcoming` (date, project, urgency); emit upcoming/lapsed-deadline domain events into the notification pipeline for push + email (consumed by Phase 14)
     - Tests to write (integration): upcoming list with urgency; deadline event enqueues push+email intent
     - _Requirements: US-052.1, 52.2; Design: CalendarModule, NotificationsModule (deadline pipeline)_
@@ -291,7 +291,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - _Requirements: US-051.3; Design: Testing Strategy (unit tests)_
 
 - [-] 16. Phase 12 — AI assistant (OpenAI + RAG + MCP + guardrails)
-  - [ ] 16.1 AI orchestrator, @helper, academic guardrails, and multimodal rejection
+  - [x] 16.1 AI orchestrator, @helper, academic guardrails, and multimodal rejection
     - Implement `AiOrchestrator.ask` and `POST /ai/ask`: OpenAI chat integration, academic-only system prompt, OpenAI moderation on input, safe refusal for non-academic prompts, and rejection of multimodal input with `400 AI_INPUT_UNSUPPORTED` before any model call; persist `AiInteraction`
     - Tests to write (integration, mocked OpenAI): academic answer; non-academic refusal; multimodal rejected pre-call
     - _Requirements: US-044.1–44.3, NFR 13; Design: AiModule (orchestration, guardrails)_
@@ -303,11 +303,11 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - Implement `Embedding` writes for project/group/task/idea text and cosine top-k retrieval behind an `EmbeddingStore` interface, RBAC-scoped to the caller; graceful ungrounded/refusal fallback on retrieval failure
     - Tests to write (integration): retrieval returns only in-scope snippets; failure degrades safely
     - _Requirements: US-044.1, NFR 12; Design: AiModule (RAG store)_
-  - [ ] 16.4 MCP server and grounded recommendations
+  - [x] 16.4 MCP server and grounded recommendations
     - Implement `apps/mcp` read-only tools (`listProjects`, `listTasks`, `listIdeas`, `getToolsCatalog`) constrained to caller scope; implement `POST /ai/recommendations` grounding external-tool recommendations in the current Tools_Catalog
     - Tests to write (integration, stub MCP): recommendations only reference catalog tools; MCP never returns out-of-scope rows
     - _Requirements: US-046.1–46.3, NFR 12; Design: AiModule (MCP server), IntegrationsModule (Tools_Catalog)_
-  - [ ] 16.5 Idea AI suggestions (accept/reject/revise) and merge
+  - [x] 16.5 Idea AI suggestions (accept/reject/revise) and merge
     - Implement `POST /ideas/:id/ai/suggest` (returns suggestions, never mutates), `POST /ai/ideas/generate` (grounded ideas + merge); author applies changes only via explicit `PATCH /ideas/:id` accept/revise; no auto-replace
     - Tests to write (integration): suggest never mutates; accept/reject/revise apply only the selected action; merge combines ideas
     - _Requirements: US-039.1, 39.2, US-040.1–40.3, US-045.1, 45.2; Design: IdeasModule (AI review), AiModule_
@@ -321,7 +321,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - _Requirements: US-047.1, 47.2, NFR 14; Design: AiModule (function calling, degradation)_
 
 - [-] 17. Phase 13 — Workflow analytics and explainable predictive monitoring
-  - [ ] 17.1 Completion-rate and overall-efficiency KPIs (pure)
+  - [x] 17.1 Completion-rate and overall-efficiency KPIs (pure)
     - Implement `taskCompletionRate = completed/max(total,1)` and `overallEfficiency = onTimeCompleted/max(totalCompleted,1)` as pure functions in `WorkflowModule`
     - _Requirements: US-053.1, 53.2, NFR 15; Design: WorkflowModule (formulas)_
   - [ ]* 17.2 Property test for bounded completion rate and efficiency
@@ -335,39 +335,39 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - `// Feature: websphere-platform, Property 15: Member contribution shares are consistent`
     - Generate random completed-task distributions; assert each onTimePct in [0,1] and contribution shares sum to 1
     - _Requirements: US-055.1, 55.2; Design: Property 15_
-  - [ ] 17.5 Bottleneck detection and Blast_Radius
+  - [x] 17.5 Bottleneck detection and Blast_Radius
     - Implement bottleneck `{ expectedDuration, actualDuration, delayDays=max(0,actual-expected), blastRadius=downstreamDependents+affectedMembers }` from the task-dependency graph; `GET /projects/:id/analytics/bottlenecks`
     - _Requirements: US-056.1, 56.2; Design: WorkflowModule (bottleneck), Data Models (TaskDependency)_
   - [ ]* 17.6 Property test for bottleneck delay and Blast_Radius
     - `// Feature: websphere-platform, Property 16: Bottleneck delay is non-negative and Blast_Radius matches the dependency graph`
     - Generate random durations + dependency graphs; assert delayDays = max(0, actual-expected) ≥ 0 and blastRadius matches graph counts
     - _Requirements: US-056.1, 56.2; Design: Property 16_
-  - [ ] 17.7 Risk_Score and Risk_Level
+  - [x] 17.7 Risk_Score and Risk_Level
     - Implement `riskScore = clamp(0,100, w1*remainingWorkVsTimeLeft + w2*(1-normalizedVelocity) + w3*normalizedOverdueBlocked)` and monotonic `riskLevel` thresholds (on-track <40, at-risk 40–70, critical >70); `GET /projects/:id/risk` with counts/scores/levels
     - _Requirements: US-058.1, 58.2, US-059.1, 59.2; Design: WorkflowModule (riskScore/riskLevel)_
   - [ ]* 17.8 Property test for bounded risk score and monotonic level
     - `// Feature: websphere-platform, Property 17: Risk_Score is bounded and Risk_Level is monotonic in the score`
     - Generate random inputs + score pairs; assert score in [0,100] and s1≤s2 ⇒ level(s1) not more severe than level(s2)
     - _Requirements: US-059.1, 59.2; Design: Property 17_
-  - [ ] 17.9 Predicted completion date and contributing factors
+  - [x] 17.9 Predicted completion date and contributing factors
     - Implement `velocity = completedInWindow/windowDays`, `predictedDate = now + ceil(remaining/max(velocity,epsilon))`, `deltaVsDeadline = predictedDate - originalDeadline`, and factor identification; `GET /projects/:id/prediction`
     - _Requirements: US-060.1, 60.2; Design: WorkflowModule (predictedDate)_
   - [ ]* 17.10 Property test for predicted-date monotonicity
     - `// Feature: websphere-platform, Property 18: Predicted completion date is monotonic in remaining work`
     - Generate random positive velocities + remaining work; assert predictedDate ≥ now, increasing remaining work never earlier, delta = predictedDate - deadline
     - _Requirements: US-060.1, 60.2; Design: Property 18_
-  - [ ] 17.11 Corrective recommendations mapped to risks/bottlenecks
+  - [x] 17.11 Corrective recommendations mapped to risks/bottlenecks
     - Implement `mapRiskToActions(riskLevel, bottlenecks)` (adjust deadline / reassign / add support / schedule review); `GET /projects/:id/recommendations`
     - _Requirements: US-061.1, 61.2; Design: WorkflowModule (recommendations)_
   - [ ]* 17.12 Property test for recommendation mapping
     - `// Feature: websphere-platform, Property 19: Every corrective recommendation maps to a real risk or bottleneck`
     - Generate random snapshots; assert no orphan recommendations and at-risk/critical yields ≥1 recommendation
     - _Requirements: US-061.1, 61.2; Design: Property 19_
-  - [ ] 17.13 Analytics dashboard aggregate, trends, summary, and Chart.js rendering
+  - [x] 17.13 Analytics dashboard aggregate, trends, summary, and Chart.js rendering
     - Implement `GET /projects/:id/analytics` (Overall Efficiency, Bottlenecks Detected, Tasks Completed, completion rate, member performance, bottleneck analysis, connected-tool usage, workflow summary), `GET .../trends`, `GET .../summary`; render with Chart.js 4 in the web app
     - Tests to write (integration): aggregate composition; trends compare periods; summary + recommended actions present
     - _Requirements: US-053.1, 53.2, US-054.1, 54.2, US-057.1, 57.2; Design: WorkflowModule endpoints, Architecture (Chart.js)_
-  - [ ] 17.14 BullMQ scheduled recompute into analytics_snapshots
+  - [x] 17.14 BullMQ scheduled recompute into analytics_snapshots
     - Implement `recompute-analytics` queue (triggered by workflow events + cron) writing idempotent `AnalyticsSnapshot` read-model rows; delay-risk detection enqueues notifications
     - Tests to write (integration): recompute is idempotent per (entity, window); snapshot reflects latest data
     - _Requirements: US-058.1, US-064.2, NFR 8, 15; Design: WorkflowModule (job pipeline), JobsModule_
@@ -376,7 +376,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
   - Ensure all tests pass, ask the user if questions arise.
 
 - [-] 19. Phase 14 — Notifications
-  - [ ] 19.1 Notification center and in-app deep-linked delivery
+  - [x] 19.1 Notification center and in-app deep-linked delivery
     - Implement `GET /notifications` (message, timestamp, type, read), `PATCH /notifications/:id/read`, and `InAppChannel` that persists `Notification` (source of truth) and emits `notification:new`; resolve `relatedId`/`relatedType` deep links
     - Tests to write (integration): center lists notifications; in-app emit on domain events; deep-link resolves to record
     - _Requirements: US-062.1, 62.2, US-063.1, 63.2; Design: NotificationsModule (pipeline)_
@@ -384,7 +384,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - Implement `EmailChannel` (AWS SES via SMTP), `WebPushChannel` (VAPID + service worker + `POST /push/subscribe`), and a BullMQ fan-out queue with retry/backoff; deliver deadline reminders and delay-risk alerts via email + push even when the app is closed; prune `410 Gone` subscriptions
     - Tests to write (integration, mocked SES/push): deadline + delay-risk fan-out to email/push; retry/backoff; dead subscription pruned
     - _Requirements: US-064.1, 64.2, US-065.1, 65.2, NFR 8; Design: NotificationsModule (channels), Error Handling (notification delivery)_
-  - [ ] 19.3 Notification preferences and channel selection
+  - [x] 19.3 Notification preferences and channel selection
     - Implement `GET/PUT /notifications/preferences` (tasks, deadlines, group activity, AI suggestions, email/push toggles); channel selection consults preferences per type
     - Tests to write (integration): preferences persist; selection matches enabled channels
     - _Requirements: US-066.1, 66.2; Design: NotificationsModule (preferences)_
@@ -394,11 +394,11 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - _Requirements: US-052.2, 64.1, 64.2, 65.1, 65.2, 66.1, 66.2; Design: Property 21_
 
 - [-] 20. Phase 15 — External tools (connector framework + six adapters)
-  - [ ] 20.1 Connector framework, registry, and catalog
+  - [x] 20.1 Connector framework, registry, and catalog
     - Implement the `Connector` interface, `ConnectorRegistry`, and `GET /integrations/catalog` returning supported tools (Canva, Figma, MS 365, Google Drive/Docs, Trello, Asana) with categories
     - Tests to write (integration): catalog lists all six with categories
     - _Requirements: US-067.1, 67.3; Design: IntegrationsModule (Connector, registry)_
-  - [ ] 20.2 OAuth2 flow with AES-GCM encrypted token storage
+  - [x] 20.2 OAuth2 flow with AES-GCM encrypted token storage
     - Implement `GET /integrations/:provider/authorize` and `/callback` (validate `state`; no partial connection on failure) storing tokens as AES-GCM ciphertext + IV + auth tag via `CryptoService`; decrypt only in-adapter
     - Tests to write (integration): authorize/callback stores encrypted tokens; invalid state → `400 OAUTH_EXCHANGE_FAILED` with no persistence
     - _Requirements: US-067.2, NFR 3; Design: IntegrationsModule (OAuth2), Error Handling (OAUTH_EXCHANGE_FAILED)_
@@ -423,7 +423,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - _Requirements: US-069, NFR 8; Design: IntegrationsModule (refresh), Error Handling (token expiry)_
 
 - [-] 21. Phase 16 — Support and ticketing
-  - [ ] 21.1 Submit categorized support ticket
+  - [x] 21.1 Submit categorized support ticket
     - Implement `POST /support/tickets` requiring a valid category (account_reactivation, account_deletion, password_concern, bug_report, other); reject missing category
     - Tests to write (integration): stored with valid category; missing category rejected
     - _Requirements: US-070.1, 70.2; Design: SupportModule_
@@ -437,7 +437,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - _Requirements: US-071.1, 71.2; Design: AdminModule/SupportModule_
 
 - [-] 22. Phase 17 — Administrator / developer module
-  - [ ] 22.1 Monitoring dashboard and system health
+  - [x] 22.1 Monitoring dashboard and system health
     - Implement `GET /admin/monitoring` (metrics, user activity, active projects, system health, availability indicators)
     - Tests to write (integration): metrics/health composition
     - _Requirements: US-072.1, 72.2; Design: AdminModule_
@@ -445,7 +445,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - Implement `GET /admin/users` and `PATCH /admin/users/:id` (view/edit/deactivate/remove/reactivate/suspend; reactivation from approved support request)
     - Tests to write (integration + unit): each lifecycle transition applies to access; reactivation path
     - _Requirements: US-073.1–73.3; Design: AdminModule, Testing Strategy (lifecycle transitions)_
-  - [ ] 22.3 Audit/system logs view
+  - [x] 22.3 Audit/system logs view
     - Implement `AuditLog` writes across modules (via the global exception filter and domain events) and `GET /admin/logs` returning time, activity, module, severity, description
     - Tests to write (integration): logs include all required fields
     - _Requirements: US-074.1, 74.2; Design: AdminModule, Error Handling (audit logging)_
@@ -453,7 +453,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - `// Feature: websphere-platform, Property 24: Every audit log entry carries the required fields`
     - Generate random logged events; assert each persisted record has timestamp, module, activity, severity, description
     - _Requirements: US-074.1, 74.2; Design: Property 24_
-  - [ ] 22.5 System configuration and maintenance mode
+  - [x] 22.5 System configuration and maintenance mode
     - Implement `GET/PUT /admin/settings` (notification rules, inactivity limits, system updates, maintenance mode) persisting `SystemSetting`; enabling maintenance mode applies platform-wide
     - Tests to write (integration): settings persist; maintenance mode gates the platform
     - _Requirements: US-075.1, 75.2; Design: AdminModule (settings)_

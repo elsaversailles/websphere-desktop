@@ -4,10 +4,14 @@ import { SignJWT, jwtVerify } from 'jose';
 import { randomBytes } from 'node:crypto';
 import { completionRate, projectAnalytics, recommendations } from './analytics.js';
 import { CryptoService, validatePassword } from './security.js';
+import { connectors } from './connectors.js';
 import { PrismaService } from './prisma.service.js';
 import { ConfigService } from './config.service.js';
 import { RedisService } from './redis.service.js';
 import { EmailService } from './email.service.js';
+import { JobsService } from './jobs.service.js';
+import { DomainEventsService } from './domain-events.service.js';
+import { AuditLogService } from './audit-log.service.js';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
@@ -30,8 +34,11 @@ export class AppService {
   private readonly config: ConfigService;
   private readonly redis: RedisService;
   private readonly email: EmailService;
+  private readonly jobs: JobsService;
+  private readonly events: DomainEventsService;
+  private readonly audit: AuditLogService;
 
-  constructor(prisma: PrismaService, config: ConfigService, crypto: CryptoService, redis: RedisService, email: EmailService) {
+  constructor(prisma: PrismaService, config: ConfigService, crypto: CryptoService, redis: RedisService, email: EmailService, jobs: JobsService, events: DomainEventsService, audit: AuditLogService) {
     this.prisma = prisma;
     this.accessSecret = new TextEncoder().encode(config.get('JWT_ACCESS_SECRET'));
     this.refreshSecret = new TextEncoder().encode(config.get('JWT_REFRESH_SECRET'));
@@ -39,6 +46,9 @@ export class AppService {
     this.config = config;
     this.redis = redis;
     this.email = email;
+    this.jobs = jobs;
+    this.events = events;
+    this.audit = audit;
   }
   private refreshKey(jti: string) { return `auth:refresh:${jti}`; }
   private usedRefreshKey(jti: string) { return `auth:refresh:used:${jti}`; }
@@ -57,11 +67,11 @@ export class AppService {
   }
   async issue(user: { id: string; role: Role; tokenVersion: number }) { const jti = randomBytes(16).toString('hex'); const [access, refresh] = await Promise.all([this.sign(user), this.sign(user, true, jti)]); const ttl = this.refreshTtlSeconds(); await Promise.all([this.redis.set(this.refreshKey(jti), JSON.stringify({ userId: user.id }), ttl), this.redis.addToSet(this.userRefreshKey(user.id), jti, ttl)]); return { access, refresh, role: user.role }; }
   async caller(header?: string, options: { allowLocked?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
-  async register(input: any) { const policy = validatePassword(input.password); if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`, 400, { password: policy.reason }); const exists = await this.prisma.user.findUnique({ where: { email: input.email } }); if (exists) fail('EMAIL_IN_USE', 'Email is already in use', 409, { email: 'already in use' }); const user = await this.prisma.user.create({ data: { ...input, passwordHash: await hash(input.password), password: undefined } as any }); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
-  async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0 } })]); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
+  async register(input: any) { const policy = validatePassword(input.password); if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`, 400, { password: policy.reason }); const exists = await this.prisma.user.findUnique({ where: { email: input.email } }); if (exists) fail('EMAIL_IN_USE', 'Email is already in use', 409, { email: 'already in use' }); const user = await this.prisma.user.create({ data: { ...input, passwordHash: await hash(input.password), password: undefined } as any }); await this.audit.log('AuthModule', 'account_registered', 'info', `New account registered for ${user.email}`, user.id); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
+  async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0 } })]); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in`, user.id); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
   async refreshToken(token: string) { try { const verified = await jwtVerify(token, this.refreshSecret); const subject = verified.payload.sub; if (!subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const jti = String(verified.payload.jti); const stored = await this.redis.take(this.refreshKey(jti)); if (!stored) { if (await this.redis.get(this.usedRefreshKey(jti))) await this.prisma.user.update({ where: { id: subject }, data: { tokenVersion: { increment: 1 } } }); fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } const record = JSON.parse(stored!) as { userId: string }; if (record.userId !== subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const user = await this.prisma.user.findUnique({ where: { id: record.userId } }); if (!user || user.status !== 'active' || user.tokenVersion !== Number(verified.payload.tv)) { await this.redis.removeFromSet(this.userRefreshKey(record.userId), jti); fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } const ttl = this.refreshTtlSeconds(); await Promise.all([this.redis.set(this.usedRefreshKey(jti), '1', ttl), this.redis.removeFromSet(this.userRefreshKey(record.userId), jti)]); return this.issue(user); } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } }
   private async removeRefreshSessions(userId: string) { const key = this.userRefreshKey(userId); const jtis = await this.redis.setMembers(key); await this.redis.delete(...jtis.map((jti) => this.refreshKey(jti)), key); }
-  async logout(user: Caller) { await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } }); return { ok: true }; }
+  async logout(user: Caller) { await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'logout', 'info', 'User signed out and invalidated all sessions', user.id); return { ok: true }; }
   async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`, 400, { password: policy.reason }); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); return { ok: true }; }
   async forgot(email: string) {
     const user = await this.prisma.user.findUnique({ where: { email } });
@@ -114,34 +124,105 @@ export class AppService {
   async project(caller: Caller, id: string) { await this.projectMember(id, caller.id); return this.prisma.project.findUniqueOrThrow({ where: { id }, include: { group: { include: { members: { include: { user: { select: { id: true, fullName: true } } } } } }, members: { include: { user: { select: { id: true, fullName: true } } } }, tasks: { include: { assignments: { where: { active: true } } } } } }); }
   async updateProject(caller: Caller, id: string, input: any) { await this.projectMember(id, caller.id, true); const { memberIds, ...data } = input; return this.prisma.project.update({ where: { id }, data }); }
   async addProjectMember(caller: Caller, projectId: string, userId: string) { await this.projectMember(projectId, caller.id, true); const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } }); await this.member(project.groupId, userId); return this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: ProjectRole.Project_Member } }); }
+  async updateResponsibility(caller: Caller, projectId: string, userId: string, responsibility: string) { await this.projectMember(projectId, caller.id, true); await this.projectMember(projectId, userId); return this.prisma.projectMember.update({ where: { projectId_userId: { projectId, userId } }, data: { responsibility } }); }
   async projectProgress(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { tasks: true } }); const analytics = projectAnalytics(project.tasks, project.deadline); return { progress: completionRate(project.tasks.filter((t) => t.status === 'completed').length, project.tasks.length), onTrack: analytics.riskLevel === 'on_track', ...analytics }; }
   async createTask(caller: Caller, projectId: string, input: any) { await this.projectMember(projectId, caller.id, true); return this.prisma.task.create({ data: { ...input, projectId, createdBy: caller.id } }); }
-  async task(caller: Caller, id: string) { const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, include: { assignments: { where: { active: true } }, project: true } }); await this.projectMember(task.projectId, caller.id); return task; }
+  async task(caller: Caller, id: string) {
+    const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, include: { assignments: { where: { active: true } }, project: true } });
+    await this.projectMember(task.projectId, caller.id);
+    const assignment = task.assignments[0];
+    const [assignee, assigner] = assignment ? await Promise.all([this.prisma.user.findUnique({ where: { id: assignment.assigneeId }, select: { id: true, fullName: true } }), this.prisma.user.findUnique({ where: { id: assignment.assignerId }, select: { id: true, fullName: true } })]) : [null, null];
+    return { ...task, assignee, assigner, progress: task.status === 'completed' ? 100 : task.status === 'ongoing' ? 50 : 0 };
+  }
   async updateTask(caller: Caller, id: string, input: any) { const task = await this.task(caller, id); await this.projectMember(task.projectId, caller.id, true); return this.prisma.task.update({ where: { id }, data: input }); }
-  async assignTask(caller: Caller, id: string, assigneeId: string) { const task = await this.task(caller, id); await this.projectMember(task.projectId, caller.id, true); await this.projectMember(task.projectId, assigneeId); await this.prisma.$transaction([this.prisma.taskAssignment.updateMany({ where: { taskId: id, active: true }, data: { active: false } }), this.prisma.taskAssignment.create({ data: { taskId: id, assigneeId, assignerId: caller.id } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: WorkflowEventType.assignment_change, toValue: assigneeId } })]); return this.notify([assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}”`, id, 'task'); }
-  async taskStatus(caller: Caller, id: string, status: TaskStatus) { const task = await this.task(caller, id); const assignment = await this.prisma.taskAssignment.findFirst({ where: { taskId: id, assigneeId: caller.id, active: true } }); if (!assignment) fail('RBAC_FORBIDDEN', 'Only the active assignee can change task status', 403); const now = new Date(); const updated = await this.prisma.task.update({ where: { id }, data: { status, ...(status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), ...(status === 'completed' ? { completedAt: now } : {}) } }); await this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: status } }); return updated; }
-  async myTasks(caller: Caller, filter: any) { return this.prisma.task.findMany({ where: { assignments: { some: { assigneeId: caller.id, active: true } }, ...(filter.projectId ? { projectId: filter.projectId } : {}), ...(filter.status ? { status: filter.status } : {}) }, orderBy: filter.sort === 'deadline' ? { deadline: 'asc' } : { createdAt: 'desc' } }); }
+  async assignTask(caller: Caller, id: string, assigneeId: string) { const task = await this.task(caller, id); await this.projectMember(task.projectId, caller.id, true); await this.projectMember(task.projectId, assigneeId); await this.prisma.$transaction([this.prisma.taskAssignment.updateMany({ where: { taskId: id, active: true }, data: { active: false } }), this.prisma.taskAssignment.create({ data: { taskId: id, assigneeId, assignerId: caller.id } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: WorkflowEventType.assignment_change, toValue: assigneeId } })]); await this.jobs.enqueueAnalyticsRecompute(task.projectId); return this.notify([assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}”`, id, 'task'); }
+  async taskStatus(caller: Caller, id: string, status: TaskStatus) { const task = await this.task(caller, id); const assignment = await this.prisma.taskAssignment.findFirst({ where: { taskId: id, assigneeId: caller.id, active: true } }); if (!assignment) fail('RBAC_FORBIDDEN', 'Only the active assignee can change task status', 403); const now = new Date(); const updated = await this.prisma.task.update({ where: { id }, data: { status, ...(status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), ...(status === 'completed' ? { completedAt: now } : {}) } }); await this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: status } }); await this.jobs.enqueueAnalyticsRecompute(task.projectId); return updated; }
+  async myTasks(caller: Caller, filter: any) {
+    const tasks = await this.prisma.task.findMany({ where: { assignments: { some: { assigneeId: caller.id, active: true } }, ...(filter.projectId ? { projectId: filter.projectId } : {}), ...(filter.status ? { status: filter.status } : {}) }, orderBy: filter.sort === 'deadline' ? { deadline: 'asc' } : { createdAt: 'desc' }, include: { project: { select: { id: true, title: true } }, assignments: { where: { assigneeId: caller.id, active: true }, take: 1 } } });
+    const assignerIds = [...new Set(tasks.map((task: any) => task.assignments[0]?.assignerId).filter(Boolean))];
+    const assigners = assignerIds.length ? await this.prisma.user.findMany({ where: { id: { in: assignerIds } }, select: { id: true, fullName: true } }) : [];
+    const assignerName = (id?: string) => assigners.find((user: any) => user.id === id)?.fullName ?? 'Unassigned';
+    const autoProgress = (status: string) => (status === 'completed' ? 100 : status === 'ongoing' ? 50 : 0);
+    return tasks.map((task: any) => ({ ...task, project: task.project, assignedBy: assignerName(task.assignments[0]?.assignerId), progress: autoProgress(task.status) }));
+  }
   async tracker(caller: Caller, projectId: string) { await this.projectMember(projectId, caller.id); const tasks = await this.prisma.task.findMany({ where: { projectId } }); const counts = Object.fromEntries(['pending', 'ongoing', 'completed'].map((status) => [status, tasks.filter((task) => task.status === status).length])); return { ...counts, total: tasks.length, progress: completionRate(counts.completed, tasks.length) }; }
   async idea(caller: Caller, groupId: string, input: any) { await this.member(groupId, caller.id); return this.prisma.idea.create({ data: { ...input, groupId, authorId: caller.id } }); }
   async ideas(caller: Caller, groupId: string) { await this.member(groupId, caller.id); return this.prisma.idea.findMany({ where: { groupId }, orderBy: { createdAt: 'desc' } }); }
   async reviseIdea(caller: Caller, id: string, input: any) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can revise an unselected idea', 403); return this.prisma.idea.update({ where: { id }, data: { ...input, status: 'refined' } }); }
+  async rejectIdea(caller: Caller, id: string) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can reject an unselected idea', 403); return this.prisma.idea.update({ where: { id }, data: { status: 'rejected' } }); }
+  async mergeIdeas(caller: Caller, groupId: string, ideaIds: string[]) {
+    await this.member(groupId, caller.id);
+    const ideas = await this.prisma.idea.findMany({ where: { id: { in: ideaIds }, groupId } });
+    if (ideas.length < 2) fail('VALIDATION_FAILED', 'Choose at least two group ideas to merge');
+    const prompt = `Merge these related academic project ideas into a single, coherent idea. Respond with a short title on the first line and a combined description below.\n\n${ideas.map((idea: any, index: number) => `Idea ${index + 1} — ${idea.title}: ${idea.body}`).join('\n\n')}`;
+    const result = await this.ai(caller, prompt, { scopeType: 'group', scopeId: groupId });
+    const [firstLine, ...rest] = result.response.split('\n').filter((line: string) => line.trim().length);
+    return { title: (firstLine ?? ideas[0].title).replace(/^title:\s*/i, '').trim(), body: rest.join('\n').trim() || result.response, refused: result.refused, sourceIdeaIds: ideas.map((idea: any) => idea.id) };
+  }
   async openPoll(caller: Caller, groupId: string, ideaIds: string[]) { await this.member(groupId, caller.id); const ideas = await this.prisma.idea.findMany({ where: { id: { in: ideaIds }, groupId } }); if (ideas.length !== ideaIds.length) fail('VALIDATION_FAILED', 'Every poll option must be a group idea'); return this.prisma.ideaPoll.create({ data: { groupId, createdBy: caller.id, options: { create: ideas.map((idea) => ({ ideaId: idea.id, label: idea.title })) } }, include: { options: true } }); }
   async vote(caller: Caller, pollId: string, optionId: string) { const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: true } }); await this.member(poll.groupId, caller.id); if (!poll.open || !poll.options.some((option) => option.id === optionId)) fail('VALIDATION_FAILED', 'Poll is closed or option is invalid'); await this.prisma.vote.upsert({ where: { pollId_voterId: { pollId, voterId: caller.id } }, update: { optionId }, create: { pollId, optionId, voterId: caller.id } }); return this.tally(pollId); }
   async tally(pollId: string, viewerId?: string) { const [poll, viewerVote] = await Promise.all([this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: { include: { _count: { select: { votes: true } } } } } }), viewerId ? this.prisma.vote.findUnique({ where: { pollId_voterId: { pollId, voterId: viewerId } }, select: { optionId: true } }) : Promise.resolve(null)]); return { pollId, groupId: poll.groupId, open: poll.open, viewerOptionId: viewerVote?.optionId ?? null, options: poll.options.map((option) => ({ optionId: option.id, ideaId: option.ideaId, label: option.label, votes: option._count.votes })) }; }
   async pollResults(caller: Caller, pollId: string) { const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, select: { groupId: true } }); await this.member(poll.groupId, caller.id); return this.tally(pollId, caller.id); }
   async begin(caller: Caller, groupId: string, ideaId: string) { await this.member(groupId, caller.id, true); const idea = await this.prisma.idea.findFirst({ where: { id: ideaId, groupId } }); if (!idea) fail('NOT_FOUND', 'Idea does not belong to group', 404); if (idea.status === 'selected') fail('VALIDATION_FAILED', 'Idea has already been selected'); const members = await this.prisma.groupMember.findMany({ where: { groupId }, select: { userId: true } }); const project = await this.prisma.project.create({ data: { groupId, ideaId, title: idea.title, description: idea.body, createdBy: caller.id, members: { create: members.map((member) => ({ userId: member.userId, role: member.userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } } }); await this.prisma.idea.update({ where: { id: ideaId }, data: { status: 'selected' } }); return project; }
   async calendar(caller: Caller, from?: string, to?: string) { const events = await this.prisma.calendarEvent.findMany({ where: { ownerId: caller.id, ...(from || to ? { startAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}) } }); const projects = await this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, deadline: { not: null } }, select: { id: true, title: true, deadline: true } }); const tasks = await this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, deadline: { not: null }, status: { not: 'completed' } }, select: { id: true, title: true, deadline: true } }); return { events, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))] }; }
-  async notify(userIds: string[], type: NotificationType, message: string, relatedId?: string, relatedType?: string) { const data = await this.prisma.notification.createMany({ data: userIds.map((userId) => ({ userId, type, message, relatedId, relatedType })) }); return { ok: true, delivered: data.count }; }
+  async createCalendarEvent(caller: Caller, input: any) { if (input.projectId) await this.projectMember(input.projectId, caller.id); return this.prisma.calendarEvent.create({ data: { ...input, ownerId: caller.id } }); }
+  private async calendarEventAccess(caller: Caller, id: string) { const event = await this.prisma.calendarEvent.findUniqueOrThrow({ where: { id } }); if (event.projectId) await this.projectMember(event.projectId, caller.id); else if (event.ownerId !== caller.id) fail('RBAC_FORBIDDEN', 'Only the event owner or project members can modify this event', 403); return event; }
+  async updateCalendarEvent(caller: Caller, id: string, input: any) { await this.calendarEventAccess(caller, id); return this.prisma.calendarEvent.update({ where: { id }, data: input }); }
+  async deleteCalendarEvent(caller: Caller, id: string) { await this.calendarEventAccess(caller, id); return this.prisma.calendarEvent.delete({ where: { id } }); }
+  async notify(userIds: string[], type: NotificationType, message: string, relatedId?: string, relatedType?: string) {
+    const created = await Promise.all(userIds.map((userId) => this.prisma.notification.create({ data: { userId, type, message, relatedId, relatedType } })));
+    for (const notification of created) this.events.emitNotification(notification.userId, notification);
+    return { ok: true, delivered: created.length };
+  }
   async notifications(caller: Caller) { return this.prisma.notification.findMany({ where: { userId: caller.id }, orderBy: { createdAt: 'desc' } }); }
   async markRead(caller: Caller, id: string) { return this.prisma.notification.updateMany({ where: { id, userId: caller.id }, data: { read: true } }); }
   async preferences(caller: Caller, data?: any) { if (data) return this.prisma.notificationPreference.upsert({ where: { userId: caller.id }, update: data, create: { userId: caller.id, ...data } }); return this.prisma.notificationPreference.upsert({ where: { userId: caller.id }, update: {}, create: { userId: caller.id } }); }
   async integrations(caller: Caller) { return this.prisma.connectedTool.findMany({ include: { connections: { where: { userId: caller.id }, select: { id: true, status: true, lastSyncedAt: true } } } }); }
-  async oauthAuthorize(caller: Caller, provider: ProviderId, redirectUri: string) { const state = randomBytes(20).toString('hex'); return { state, authorizeUrl: `${this.config.get('WEB_ORIGIN')}/oauth/${provider}?state=${state}&redirect_uri=${encodeURIComponent(redirectUri)}` }; }
-  async oauthCallback(caller: Caller, provider: ProviderId, code: string) { if (!code) fail('OAUTH_EXCHANGE_FAILED', 'Authorization code is required'); const enc = this.crypto.encrypt(`provider-token:${provider}:${code}`); return this.prisma.toolConnection.upsert({ where: { userId_provider: { userId: caller.id, provider } }, update: { encAccessToken: enc.ciphertext, iv: enc.iv, authTag: enc.authTag, status: 'connected' }, create: { userId: caller.id, provider, encAccessToken: enc.ciphertext, iv: enc.iv, authTag: enc.authTag } }); }
+  private oauthStateKey(state: string) { return `oauth:state:${state}`; }
+  async oauthAuthorize(caller: Caller, provider: ProviderId, redirectUri: string) {
+    const state = randomBytes(20).toString('hex');
+    await this.redis.set(this.oauthStateKey(state), JSON.stringify({ userId: caller.id, provider, redirectUri }), 600);
+    const authorizeUrl = connectors[provider].authorizeUrl(state, redirectUri);
+    return { state, authorizeUrl };
+  }
+  async oauthCallback(caller: Caller, provider: ProviderId, code: string, state: string, redirectUri: string) {
+    if (!code || !state) fail('OAUTH_EXCHANGE_FAILED', 'Authorization code and state are required');
+    const stored = await this.redis.take(this.oauthStateKey(state));
+    if (!stored) fail('OAUTH_EXCHANGE_FAILED', 'OAuth state is invalid or expired');
+    const record = JSON.parse(stored!) as { userId: string; provider: ProviderId; redirectUri: string };
+    if (record.userId !== caller.id || record.provider !== provider) fail('OAUTH_EXCHANGE_FAILED', 'OAuth state does not match this request');
+    let tokens;
+    try { tokens = await connectors[provider].exchangeCode(code, redirectUri || record.redirectUri); }
+    catch { fail('OAUTH_EXCHANGE_FAILED', 'The provider rejected the authorization code'); }
+    const enc = this.crypto.encrypt(tokens!.accessToken);
+    const encRefresh = tokens!.refreshToken ? this.crypto.encrypt(tokens!.refreshToken) : null;
+    return this.prisma.toolConnection.upsert({
+      where: { userId_provider: { userId: caller.id, provider } },
+      update: { encAccessToken: enc.ciphertext, encRefreshToken: encRefresh?.ciphertext, iv: enc.iv, authTag: enc.authTag, status: 'connected', expiresAt: tokens!.expiresAt },
+      create: { userId: caller.id, provider, encAccessToken: enc.ciphertext, encRefreshToken: encRefresh?.ciphertext, iv: enc.iv, authTag: enc.authTag, expiresAt: tokens!.expiresAt },
+    });
+  }
+  private static readonly NON_ACADEMIC_PATTERNS = [/\bhack(ing)?\b.*\b(bank|account|password|network)\b/i, /\bmake\b.*\b(bomb|explosive|weapon)\b/i, /\bcheat(ing)?\b.*\b(exam|test|spouse|partner)\b/i, /\b(illegal drugs?|buy drugs)\b/i, /\bself[- ]harm\b/i];
+  private looksNonAcademic(prompt: string) { return AppService.NON_ACADEMIC_PATTERNS.some((pattern) => pattern.test(prompt)); }
+  private async moderate(prompt: string, apiKey: string): Promise<boolean> {
+    try {
+      const response = await fetch('https://api.openai.com/v1/moderations', { method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ input: prompt }) });
+      if (!response.ok) return false;
+      const payload: any = await response.json().catch(() => ({}));
+      return Boolean(payload?.results?.[0]?.flagged);
+    } catch { return false; }
+  }
   async ai(caller: Caller, prompt: string, input: any) {
     if (input.parts?.some((part: any) => part.type !== 'text')) fail('AI_INPUT_UNSUPPORTED', 'Only text AI input is supported');
     const apiKey = this.config.get('OPENAI_API_KEY');
     if (!apiKey) fail('AI_NOT_CONFIGURED', 'AI is not configured. Set OPENAI_API_KEY on the API service.', 503);
+    const flagged = await this.moderate(prompt, apiKey!);
+    const nonAcademic = !flagged && this.looksNonAcademic(prompt);
+    if (flagged || nonAcademic) {
+      const response = 'I can only help with academic, project, and coursework-related requests. Please rephrase your question to focus on your studies, project work, or team planning.';
+      await this.prisma.aiInteraction.create({ data: { userId: caller.id, scopeType: input.scopeType, scopeId: input.scopeId, prompt, response, moderated: true } });
+      return { response, refused: true, grounded: false };
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 45_000);
     let response = '';
@@ -152,7 +233,7 @@ export class AppService {
         signal: controller.signal,
         body: JSON.stringify({
           model: this.config.get('OPENAI_MODEL'),
-          instructions: 'You are WebSphere AI, a concise and practical assistant for college projects, research, coursework, and team planning. Give actionable, accurate answers. Do not invent project data or claim actions were completed.',
+          instructions: 'You are WebSphere AI, a concise and practical assistant for college projects, research, coursework, and team planning. Give actionable, accurate answers. Do not invent project data or claim actions were completed. Only answer academic, project, and coursework related requests; politely decline anything else.',
           input: prompt,
           max_output_tokens: 900
         })
@@ -168,7 +249,62 @@ export class AppService {
     await this.prisma.aiInteraction.create({ data: { userId: caller.id, scopeType: input.scopeType, scopeId: input.scopeId, prompt, response, moderated: false } });
     return { response, refused: false, grounded: false };
   }
-  async analytics(caller: Caller, projectId: string) { const project = await this.project(caller, projectId); const stats = projectAnalytics(project.tasks.map((task: any) => ({ ...task, assigneeId: task.assignments[0]?.assigneeId })), project.deadline); return { ...stats, recommendations: recommendations(stats.riskLevel, stats.bottlenecks), tasksCompleted: project.tasks.filter((task: any) => task.status === 'completed').length }; }
+  async analytics(caller: Caller, projectId: string) {
+    const project = await this.project(caller, projectId);
+    const taskIds = project.tasks.map((task: any) => task.id);
+    const dependencies = taskIds.length ? await this.prisma.taskDependency.findMany({ where: { OR: [{ prerequisiteId: { in: taskIds } }, { dependentId: { in: taskIds } }] }, select: { prerequisiteId: true, dependentId: true } }) : [];
+    const stats = projectAnalytics(project.tasks.map((task: any) => ({ ...task, assigneeId: task.assignments[0]?.assigneeId })), project.deadline, new Date(), dependencies);
+    return { ...stats, recommendations: recommendations(stats.riskLevel, stats.bottlenecks), tasksCompleted: project.tasks.filter((task: any) => task.status === 'completed').length };
+  }
+  async analyticsTrends(caller: Caller, projectId: string) {
+    const project = await this.project(caller, projectId);
+    const now = new Date();
+    const weeks = Array.from({ length: 6 }, (_, index) => 5 - index).map((weeksAgo) => {
+      const start = new Date(now.getTime() - (weeksAgo + 1) * 7 * 86400000);
+      const end = new Date(now.getTime() - weeksAgo * 7 * 86400000);
+      const completed = project.tasks.filter((task: any) => task.completedAt && task.completedAt >= start && task.completedAt < end).length;
+      const total = project.tasks.filter((task: any) => task.createdAt < end).length;
+      return { periodStart: start, periodEnd: end, tasksCompleted: completed, progress: completionRate(project.tasks.filter((task: any) => task.status === 'completed' && task.completedAt && task.completedAt < end).length, total) };
+    });
+    const improving = weeks.length > 1 && weeks[weeks.length - 1].tasksCompleted >= weeks[0].tasksCompleted;
+    return { periods: weeks, trend: improving ? 'improving' : 'declining' };
+  }
+  async analyticsSummary(caller: Caller, projectId: string) {
+    const stats = await this.analytics(caller, projectId);
+    const summary = `This project has completed ${Math.round(stats.taskCompletionRate * 100)}% of its tasks with ${Math.round(stats.overallEfficiency * 100)}% on-time delivery. Current risk level is ${stats.riskLevel.replace('_', ' ')}${stats.bottlenecks.length ? ` with ${stats.bottlenecks.length} bottleneck${stats.bottlenecks.length === 1 ? '' : 's'} detected` : ''}.`;
+    return { summary, recommendations: stats.recommendations, riskLevel: stats.riskLevel, taskCompletionRate: stats.taskCompletionRate, overallEfficiency: stats.overallEfficiency };
+  }
   async ticket(caller: Caller, input: any) { return this.prisma.supportTicket.create({ data: { ...input, userId: caller.id } }); }
   async admin(caller: Caller) { if (caller.role !== Role.Administrator) fail('RBAC_FORBIDDEN', 'Administrator access is required', 403); }
+  async adminUpdateUser(caller: Caller, targetId: string, data: any) {
+    await this.admin(caller);
+    const updated = await this.prisma.user.update({ where: { id: targetId }, data });
+    if (data.status) await this.audit.log('AdminModule', 'account_lifecycle_change', 'info', `Administrator set account ${updated.email} status to ${data.status}`, caller.id);
+    if (data.role) await this.audit.log('AdminModule', 'account_role_change', 'info', `Administrator set account ${updated.email} role to ${data.role}`, caller.id);
+    return updated;
+  }
+  async monitoring(caller: Caller) {
+    await this.admin(caller);
+    const since24h = new Date(Date.now() - 24 * 3600000);
+    const since7d = new Date(Date.now() - 7 * 24 * 3600000);
+    const [totalUsers, activeUsers, lockedUsers, suspendedUsers, activeProjects, completedProjects, newSignups7d, tasksCompleted24h, openTickets, dbHealthy, redisHealthy] = await Promise.all([
+      this.prisma.user.count(),
+      this.prisma.user.count({ where: { status: 'active' } }),
+      this.prisma.user.count({ where: { status: 'locked' } }),
+      this.prisma.user.count({ where: { status: 'suspended' } }),
+      this.prisma.project.count({ where: { status: 'active' } }),
+      this.prisma.project.count({ where: { status: 'completed' } }),
+      this.prisma.user.count({ where: { createdAt: { gte: since7d } } }),
+      this.prisma.task.count({ where: { status: 'completed', completedAt: { gte: since24h } } }),
+      this.prisma.supportTicket.count({ where: { status: { in: ['pending', 'in_progress'] } } }),
+      this.prisma.$queryRaw`SELECT 1`.then(() => true).catch(() => false),
+      this.redis.ping().then(() => true).catch(() => false),
+    ]);
+    return {
+      users: { total: totalUsers, active: activeUsers, locked: lockedUsers, suspended: suspendedUsers, newSignups7d },
+      projects: { active: activeProjects, completed: completedProjects },
+      activity: { tasksCompleted24h, openSupportTickets: openTickets },
+      health: { database: dbHealthy ? 'up' : 'down', redis: redisHealthy ? 'up' : 'down', overall: dbHealthy && redisHealthy ? 'up' : 'degraded' },
+    };
+  }
 }

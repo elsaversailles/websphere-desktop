@@ -6,13 +6,16 @@ import { Namespace, Server, Socket } from 'socket.io';
 import type { AckDto, ApiError, CallParticipant, CallSignal, ClientToServerEvents, ServerToClientEvents } from '@websphere/shared';
 import { AppService } from './app.service.js';
 import { RedisService } from './redis.service.js';
+import { DomainEventsService } from './domain-events.service.js';
 
 @WebSocketGateway({ cors: { origin: process.env.WEB_ORIGIN?.split(',') ?? true, credentials: true }, namespace: '/' })
 export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
   @WebSocketServer() server!: Server<ClientToServerEvents, ServerToClientEvents>;
   private readonly presence = new Map<string, Set<string>>();
   private adapterClients: Redis[] = [];
-  constructor(private readonly app: AppService, private readonly redis: RedisService) {}
+  constructor(private readonly app: AppService, private readonly redis: RedisService, private readonly events: DomainEventsService) {
+    this.events.onNotification((userId, notification) => this.publishNotification(userId, notification));
+  }
   async afterInit(server: Server | Namespace) {
     const publisher = this.redis.duplicateClient();
     const subscriber = this.redis.duplicateClient();
@@ -21,8 +24,10 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
     const ioServer = 'server' in server ? server.server : server;
     ioServer.adapter(createAdapter(publisher, subscriber));
   }
-  async handleConnection(socket: Socket) { try { const token = socket.handshake.auth?.token; const caller = await this.app.caller(token ? `Bearer ${token}` : undefined); socket.data.caller = caller; this.presence.set(caller.id, new Set([...(this.presence.get(caller.id) ?? []), socket.id])); } catch { socket.disconnect(true); } }
+  async handleConnection(socket: Socket) { try { const token = socket.handshake.auth?.token; const caller = await this.app.caller(token ? `Bearer ${token}` : undefined); socket.data.caller = caller; this.presence.set(caller.id, new Set([...(this.presence.get(caller.id) ?? []), socket.id])); await socket.join(`user:${caller.id}`); } catch { socket.disconnect(true); } }
   publishPollTally(groupId: string, tally: unknown) { this.server.to(`group:${groupId}`).emit('poll:tally', tally); }
+  publishTaskUpdated(projectId: string, task: unknown) { this.server.to(`project:${projectId}`).emit('task:updated', task); }
+  publishNotification(userId: string, notification: unknown) { this.server.to(`user:${userId}`).emit('notification:new', notification); }
   handleDisconnect(socket: Socket) { const userId = socket.data.caller?.id; if (!userId) return; for (const room of socket.rooms) if (room.startsWith('call:')) socket.to(room).emit('call:participant-left', { groupId: room.slice(5), socketId: socket.id }); const ids = this.presence.get(userId); ids?.delete(socket.id); if (!ids?.size) this.presence.delete(userId); }
   @SubscribeMessage('group:join') groupJoin(@ConnectedSocket() socket: Socket, @MessageBody() groupId: string) { return this.ack(async () => { this.assertAuthenticated(socket); if (!groupId) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Group ID is required' }, 400); await this.app.member(groupId, socket.data.caller.id); await socket.join(`group:${groupId}`); }); }
   @SubscribeMessage('project:join') projectJoin(@ConnectedSocket() socket: Socket, @MessageBody() projectId: string) { return this.ack(async () => { this.assertAuthenticated(socket); if (!projectId) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Project ID is required' }, 400); await this.app.projectMember(projectId, socket.data.caller.id); await socket.join(`project:${projectId}`); }); }
