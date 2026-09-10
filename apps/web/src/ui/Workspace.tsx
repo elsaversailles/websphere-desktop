@@ -2,11 +2,11 @@ import { useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 import type { CallKind } from '@websphere/shared';
 import { clearSession, getAccessToken, request, saveSession, socketBaseUrl, type Session, type User } from '../api';
+import { AiAssistantModal } from './AiAssistantModal';
 import { Dashboard } from './Dashboard';
 import { GroupChatPage } from './GroupChatPage';
 import { GroupsPage } from './GroupsPage';
 import { IdeasPage } from './IdeasPage';
-import { MarkdownText } from './MarkdownText';
 import { ProjectsPage } from './ProjectsPage';
 import { AdminSettingsPage, CalendarPage, IntegrationsPage, NotificationsPage, ProfilePage, ProjectsAnalyticsPage, TasksPage, TrackerPage } from './LegacyPages';
 
@@ -30,7 +30,13 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const [page, setPage] = useState<Page>(administrator ? 'admin' : 'dashboard');
   const [selectedGroupId, setSelectedGroupId] = useState('');
   const [incomingCall, setIncomingCall] = useState<{ groupId: string; kind: CallKind } | null>(null);
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const sections = administrator ? adminSections : userSections;
+
+  function navigate(target: Page) {
+    if (target === 'assistant') setAssistantOpen(true);
+    else setPage(target);
+  }
 
   useEffect(() => {
     const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
@@ -62,11 +68,10 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       <div className="sb-bot"><div className="uchip"><span className="ava">{initials(session.user.fullName)}</span><span><strong className="u-name">{session.user.fullName}</strong><small className="u-role">{administrator ? 'Administrator' : 'Member'}</small></span></div><button className="logout-btn" onClick={() => void logout()}>↪ Logout</button></div>
     </aside>
     <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><GlobeIcon />WebSphere</span><select value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}</select></div><div className="main">
-      {page === 'dashboard' ? <Dashboard name={session.user.fullName} notify={notify} onPage={setPage} /> : null}
+      {page === 'dashboard' ? <Dashboard name={session.user.fullName} notify={notify} onPage={navigate} /> : null}
       {page === 'groups' ? <GroupsPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onIdeas={() => setPage('ideas')} onChat={() => setPage('chat')} notify={notify} /> : null}
       {page === 'ideas' ? <IdeasPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} /> : null}
       {page === 'projects' ? <ProjectsPage notify={notify} /> : null}
-      {page === 'assistant' ? <AssistantPage notify={notify} /> : null}
       {page === 'admin' ? <AdminPage notify={notify} /> : null}
       {page === 'accounts' ? <AdminAccounts notify={notify} /> : null}
       {page === 'chat' ? <GroupChatPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} incomingCall={incomingCall?.groupId === selectedGroupId ? incomingCall : null} onIncomingCallHandled={() => setIncomingCall(null)} /> : null}
@@ -80,13 +85,9 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'profile' ? <ProfilePage user={session.user} onUserUpdated={updateUser} onSessionInvalidated={() => { clearSession(); onLogout(); }} notify={notify} /> : null}
       {page === 'settings' ? <AdminSettingsPage notify={notify} /> : null}
     </div></div>
-  </div></main>;
-}
-
-function AssistantPage({ notify }: { notify: (message: string) => void }) {
-  const [prompt, setPrompt] = useState(''); const [answer, setAnswer] = useState(''); const [busy, setBusy] = useState(false);
-  async function ask() { if (!prompt.trim()) return; setBusy(true); try { const result = await request<{ response: string }>('/ai/ask', { method: 'POST', body: JSON.stringify({ prompt }) }); setAnswer(result.response); } catch (error: any) { notify(error.message); } finally { setBusy(false); } }
-  return <section className="sp on"><div className="ph"><div><h2>WebSphere AI</h2><div className="ph-sub">Academic ideas, project planning, and risk analysis</div></div></div><div className="cc ai-workspace"><label className="lbl">How can I help?</label><textarea className="ifield ai-textarea" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Ask about project titles, thesis topics, tools, or academic planning..." rows={5} /><button className="btn" disabled={busy} onClick={() => void ask()}>{busy ? 'Thinking…' : 'Send'}</button>{answer ? <article className="ai-response ai-markdown"><MarkdownText source={answer} /></article> : <div className="empty-message">Your AI conversation starts here.</div>}</div></section>;
+  </div>
+  <AiAssistantModal open={assistantOpen} onClose={() => setAssistantOpen(false)} notify={notify} />
+  </main>;
 }
 
 function AdminPage({ notify }: { notify: (message: string) => void }) {
