@@ -13,7 +13,7 @@ export type Poll = {
   groupId: string;
   open: boolean;
   viewerOptionId: string | null;
-  options: Array<{ optionId: string; ideaId: string; label: string; votes: number }>;
+  options: Array<{ optionId: string; ideaId: string; label: string; votes: number; voters: Array<{ userId: string; fullName: string }> }>;
 };
 
 export type GroupHub = {

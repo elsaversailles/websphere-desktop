@@ -3,7 +3,7 @@ import { io, type Socket } from 'socket.io-client';
 import type { CallKind, CallParticipant, CallSignal } from '@websphere/shared';
 import { getAccessToken, request, socketBaseUrl } from '../api';
 import { GroupAvatar } from './GroupAvatar';
-import type { GroupHub, GroupSummary } from './types';
+import type { GroupHub, GroupSummary, Poll } from './types';
 
 type Props = { userId: string; selectedGroupId: string; onSelectGroup: (id: string) => void; notify: (message: string) => void; incomingCall: { groupId: string; kind: CallKind } | null; onIncomingCallHandled: () => void };
 type ActiveCall = { groupId: string; kind: CallKind };
@@ -30,9 +30,22 @@ function MediaTile({ label, stream, muted, local }: { label: string; stream: Med
   </div>;
 }
 
-function MemberAvatar({ name, avatarUrl }: { name: string; avatarUrl?: string | null }) {
+function MemberAvatar({ name, avatarUrl, className = '' }: { name: string; avatarUrl?: string | null; className?: string }) {
   const initials = name.split(/\s+/).filter(Boolean).map((part) => part[0]).join('').slice(0, 2).toUpperCase();
-  return avatarUrl ? <img className="gc-member-avatar" src={avatarUrl} alt={`${name}'s profile picture`} /> : <span className="gc-member-avatar fallback" aria-label={`${name}'s initials`}>{initials}</span>;
+  const classes = `gc-member-avatar ${className}`.trim();
+  return avatarUrl ? <img className={classes} src={avatarUrl} alt={`${name}'s profile picture`} /> : <span className={`${classes} fallback`} aria-label={`${name}'s initials`}>{initials}</span>;
+}
+
+function IdeaVoteCard({ option, totalVotes, viewerOptionId, viewerId, onVote }: { option: Poll['options'][number]; totalVotes: number; viewerOptionId: string | null; viewerId: string; onVote: (optionId: string) => void }) {
+  const chosen = viewerOptionId === option.optionId;
+  const percentage = totalVotes ? Math.round(option.votes / totalVotes * 100) : 0;
+  const voters = option.voters.map((voter) => voter.userId === viewerId ? 'You' : voter.fullName);
+  return <article className={`gc-poll-option ${chosen ? 'chosen' : ''}`}>
+    <div className="gc-poll-option-heading"><strong>{option.label}</strong><span>{option.votes} vote{option.votes === 1 ? '' : 's'}</span></div>
+    <div className="gc-vote-meter" aria-label={`${option.votes} votes`}><span style={{ width: `${percentage}%` }} /></div>
+    <p className="gc-voter-list">{voters.length ? voters.join(', ') : 'No votes yet'}</p>
+    <button type="button" aria-pressed={chosen} className={chosen ? 'voted' : ''} onClick={() => onVote(option.optionId)}>{chosen ? 'Voted' : 'Vote'}</button>
+  </article>;
 }
 
 export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, incomingCall, onIncomingCallHandled }: Props) {
@@ -210,12 +223,12 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
       {hub ? <>
         <main className="gc-main-chat">
           <header className="gc-chat-header"><GroupAvatar name={hub.group.name} className="gc-list-avatar large" /><div><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => notify('Add members from My Groups → Group Hub.')}>Add Members</button><button>Search</button></div></header>
-          <div className="gchat-msgs">{hub.messages.length ? [...hub.messages].reverse().map((message) => { const member = hub.group.members.find((value) => value.userId === message.senderId); const sender = message.senderId === userId ? 'You' : member?.user.fullName ?? 'Group member'; return <div className={`gc-msg ${message.senderId === userId ? 'me' : ''}`} key={message.id}><span className="gc-ava">{sender === 'You' ? 'Y' : sender.slice(0, 1)}</span><div className="gc-bub"><div className="gc-name">{sender}</div><div className="gc-txt">{message.body}</div><div className="gc-time">{new Date(message.createdAt).toLocaleString()}</div></div></div>; }) : <div className="legacy-empty">Choose or create a group to begin a conversation.</div>}</div>
+          <div className="gchat-msgs">{hub.messages.length ? [...hub.messages].reverse().map((message) => { const member = hub.group.members.find((value) => value.userId === message.senderId); const sender = message.senderId === userId ? 'You' : member?.user.fullName ?? 'Group member'; return <div className={`gc-msg ${message.senderId === userId ? 'me' : ''}`} key={message.id}><MemberAvatar name={member?.user.fullName ?? sender} avatarUrl={member?.user.avatarUrl} className="gc-message-avatar" /><div className="gc-bub"><div className="gc-name">{sender}</div><div className="gc-txt">{message.body}</div><div className="gc-time">{new Date(message.createdAt).toLocaleString()}</div></div></div>; }) : <div className="legacy-empty">Choose or create a group to begin a conversation.</div>}</div>
           <form className="gchat-ir" onSubmit={send}><input className="gchat-input" name="body" placeholder="Type a message to your group…" autoComplete="off" /><button className="gchat-send">Send</button></form>
         </main>
         <aside className="gc-right-panel">
           <section><div className="gc-side-title"><h3>Members</h3><span>{hub.group.members.length}</span></div>{hub.group.members.map((member) => <div className="gc-member-row" key={member.userId}><MemberAvatar name={member.user.fullName} avatarUrl={member.user.avatarUrl} /><span><strong>{member.user.fullName}</strong><small>{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</small></span><i /></div>)}</section>
-          <section className="gc-voting"><div className="gc-side-title"><h3>Idea Voting</h3></div><p>Vote for a project title. Most votes wins!</p>{hub.poll ? <div className="gc-poll-options">{hub.poll.options.map((option) => <div className={`gc-poll-option ${hub.poll?.viewerOptionId === option.optionId ? 'chosen' : ''}`} key={option.optionId}><span><strong>{option.label}</strong><small>{option.votes} vote{option.votes === 1 ? '' : 's'}</small></span><button onClick={() => void vote(option.optionId)}>Vote</button></div>)}</div> : <div className="gc-panel-empty">Your group vote starts in Idea Management.</div>}</section>
+          <section className="gc-voting"><div className="gc-side-title"><h3>Idea Voting</h3></div>{hub.poll ? <div className="gc-poll-options">{hub.poll.options.map((option) => <IdeaVoteCard key={option.optionId} option={option} totalVotes={hub.poll.options.reduce((total, value) => total + value.votes, 0)} viewerOptionId={hub.poll.viewerOptionId} viewerId={userId} onVote={(optionId) => void vote(optionId)} />)}</div> : <div className="gc-panel-empty">Your group vote starts in Idea Management.</div>}</section>
           <button className="gc-start-project" disabled={!hub.poll} onClick={() => void startProject()}>Start Project</button>
         </aside>
       </> : <div className="gc-no-selection"><strong>Your workspace is ready</strong><span>Choose or create a group to begin a conversation.</span></div>}
