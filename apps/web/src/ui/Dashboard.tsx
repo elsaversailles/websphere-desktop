@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { getAccessToken, request, socketBaseUrl } from '../api';
 import type { GroupHub as GroupHubData, GroupSummary } from './types';
@@ -19,6 +19,8 @@ export function Dashboard({ name, notify, onPage }: DashboardProps) {
   const [createGroupHub, setCreateGroupHub] = useState<GroupHubData | null>(null);
   const [saving, setSaving] = useState(false);
   const [unread, setUnread] = useState(0);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const notificationsRef = useRef<HTMLDivElement | null>(null);
 
   const refreshDashboard = useCallback(() => request<DashboardData>('/dashboard').then(setData).catch((error: Error) => notify(error.message)), [notify]);
   useEffect(() => { void refreshDashboard(); }, [refreshDashboard]);
@@ -28,6 +30,21 @@ export function Dashboard({ name, notify, onPage }: DashboardProps) {
     socket.on('notification:new', () => void refreshDashboard());
     return () => { socket.disconnect(); };
   }, [refreshDashboard]);
+  useEffect(() => {
+    if (!notificationsOpen) return;
+    function closeOnOutsideClick(event: MouseEvent) {
+      if (!notificationsRef.current?.contains(event.target as Node)) setNotificationsOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') setNotificationsOpen(false);
+    }
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [notificationsOpen]);
   const days = useMemo(calendarDays, []);
 
   async function openCreateDialog() {
@@ -59,7 +76,7 @@ export function Dashboard({ name, notify, onPage }: DashboardProps) {
 
   if (!data) return <section className="sp on"><div className="cc">Loading your workspace…</div></section>;
   return <section className="sp on">
-    <div className="ph"><div><h2>Dashboard</h2><div className="ph-sub dashboard-welcome">Welcome, {name}!</div></div><div className="ph-acts"><button className="ai-head-btn" title="WebSphere AI" onClick={() => onPage('assistant')}>✦</button><button className="new-btn" title="Create new project" onClick={() => void openCreateDialog()}>+</button><button className="notif-head-btn" title="Notifications" onClick={() => onPage('notifications')}><BellIcon />{unread ? <span className="notif-head-dot">{unread > 9 ? '9+' : unread}</span> : null}</button></div></div>
+    <div className="ph"><div><h2>Dashboard</h2><div className="ph-sub dashboard-welcome">Welcome, {name}!</div></div><div className="ph-acts"><button className="ai-head-btn" title="WebSphere AI" onClick={() => onPage('assistant')}>✦</button><button className="new-btn" title="Create new project" onClick={() => void openCreateDialog()}>+</button><div className="notif-popover-wrap" ref={notificationsRef}><button className="notif-head-btn" title="Notifications" aria-label="Notifications" aria-haspopup="dialog" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen((open) => !open)}><BellIcon />{unread ? <span className="notif-head-dot">{unread > 9 ? '9+' : unread}</span> : null}</button>{notificationsOpen ? <section className="notif-popover" role="dialog" aria-label="Notifications"><header className="notif-popover-header"><h3>Notifications</h3><button type="button" onClick={() => { setNotificationsOpen(false); onPage('notifications'); }}>View All</button></header><div className="notif-popover-list">{data.notifications.length ? data.notifications.slice(0, 4).map((item) => <div className={`notif-popover-item ${item.read ? 'read' : ''}`} key={item.id}><span className="notif-popover-dot" /><div><strong>{item.message}</strong><small>{item.read ? 'Read' : 'New'}</small></div></div>) : <p className="notif-popover-empty">You have no notifications yet.</p>}</div></section> : null}</div></div></div>
     {createOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setCreateOpen(false); }}><div className="modal-box"><div className="modal-ttl"><span>New Project</span><button className="modal-close" onClick={() => setCreateOpen(false)}>×</button></div><form onSubmit={createProject}>
       <label className="lbl">Group</label><select className="ifield" value={createGroupId} onChange={(event) => void pickCreateGroup(event.target.value)} required><option value="">Select a group</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select>
       <label className="lbl">Project Title</label><input className="ifield" name="title" required minLength={2} maxLength={180} placeholder="Project title" />

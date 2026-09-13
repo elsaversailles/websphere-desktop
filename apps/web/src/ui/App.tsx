@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { loadSession, restoreSession, type Session } from '../api';
+import { loadSession, restoreSession, sessionExpiredMessage, sessionInvalidatedEvent, type Session } from '../api';
 import { AuthScreen } from './AuthScreen';
 import { Toast } from './Toast';
 import { Workspace } from './Workspace';
@@ -10,6 +10,14 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => { void restoreSession().then(setSession).finally(() => setRestoring(false)); }, []);
+  useEffect(() => {
+    function handleSessionInvalidation() {
+      setSession(null);
+      setToast(sessionExpiredMessage);
+    }
+    window.addEventListener(sessionInvalidatedEvent, handleSessionInvalidation);
+    return () => window.removeEventListener(sessionInvalidatedEvent, handleSessionInvalidation);
+  }, []);
   useEffect(() => { if (!toast) return; const timeout = window.setTimeout(() => setToast(null), 4200); return () => window.clearTimeout(timeout); }, [toast]);
   const notify = useCallback((message: string) => setToast(message), []);
 

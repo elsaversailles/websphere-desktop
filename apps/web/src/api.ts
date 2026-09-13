@@ -1,4 +1,6 @@
 const apiBase = import.meta.env.VITE_API_URL || '/api';
+export const sessionInvalidatedEvent = 'websphere:session-invalidated';
+export const sessionExpiredMessage = 'Your session has expired. Please sign in again.';
 
 export type Role = 'Administrator' | 'Project_Leader' | 'Project_Member';
 export type User = { id: string; fullName: string; email: string; institution?: string | null; course?: string | null; avatarUrl?: string | null; role: Role };
@@ -32,14 +34,28 @@ export function clearSession() {
   sessionKeys.forEach((key) => sessionStorage.removeItem(key));
 }
 
-export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+type ApiRequestInit = RequestInit & { skipSessionInvalidation?: boolean };
+
+function invalidateSession() {
+  clearSession();
+  window.dispatchEvent(new CustomEvent(sessionInvalidatedEvent));
+}
+
+export async function request<T>(path: string, init: ApiRequestInit = {}): Promise<T> {
+  const { skipSessionInvalidation, ...requestInit } = init;
   const formData = init.body instanceof FormData;
   const response = await fetch(`${apiBase}${path}`, {
-    ...init,
-    headers: { ...(!formData ? { 'content-type': 'application/json' } : {}), ...(access ? { authorization: `Bearer ${access}` } : {}), ...init.headers },
+    ...requestInit,
+    headers: { ...(!formData ? { 'content-type': 'application/json' } : {}), ...(access ? { authorization: `Bearer ${access}` } : {}), ...requestInit.headers },
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiRequestError(body.message ?? 'Request failed', body.code, body.fields);
+  if (!response.ok) {
+    if (!skipSessionInvalidation && response.status === 401 && body.code === 'AUTH_UNAUTHENTICATED') {
+      invalidateSession();
+      throw new ApiRequestError(sessionExpiredMessage, body.code, body.fields);
+    }
+    throw new ApiRequestError(body.message ?? 'Request failed', body.code, body.fields);
+  }
   return body as T;
 }
 
@@ -59,15 +75,15 @@ export async function restoreSession(): Promise<Session | null> {
   const existing = loadSession();
   if (!existing) return null;
   try {
-    const user = await request<User>('/users/me');
+    const user = await request<User>('/users/me', { skipSessionInvalidation: true });
     const restored = { ...existing, user };
     saveSession(restored);
     return restored;
   } catch {
     try {
-      const refreshed = await request<{ access: string; refresh: string; role: Role }>('/auth/refresh', { method: 'POST', body: JSON.stringify({ refresh: existing.refresh }) });
+      const refreshed = await request<{ access: string; refresh: string; role: Role }>('/auth/refresh', { method: 'POST', body: JSON.stringify({ refresh: existing.refresh }), skipSessionInvalidation: true });
       access = refreshed.access;
-      const user = await request<User>('/users/me');
+      const user = await request<User>('/users/me', { skipSessionInvalidation: true });
       const restored = { ...refreshed, user };
       saveSession(restored);
       return restored;
