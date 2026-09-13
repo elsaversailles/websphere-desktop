@@ -42,7 +42,16 @@ export const taskSchema = z.object({
   title: z.string().trim().min(2).max(180), description: z.string().trim().min(1), deadline: z.coerce.date().optional(),
   priority: z.enum(['low', 'medium', 'high']).default('medium'), expectedDurationHrs: z.number().positive().optional(),
 });
-export const taskStatusSchema = z.object({ status: z.enum(['pending', 'ongoing', 'completed']) });
+export const taskStatusSchema = z.object({ status: z.enum(['pending', 'ongoing', 'for_review', 'completed']) });
+export const resourceLinkSchema = z.object({
+  connectionId: z.string().cuid(),
+  title: z.string().trim().min(2).max(180),
+  externalUrl: z.string().url().max(4000),
+});
+export const resourceUpdateSchema = resourceLinkSchema.extend({
+  assigneeId: z.string().cuid().optional(),
+  status: z.enum(['pending', 'ongoing', 'for_review', 'completed']).optional(),
+});
 export const ideaSchema = z.object({ title: z.string().trim().min(2).max(180), body: z.string().trim().min(1) });
 export const calendarEventSchema = z.object({ title: z.string().trim().min(2), type: z.enum(['meeting','work_session','presentation','activity']), startAt: z.coerce.date(), endAt: z.coerce.date().optional(), projectId: z.string().cuid().optional() });
 export const supportTicketSchema = z.object({ category: z.enum(['account_reactivation','account_deletion','password_concern','bug_report','other']), subject: z.string().trim().min(2), body: z.string().trim().min(1) });

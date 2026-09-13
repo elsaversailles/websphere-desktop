@@ -1,10 +1,10 @@
 type Props = { name: string; className?: string };
 
 const palettes = [
-  ['#0038A8', '#20AD67'],
-  ['#005EAF', '#13B6C8'],
-  ['#1D4E9E', '#41C58A'],
-  ['#183A8C', '#19A8DF'],
+  '#0038A8',
+  '#005EAF',
+  '#1D4E9E',
+  '#183A8C',
 ];
 
 function initials(name: string) {
@@ -19,10 +19,10 @@ function paletteFor(name: string) {
 }
 
 export function groupAvatarUrl(name: string) {
-  const [background, accent] = paletteFor(name);
+  const background = paletteFor(name);
   const letters = initials(name);
   const fontSize = letters.length > 1 ? 42 : 48;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="${letters}"><circle cx="60" cy="60" r="60" fill="${background}"/><text x="60" y="69" fill="${accent}" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="700" text-anchor="middle">${letters}</text></svg>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="${letters}"><circle cx="60" cy="60" r="60" fill="${background}"/><text x="60" y="69" fill="#fff" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="700" text-anchor="middle">${letters}</text></svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 

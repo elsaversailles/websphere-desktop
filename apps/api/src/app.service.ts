@@ -15,14 +15,15 @@ import { AuditLogService } from './audit-log.service.js';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
-const WorkflowEventType = { status_change: 'status_change', task_completed: 'task_completed', assignment_change: 'assignment_change' } as const;
+const WorkflowEventType = { status_change: 'status_change', task_completed: 'task_completed', assignment_change: 'assignment_change', progress_activity: 'progress_activity' } as const;
 const NotificationType = { task_assignment: 'task_assignment' } as const;
 type Role = (typeof Role)[keyof typeof Role];
-type TaskStatus = 'pending' | 'ongoing' | 'completed';
+type TaskStatus = 'pending' | 'ongoing' | 'for_review' | 'completed';
 type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva' | 'figma';
 type NotificationType = (typeof NotificationType)[keyof typeof NotificationType];
 const fail = (code: string, message: string, status: number = HttpStatus.BAD_REQUEST, fields?: Record<string, string>): never => { throw new HttpException({ code, message, ...(fields ? { fields } : {}) }, status); };
 type Caller = { id: string; role: Role; tv: number };
+const taskProgress = (status: string) => status === 'completed' ? 100 : status === 'for_review' ? 75 : status === 'ongoing' ? 50 : 0;
 
 @Injectable()
 export class AppService {
@@ -132,7 +133,7 @@ export class AppService {
     await this.projectMember(task.projectId, caller.id);
     const assignment = task.assignments[0];
     const [assignee, assigner] = assignment ? await Promise.all([this.prisma.user.findUnique({ where: { id: assignment.assigneeId }, select: { id: true, fullName: true } }), this.prisma.user.findUnique({ where: { id: assignment.assignerId }, select: { id: true, fullName: true } })]) : [null, null];
-    return { ...task, assignee, assigner, progress: task.status === 'completed' ? 100 : task.status === 'ongoing' ? 50 : 0 };
+    return { ...task, assignee, assigner, progress: taskProgress(task.status) };
   }
   async updateTask(caller: Caller, id: string, input: any) { const task = await this.task(caller, id); await this.projectMember(task.projectId, caller.id, true); return this.prisma.task.update({ where: { id }, data: input }); }
   async assignTask(caller: Caller, id: string, assigneeId: string) { const task = await this.task(caller, id); await this.projectMember(task.projectId, caller.id, true); await this.projectMember(task.projectId, assigneeId); await this.prisma.$transaction([this.prisma.taskAssignment.updateMany({ where: { taskId: id, active: true }, data: { active: false } }), this.prisma.taskAssignment.create({ data: { taskId: id, assigneeId, assignerId: caller.id } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: WorkflowEventType.assignment_change, toValue: assigneeId } })]); await this.jobs.enqueueAnalyticsRecompute(task.projectId); return this.notify([assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}”`, id, 'task'); }
@@ -142,10 +143,113 @@ export class AppService {
     const assignerIds = [...new Set(tasks.map((task: any) => task.assignments[0]?.assignerId).filter(Boolean))];
     const assigners = assignerIds.length ? await this.prisma.user.findMany({ where: { id: { in: assignerIds } }, select: { id: true, fullName: true } }) : [];
     const assignerName = (id?: string) => assigners.find((user: any) => user.id === id)?.fullName ?? 'Unassigned';
-    const autoProgress = (status: string) => (status === 'completed' ? 100 : status === 'ongoing' ? 50 : 0);
-    return tasks.map((task: any) => ({ ...task, project: task.project, assignedBy: assignerName(task.assignments[0]?.assignerId), progress: autoProgress(task.status) }));
+    return tasks.map((task: any) => ({ ...task, project: task.project, assignedBy: assignerName(task.assignments[0]?.assignerId), progress: taskProgress(task.status) }));
   }
-  async tracker(caller: Caller, projectId: string) { await this.projectMember(projectId, caller.id); const tasks = await this.prisma.task.findMany({ where: { projectId } }); const counts = Object.fromEntries(['pending', 'ongoing', 'completed'].map((status) => [status, tasks.filter((task) => task.status === status).length])); return { ...counts, total: tasks.length, progress: completionRate(counts.completed, tasks.length) }; }
+  async tracker(caller: Caller, projectId: string) { await this.projectMember(projectId, caller.id); const tasks = await this.prisma.task.findMany({ where: { projectId } }); const counts = Object.fromEntries(['pending', 'ongoing', 'for_review', 'completed'].map((status) => [status, tasks.filter((task) => task.status === status).length])); return { ...counts, total: tasks.length, progress: completionRate(counts.completed, tasks.length) }; }
+  async taskTracker(caller: Caller) {
+    const [tasks, connections, workflow, usage] = await Promise.all([
+      this.prisma.task.findMany({
+        where: { project: { members: { some: { userId: caller.id } } } },
+        orderBy: { createdAt: 'desc' },
+        include: {
+          project: { select: { id: true, title: true, members: { include: { user: { select: { id: true, fullName: true, avatarUrl: true } } } } } },
+          assignments: { where: { active: true } },
+          linkedResources: { include: { connection: { include: { tool: true } } }, orderBy: { createdAt: 'desc' } },
+          workflow: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+      }),
+      this.prisma.toolConnection.findMany({ where: { userId: caller.id }, include: { tool: true }, orderBy: { lastSyncedAt: 'desc' } }),
+      this.prisma.workflowEvent.findMany({ where: { project: { members: { some: { userId: caller.id } } } }, orderBy: { createdAt: 'desc' }, take: 24, include: { task: { select: { id: true, title: true } }, project: { select: { title: true } } } }),
+      this.prisma.toolUsage.findMany({ where: { connection: { userId: caller.id } }, orderBy: { createdAt: 'desc' }, take: 24, include: { connection: { include: { tool: true } } } }),
+    ]);
+    const actorIds = [...new Set(workflow.map((event: any) => event.actorId))];
+    const actors = actorIds.length ? await this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, fullName: true, avatarUrl: true } }) : [];
+    const taskItems = tasks.map((task: any) => {
+      const resourceDates = task.linkedResources.map((resource: any) => new Date(resource.createdAt).getTime());
+      const latest = Math.max(new Date(task.createdAt).getTime(), task.startedAt ? new Date(task.startedAt).getTime() : 0, task.completedAt ? new Date(task.completedAt).getTime() : 0, task.workflow[0] ? new Date(task.workflow[0].createdAt).getTime() : 0, ...resourceDates);
+      const callerMembership = task.project.members.find((member: any) => member.userId === caller.id);
+      const canUpdateStatus = task.assignments.some((assignment: any) => assignment.assigneeId === caller.id);
+      const canAssign = callerMembership?.role === ProjectRole.Project_Leader;
+      return {
+        id: task.id, title: task.title, description: task.description, deadline: task.deadline, priority: task.priority, status: task.status,
+        progress: taskProgress(task.status), createdAt: task.createdAt, latestActivityAt: new Date(latest), project: { id: task.project.id, title: task.project.title },
+        resources: task.linkedResources.map((resource: any) => ({ id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: resource.connection.provider, platform: resource.connection.tool.name, category: resource.connection.tool.category, createdAt: resource.createdAt })),
+        assignees: task.assignments.map((assignment: any) => task.project.members.find((member: any) => member.userId === assignment.assigneeId)?.user).filter(Boolean),
+        canUpdateStatus,
+        canAssign,
+        canEditResource: canUpdateStatus || canAssign,
+        collaborators: task.project.members.map((member: any) => ({ id: member.user.id, fullName: member.user.fullName, avatarUrl: member.user.avatarUrl })),
+      };
+    });
+    const workflowActivity = workflow.map((event: any) => ({
+      id: `workflow-${event.id}`, kind: 'workflow', type: event.type, taskTitle: event.task?.title ?? null, projectTitle: event.project.title,
+      actor: actors.find((actor: any) => actor.id === event.actorId) ?? null, fromValue: event.fromValue, toValue: event.toValue, createdAt: event.createdAt,
+    }));
+    const usageActivity = usage.map((event: any) => ({
+      id: `usage-${event.id}`, kind: 'integration', action: event.action, platform: event.connection.tool.name, provider: event.connection.provider, createdAt: event.createdAt,
+    }));
+    return {
+      tasks: taskItems,
+      connections: connections.map((connection: any) => ({ id: connection.id, provider: connection.provider, platform: connection.tool.name, category: connection.tool.category, status: connection.status, syncState: connection.syncState, lastSyncedAt: connection.lastSyncedAt })),
+      activity: [...workflowActivity, ...usageActivity].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 24),
+    };
+  }
+  async linkTaskResource(caller: Caller, taskId: string, input: { connectionId: string; title: string; externalUrl: string }) {
+    const task = await this.task(caller, taskId);
+    const connection = await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } });
+    if (!connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before linking a file', 400);
+    const resource = await this.prisma.linkedResource.create({ data: { connectionId: connection.id, projectId: task.projectId, taskId, externalId: randomBytes(12).toString('hex'), title: input.title, externalUrl: input.externalUrl }, include: { connection: { include: { tool: true } } } });
+    await Promise.all([
+      this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Linked “${resource.title}” to “${task.title}”` } }),
+      this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: WorkflowEventType.progress_activity, fromValue: 'resource_linked', toValue: resource.title } }),
+    ]);
+    return { id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: connection.provider, platform: connection.tool.name, category: connection.tool.category, createdAt: resource.createdAt };
+  }
+  async updateLinkedResource(caller: Caller, resourceId: string, input: { connectionId: string; title: string; externalUrl: string; assigneeId?: string; status?: TaskStatus }) {
+    const resource = await this.prisma.linkedResource.findUniqueOrThrow({ where: { id: resourceId }, include: { task: { include: { assignments: { where: { active: true } }, project: { include: { members: true } } } } } });
+    if (!resource.task) fail('VALIDATION_FAILED', 'Only task-linked resources can be edited here', 400);
+    const task = resource.task;
+    const membership = await this.projectMember(task.projectId, caller.id);
+    const activeAssignment = task.assignments[0];
+    const isAssignee = activeAssignment?.assigneeId === caller.id;
+    const isLeader = membership.role === ProjectRole.Project_Leader;
+    if (!isAssignee && !isLeader) fail('RBAC_FORBIDDEN', 'Only the active assignee or project leader can edit this file link', 403);
+    if (input.assigneeId && input.assigneeId !== activeAssignment?.assigneeId && !isLeader) fail('RBAC_FORBIDDEN', 'Only the project leader can reassign a task', 403);
+    if (input.status && input.status !== task.status && !isAssignee) fail('RBAC_FORBIDDEN', 'Only the active assignee can change task status', 403);
+    if (input.assigneeId) await this.projectMember(task.projectId, input.assigneeId);
+    const connection = await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } });
+    if (!connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before saving the file link', 400);
+    const now = new Date();
+    const reassigned = input.assigneeId && input.assigneeId !== activeAssignment?.assigneeId;
+    const changedStatus = input.status && input.status !== task.status;
+    await this.prisma.$transaction([
+      this.prisma.linkedResource.update({ where: { id: resource.id }, data: { connectionId: connection.id, title: input.title, externalUrl: input.externalUrl } }),
+      ...(reassigned ? [this.prisma.taskAssignment.updateMany({ where: { taskId: task.id, active: true }, data: { active: false } }), this.prisma.taskAssignment.create({ data: { taskId: task.id, assigneeId: input.assigneeId, assignerId: caller.id } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: WorkflowEventType.assignment_change, fromValue: activeAssignment?.assigneeId, toValue: input.assigneeId } })] : []),
+      ...(changedStatus ? [this.prisma.task.update({ where: { id: task.id }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), ...(input.status === 'completed' ? { completedAt: now } : {}) } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: input.status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: input.status } })] : []),
+    ]);
+    await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Updated “${input.title}” linked to “${task.title}”` } });
+    if (changedStatus || reassigned) await this.jobs.enqueueAnalyticsRecompute(task.projectId);
+    return { ok: true, taskId: task.id, projectId: task.projectId };
+  }
+  async launchResource(caller: Caller, resourceId: string) {
+    const resource = await this.prisma.linkedResource.findUniqueOrThrow({ where: { id: resourceId }, include: { connection: { include: { tool: true } } } });
+    if (resource.connection.userId !== caller.id) fail('RBAC_FORBIDDEN', 'This linked file belongs to another user connection', 403);
+    if (resource.taskId) await this.task(caller, resource.taskId);
+    else if (resource.projectId) await this.projectMember(resource.projectId, caller.id);
+    const externalUrl = await connectors[resource.connection.provider as ProviderId].launchUrl({ projectId: resource.projectId ?? undefined, taskId: resource.taskId ?? undefined, externalId: resource.externalId, title: resource.title, externalUrl: resource.externalUrl });
+    await this.prisma.toolUsage.create({ data: { connectionId: resource.connectionId, action: `Opened “${resource.title}”` } });
+    return { externalUrl, platform: resource.connection.tool.name };
+  }
+  async syncIntegration(caller: Caller, connectionId: string) {
+    const connection = await this.prisma.toolConnection.findFirst({ where: { id: connectionId, userId: caller.id }, include: { tool: true } });
+    if (!connection || connection.status !== 'connected') fail('INTEGRATION_UNAVAILABLE', 'This integration is not connected', 400);
+    let result: { summary: string } = { summary: 'synchronized' };
+    try { result = await connectors[connection.provider as ProviderId].sync(); }
+    catch { fail('INTEGRATION_SYNC_FAILED', `Could not sync ${connection.tool.name}. Try again shortly.`, 502); }
+    const updated = await this.prisma.toolConnection.update({ where: { id: connection.id }, data: { lastSyncedAt: new Date(), syncState: result.summary } });
+    await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Synced ${connection.tool.name}` } });
+    return { ...updated, platform: connection.tool.name, summary: result.summary };
+  }
   async idea(caller: Caller, groupId: string, input: any) { await this.member(groupId, caller.id); return this.prisma.idea.create({ data: { ...input, groupId, authorId: caller.id } }); }
   async ideas(caller: Caller, groupId: string) { await this.member(groupId, caller.id); return this.prisma.idea.findMany({ where: { groupId }, orderBy: { createdAt: 'desc' } }); }
   async reviseIdea(caller: Caller, id: string, input: any) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can revise an unselected idea', 403); return this.prisma.idea.update({ where: { id }, data: { ...input, status: 'refined' } }); }
@@ -161,7 +265,7 @@ export class AppService {
   }
   async openPoll(caller: Caller, groupId: string, ideaIds: string[]) { await this.member(groupId, caller.id); const ideas = await this.prisma.idea.findMany({ where: { id: { in: ideaIds }, groupId } }); if (ideas.length !== ideaIds.length) fail('VALIDATION_FAILED', 'Every poll option must be a group idea'); return this.prisma.ideaPoll.create({ data: { groupId, createdBy: caller.id, options: { create: ideas.map((idea) => ({ ideaId: idea.id, label: idea.title })) } }, include: { options: true } }); }
   async vote(caller: Caller, pollId: string, optionId: string) { const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: true } }); await this.member(poll.groupId, caller.id); if (!poll.open || !poll.options.some((option) => option.id === optionId)) fail('VALIDATION_FAILED', 'Poll is closed or option is invalid'); await this.prisma.vote.upsert({ where: { pollId_voterId: { pollId, voterId: caller.id } }, update: { optionId }, create: { pollId, optionId, voterId: caller.id } }); return this.tally(pollId); }
-  async tally(pollId: string, viewerId?: string) { const [poll, viewerVote] = await Promise.all([this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: { include: { _count: { select: { votes: true } } } } } }), viewerId ? this.prisma.vote.findUnique({ where: { pollId_voterId: { pollId, voterId: viewerId } }, select: { optionId: true } }) : Promise.resolve(null)]); return { pollId, groupId: poll.groupId, open: poll.open, viewerOptionId: viewerVote?.optionId ?? null, options: poll.options.map((option) => ({ optionId: option.id, ideaId: option.ideaId, label: option.label, votes: option._count.votes })) }; }
+  async tally(pollId: string, viewerId?: string) { const [poll, viewerVote] = await Promise.all([this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: { include: { votes: { include: { voter: { select: { id: true, fullName: true } } } } } } } }), viewerId ? this.prisma.vote.findUnique({ where: { pollId_voterId: { pollId, voterId: viewerId } }, select: { optionId: true } }) : Promise.resolve(null)]); return { pollId, groupId: poll.groupId, open: poll.open, viewerOptionId: viewerVote?.optionId ?? null, options: poll.options.map((option) => ({ optionId: option.id, ideaId: option.ideaId, label: option.label, votes: option.votes.length, voters: option.votes.map((vote: any) => ({ userId: vote.voter.id, fullName: vote.voter.fullName })) })) }; }
   async pollResults(caller: Caller, pollId: string) { const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, select: { groupId: true } }); await this.member(poll.groupId, caller.id); return this.tally(pollId, caller.id); }
   async begin(caller: Caller, groupId: string, ideaId: string) { await this.member(groupId, caller.id, true); const idea = await this.prisma.idea.findFirst({ where: { id: ideaId, groupId } }); if (!idea) fail('NOT_FOUND', 'Idea does not belong to group', 404); if (idea.status === 'selected') fail('VALIDATION_FAILED', 'Idea has already been selected'); const members = await this.prisma.groupMember.findMany({ where: { groupId }, select: { userId: true } }); const project = await this.prisma.project.create({ data: { groupId, ideaId, title: idea.title, description: idea.body, createdBy: caller.id, members: { create: members.map((member) => ({ userId: member.userId, role: member.userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } } }); await this.prisma.idea.update({ where: { id: ideaId }, data: { status: 'selected' } }); return project; }
   async calendar(caller: Caller, from?: string, to?: string) { const events = await this.prisma.calendarEvent.findMany({ where: { ownerId: caller.id, ...(from || to ? { startAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}) } }); const projects = await this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, deadline: { not: null } }, select: { id: true, title: true, deadline: true } }); const tasks = await this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, deadline: { not: null }, status: { not: 'completed' } }, select: { id: true, title: true, deadline: true } }); return { events, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))] }; }

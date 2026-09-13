@@ -16,18 +16,18 @@ export function TasksPage({ notify }: { notify: Notice }) {
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null);
   useEffect(() => { void request<Task[]>('/tasks/mine').then(setTasks).catch((error: Error) => notify(error.message)); }, [notify]);
-  async function updateStatus(task: Task, status: 'pending' | 'ongoing' | 'completed') {
+  async function updateStatus(task: Task, status: 'pending' | 'ongoing' | 'for_review' | 'completed') {
     if (task.status === status) return;
     setUpdatingTaskId(task.id);
     try {
       await request(`/tasks/${task.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
-      const progress = status === 'completed' ? 100 : status === 'ongoing' ? 50 : 0;
+      const progress = status === 'completed' ? 100 : status === 'for_review' ? 75 : status === 'ongoing' ? 50 : 0;
       setTasks((current) => current?.map((item) => item.id === task.id ? { ...item, status, progress } : item) ?? null);
       notify(`Task marked ${status === 'ongoing' ? 'in progress' : status}.`);
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not update this task.'); }
     finally { setUpdatingTaskId(null); }
   }
-  return <section className="sp on"><Head title="My Tasks" /><div className="cc legacy-table-card">{tasks === null ? <Empty>Loading tasks…</Empty> : tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Assigned By</th><th>Deadline</th><th>Priority</th><th>Auto-Progress</th><th>Status</th></tr></thead><tbody>{tasks.map((task) => <tr key={task.id}><td><strong>{task.title}</strong></td><td>{task.project?.title ?? '—'}</td><td>{task.assignedBy ?? '—'}</td><td>{date(task.deadline)}</td><td><Badge value={task.priority} /></td><td>{task.progress ?? 0}%</td><td><select className="task-status-select" value={task.status} aria-label={`Status for ${task.title}`} disabled={updatingTaskId === task.id} onChange={(event) => void updateStatus(task, event.target.value as 'pending' | 'ongoing' | 'completed')}><option value="pending">Not Started</option><option value="ongoing">In Progress</option><option value="completed">Completed</option></select></td></tr>)}</tbody></table> : <Empty>Tasks assigned to you will appear here.</Empty>}</div><div className="cc"><div className="cc-head"><h3>Connected External Tools Progress</h3></div><div className="g4 legacy-tool-progress">{['Design & Presentation', 'Documents', 'File Storage', 'Task Management'].map((label) => <div className="mini-state" key={label}><strong>{label}</strong><span>Connect a tool when your project needs one.</span></div>)}</div></div></section>;
+  return <section className="sp on"><Head title="My Tasks" /><div className="cc legacy-table-card">{tasks === null ? <Empty>Loading tasks…</Empty> : tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Assigned By</th><th>Deadline</th><th>Priority</th><th>Auto-Progress</th><th>Status</th></tr></thead><tbody>{tasks.map((task) => <tr key={task.id}><td><strong>{task.title}</strong></td><td>{task.project?.title ?? '—'}</td><td>{task.assignedBy ?? '—'}</td><td>{date(task.deadline)}</td><td><Badge value={task.priority} /></td><td>{task.progress ?? 0}%</td><td><select className="task-status-select" value={task.status} aria-label={`Status for ${task.title}`} disabled={updatingTaskId === task.id} onChange={(event) => void updateStatus(task, event.target.value as 'pending' | 'ongoing' | 'for_review' | 'completed')}><option value="pending">Not Started</option><option value="ongoing">In Progress</option><option value="for_review">For Review</option><option value="completed">Completed</option></select></td></tr>)}</tbody></table> : <Empty>Tasks assigned to you will appear here.</Empty>}</div><div className="cc"><div className="cc-head"><h3>Connected External Tools Progress</h3></div><div className="g4 legacy-tool-progress">{['Design & Presentation', 'Documents', 'File Storage', 'Task Management'].map((label) => <div className="mini-state" key={label}><strong>{label}</strong><span>Connect a tool when your project needs one.</span></div>)}</div></div></section>;
 }
 
 export function CalendarPage({ notify }: { notify: Notice }) {
@@ -155,19 +155,107 @@ export function ProfilePage({ user, onUserUpdated, onSessionInvalidated, notify 
   return <section className="sp on"><Head title="Profile & Settings" /><div className="profile-grid"><form className="cc no-bottom" onSubmit={(event) => void saveProfile(event)}><div className="profile-hero">{user.avatarUrl ? <img className="profile-avatar profile-avatar-image" src={user.avatarUrl} alt="Profile" /> : <div className="profile-avatar">{initials(user.fullName)}</div>}<div><strong>{user.fullName}</strong><span>Member</span></div><label className={`btn-o btn-sm profile-avatar-action ${uploading ? 'disabled' : ''}`}>{uploading ? 'Uploading…' : 'Change photo'}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} onChange={(event) => void uploadAvatar(event.target.files?.[0])} /></label></div>{([['fullName', 'Full Name'], ['email', 'Email'], ['institution', 'School'], ['course', 'Course']] as const).map(([field, label]) => <label className="profile-field" key={field}><span className="lbl">{label}</span><input value={profile[field]} type={field === 'email' ? 'email' : 'text'} onChange={(event) => setField(field, event.target.value)} placeholder={`Your ${label.toLowerCase()}`} /><span className="profile-error">{errors[field]}</span></label>)}<button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save Profile'}</button></form><div className="cc no-bottom"><div className="cc-head"><h3>Settings</h3></div><SettingsTitle>Notifications</SettingsTitle><Toggle title="Task Reminders" description="Get notified before task deadlines" checked={prefs.tasks} onChange={() => toggle('tasks')} /><Toggle title="Group Chat Alerts" description="Notify me when someone messages the group" checked={prefs.groupActivity} onChange={() => toggle('groupActivity')} /><Toggle title="Deadline Alerts" description="Notify me 24 hours before project deadlines" checked={prefs.deadlines} onChange={() => toggle('deadlines')} /><Toggle title="AI Suggestions" description="Receive AI-generated project recommendations" checked={prefs.aiSuggestions} onChange={() => toggle('aiSuggestions')} /><SettingsTitle>Privacy</SettingsTitle><Toggle title="Profile Visibility" description="Allow group members to see your profile" checked={prefs.profileVisibility} onChange={() => toggle('profileVisibility')} /><Toggle title="Activity Status" description="Show others when you are online" checked={prefs.activityStatus} onChange={() => toggle('activityStatus')} /><SettingsTitle>Security</SettingsTitle><Security title="Change Password" description="Update your account password" action={changingPassword ? 'Cancel' : 'Change'} onClick={() => setChangingPassword((value) => !value)} />{changingPassword ? <form className="password-change-form" onSubmit={(event) => void changePassword(event)}><input className="ifield" required name="oldPassword" type="password" placeholder="Current password" /><input className="ifield" required minLength={8} name="password" type="password" placeholder="New password" /><input className="ifield" required minLength={8} name="confirm" type="password" placeholder="Confirm new password" /><button className="btn btn-sm" disabled={saving}>{saving ? 'Changing…' : 'Change Password'}</button></form> : null}<Security danger title="Delete Account" description="Permanently remove your WebSphere account" action="Delete" onClick={() => notify('Please contact your administrator to delete your account.')} /></div></div></section>;
 }
 
-const trackerFilters = ['all', 'pending', 'ongoing', 'completed'] as const;
+const trackerFilters = ['all', 'pending', 'ongoing', 'for_review', 'completed'] as const;
 type TrackerFilter = (typeof trackerFilters)[number];
-const trackerFilterLabel: Record<TrackerFilter, string> = { all: 'All Tasks', pending: 'Not Started', ongoing: 'In Progress', completed: 'Completed' };
+const trackerFilterLabel: Record<TrackerFilter, string> = { all: 'All Files', pending: 'Not Started', ongoing: 'In Progress', for_review: 'For Review', completed: 'Completed' };
+type TrackerResource = { id: string; connectionId: string; title: string; externalUrl: string; provider: string; platform: string; category: string; createdAt: string };
+type TrackerMember = { id: string; fullName: string; avatarUrl?: string | null };
+type TrackerTask = { id: string; title: string; description: string; deadline?: string | null; priority: string; status: 'pending' | 'ongoing' | 'for_review' | 'completed'; progress: number; createdAt: string; latestActivityAt: string; project: { id: string; title: string }; resources: TrackerResource[]; assignees: TrackerMember[]; canUpdateStatus: boolean; canAssign: boolean; canEditResource: boolean; collaborators: TrackerMember[] };
+type TrackerConnection = { id: string; provider: string; platform: string; category: string; status: string; syncState?: string | null; lastSyncedAt?: string | null };
+type TrackerActivity = { id: string; kind: 'workflow' | 'integration'; createdAt: string; type?: string; taskTitle?: string | null; projectTitle?: string; actor?: { id: string; fullName: string; avatarUrl?: string | null } | null; fromValue?: string | null; toValue?: string | null; action?: string; platform?: string; provider?: string };
+type TrackerData = { tasks: TrackerTask[]; connections: TrackerConnection[]; activity: TrackerActivity[] };
+type TrackerCard = { task: TrackerTask; resource: TrackerResource | null };
 
 export function TrackerPage({ notify }: { notify: Notice }) {
-  const [tasks, setTasks] = useState<Task[] | null>(null);
+  const [data, setData] = useState<TrackerData | null>(null);
   const [filter, setFilter] = useState<TrackerFilter>('all');
-  useEffect(() => { void request<Task[]>('/tasks/mine').then(setTasks).catch((error: Error) => notify(error.message)); }, [notify]);
-  const all = tasks ?? [];
-  const complete = all.filter((task) => task.status === 'completed').length;
-  const visible = filter === 'all' ? all : all.filter((task) => task.status === filter);
-  return <section className="sp on"><Head title="Task Progress Tracker" /><div className="krow"><Kpi value={all.length || '—'} label="Total Tasks" /><Kpi value={all.filter((task) => task.status === 'ongoing').length || '—'} label="In Progress" tone="yel" /><Kpi value={complete || '—'} label="Completed" tone="grn" /><Kpi value={all.length ? `${Math.round(complete / all.length * 100)}%` : '—'} label="Avg. Progress" /></div><div className="tracker-filter"><div>{trackerFilters.map((value) => <button type="button" className={filter === value ? 'on' : ''} key={value} onClick={() => setFilter(value)}>{trackerFilterLabel[value]}</button>)}</div></div>{tasks === null ? <div className="cc"><Empty>Loading tasks…</Empty></div> : visible.length ? <div className="file-card-grid">{visible.map((task) => <article className="file-card" key={task.id}><div className="file-icon">▤</div><div><strong>{task.title}</strong><span>{task.project?.title ?? 'No project'} · {task.progress ?? 0}% complete{task.deadline ? ` · Due ${date(task.deadline)}` : ''}</span></div><Badge value={task.status} /></article>)}</div> : <div className="cc"><Empty>{filter === 'all' ? 'Tasks assigned to you will appear here.' : `No ${trackerFilterLabel[filter].toLowerCase()} tasks.`}</Empty></div>}</section>;
+  const [platform, setPlatform] = useState('all');
+  const [linkingTaskId, setLinkingTaskId] = useState<string | null>(null);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [editingResourceId, setEditingResourceId] = useState<string | null>(null);
+  const [editStatus, setEditStatus] = useState<TrackerTask['status']>('pending');
+  const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  async function refresh() { setData(await request<TrackerData>('/tasks/tracker')); }
+  useEffect(() => { void refresh().catch((error: Error) => notify(error.message)); }, [notify]);
+  const tasks = data?.tasks ?? [];
+  const projectRoomIds = useMemo(() => [...new Set(tasks.map((task) => task.project.id))], [data]);
+  useEffect(() => {
+    if (!projectRoomIds.length) return;
+    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
+    socket.on('connect', () => projectRoomIds.forEach((projectId) => socket.emit('project:join', projectId, () => undefined)));
+    socket.on('task:updated', () => { void refresh().catch(() => undefined); });
+    return () => socket.disconnect();
+  }, [projectRoomIds.join(',')]);
+  const connections = data?.connections ?? [];
+  const connectedConnections = connections.filter((connection) => connection.status === 'connected');
+  const complete = tasks.filter((task) => task.status === 'completed').length;
+  const average = tasks.length ? Math.round(tasks.reduce((total, task) => total + task.progress, 0) / tasks.length) : 0;
+  const visibleTasks = (filter === 'all' ? tasks : tasks.filter((task) => task.status === filter));
+  const cards: TrackerCard[] = visibleTasks.flatMap((task) => task.resources.length ? task.resources.map((resource) => ({ task, resource })) : [{ task, resource: null }]).filter((card) => platform === 'all' || card.resource?.provider === platform);
+  const projectSections = Object.values(cards.reduce<Record<string, { title: string; cards: TrackerCard[] }>>((sections, card) => { (sections[card.task.project.id] ||= { title: card.task.project.title, cards: [] }).cards.push(card); return sections; }, {}));
+  const collaborators = [...new Map(tasks.flatMap((task) => task.collaborators).map((member) => [member.id, member])).values()];
+  const linkingTask = tasks.find((task) => task.id === linkingTaskId) ?? null;
+  const editingTask = tasks.find((task) => task.id === editingTaskId) ?? null;
+  const editingResource = editingTask?.resources.find((resource) => resource.id === editingResourceId) ?? null;
+
+  async function saveExternalFile(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingTask || !editingResource) return;
+    const form = new FormData(event.currentTarget);
+    setSaving(true);
+    try {
+      await request(`/resources/${editingResource.id}`, { method: 'PATCH', body: JSON.stringify({ connectionId: form.get('connectionId'), title: form.get('title'), externalUrl: form.get('externalUrl'), ...(editingTask.canAssign ? { assigneeId: form.get('assigneeId') } : {}), ...(editingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
+      await refresh();
+      setEditingTaskId(null); setEditingResourceId(null);
+      notify('External file link updated.');
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not update this file link.'); }
+    finally { setSaving(false); }
+  }
+  async function linkFile(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!linkingTask) return;
+    const form = new FormData(event.currentTarget);
+    setSaving(true);
+    try {
+      await request(`/tasks/${linkingTask.id}/resources`, { method: 'POST', body: JSON.stringify({ connectionId: form.get('connectionId'), title: form.get('title'), externalUrl: form.get('externalUrl') }) });
+      setLinkingTaskId(null);
+      await refresh();
+      notify('File link attached to the task.');
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not attach this file link.'); }
+    finally { setSaving(false); }
+  }
+  async function syncFiles() {
+    if (!connectedConnections.length) { notify('Connect an external tool before syncing files.'); return; }
+    setSyncing(true);
+    try { await Promise.all(connectedConnections.map((connection) => request(`/integrations/connections/${connection.id}/sync`, { method: 'POST' }))); await refresh(); notify(`Synced ${connectedConnections.length} connected ${connectedConnections.length === 1 ? 'tool' : 'tools'}.`); }
+    catch (error) { notify(error instanceof Error ? error.message : 'Could not sync all connected tools.'); }
+    finally { setSyncing(false); }
+  }
+  async function openResource(resource: TrackerResource) {
+    try {
+      const launch = await request<{ externalUrl: string }>(`/resources/${resource.id}/launch`, { method: 'POST' });
+      window.open(launch.externalUrl, '_blank', 'noopener,noreferrer');
+      void refresh();
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not open this file.'); }
+  }
+
+  return <section className="sp on tracker-page"><Head title="Task Progress Tracker" action={<div className="tracker-head-actions"><button className="btn-o btn-sm" onClick={() => { if (!tasks.length) notify('Create or receive a task before attaching a file.'); else if (!connectedConnections.length) notify('Connect an external tool before attaching a file.'); else setLinkingTaskId(tasks[0].id); }}>⌕ Attach File Link</button><button className="btn btn-sm" disabled={syncing} onClick={() => void syncFiles()}>{syncing ? 'Syncing…' : '↻ Sync Files'}</button></div>} />
+    <div className="tracker-kpis"><TrackerKpi icon="▤" value={tasks.reduce((total, task) => total + task.resources.length, 0)} label="Total Files" /><TrackerKpi icon="◷" value={tasks.filter((task) => task.status === 'ongoing').length} label="In Progress" tone="yel" /><TrackerKpi icon="✓" value={complete} label="Completed" tone="grn" /><TrackerKpi icon="▥" value={`${average}%`} label="Avg. Progress" /></div>
+    <div className="tracker-toolbar"><div className="tracker-filter"><span>Filter:</span><div>{trackerFilters.map((value) => <button type="button" className={filter === value ? 'on' : ''} key={value} onClick={() => setFilter(value)}>{trackerFilterLabel[value]}</button>)}</div></div><label className="tracker-platform">Platform:<select value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">All Platforms</option>{connectedConnections.map((connection) => <option key={connection.id} value={connection.provider}>{connection.platform}</option>)}</select></label></div>
+    {data === null ? <div className="cc"><Empty>Loading your tracker…</Empty></div> : projectSections.length ? <div className="tracker-project-sections">{projectSections.map((section) => <section className="tracker-project-section" key={section.title}><div className="tracker-project-heading"><span>Project</span><h3>{section.title}</h3></div><div className="tracker-resource-grid">{section.cards.map(({ task, resource }) => <TrackerResourceCard key={resource?.id ?? task.id} task={task} resource={resource} onEdit={() => { if (!resource) return; setEditingTaskId(task.id); setEditingResourceId(resource.id); setEditStatus(task.status); }} onOpen={() => resource && void openResource(resource)} onAttach={() => connectedConnections.length ? setLinkingTaskId(task.id) : notify('Connect an external tool before attaching a file.')} />)}</div></section>)}</div> : <div className="cc"><Empty>{tasks.length ? 'No linked files match the selected filters.' : 'Tasks from your projects will appear here, along with any files you link to them.'}</Empty></div>}
+    <div className="tracker-lower-grid"><section className="cc tracker-activity"><div className="cc-head"><h3>Recent File Activity</h3><span>Latest updates</span></div>{data?.activity.length ? <div className="tracker-activity-list">{data.activity.slice(0, 8).map((activity) => <div className="tracker-activity-row" key={activity.id}><i>{activity.kind === 'integration' ? '↻' : '▤'}</i><div><strong>{activityLabel(activity)}</strong><span>{relativeDate(activity.createdAt)}</span></div></div>)}</div> : <Empty>Linked-file and task updates will appear here.</Empty>}</section><section className="cc tracker-collaborators"><div className="cc-head"><h3>Project Collaborators</h3><span>{collaborators.length || '—'} members</span></div>{collaborators.length ? <div className="tracker-collaborator-list">{collaborators.map((member) => <div className="tracker-collaborator" key={member.id}><span className="tracker-collaborator-avatar">{member.avatarUrl ? <img src={member.avatarUrl} alt="" /> : initials(member.fullName)}</span><strong>{member.fullName}</strong></div>)}</div> : <Empty>Collaborators appear when you have assigned project tasks.</Empty>}</section></div>
+    {linkingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLinkingTaskId(null); }}><div className="modal-box tracker-link-modal"><div className="modal-ttl"><span>Attach file link</span><button type="button" className="modal-close" onClick={() => setLinkingTaskId(null)}>×</button></div><p>Attach a file from one of your connected tools to <strong>{linkingTask.title}</strong>.</p><form onSubmit={linkFile}><label className="lbl">Connected platform</label><select className="ifield" name="connectionId" required defaultValue={connectedConnections[0]?.id}>{connectedConnections.map((connection) => <option key={connection.id} value={connection.id}>{connection.platform}</option>)}</select><label className="lbl">File name</label><input className="ifield" name="title" required minLength={2} maxLength={180} placeholder="e.g. Research presentation slides" /><label className="lbl">File link</label><input className="ifield" name="externalUrl" type="url" required placeholder="https://…" /><div className="modal-acts"><button type="button" className="btn-o" onClick={() => setLinkingTaskId(null)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Attaching…' : 'Attach Link'}</button></div></form></div></div> : null}
+    {editingTask && editingResource ? <div className="modal-ov open tracker-edit-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) { setEditingTaskId(null); setEditingResourceId(null); } }}><div className="modal-box tracker-edit-modal"><div className="modal-ttl"><span>Edit External File Link</span><button type="button" className="modal-close" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>×</button></div><form onSubmit={(event) => void saveExternalFile(event)}><label className="lbl">File name</label><input className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={editingResource.title} /><label className="lbl">External file URL</label><input className="ifield" name="externalUrl" type="url" required defaultValue={editingResource.externalUrl} /><label className="lbl">Platform</label><div className="tracker-platform-options">{connectedConnections.map((connection) => <label className={`tracker-platform-option ${connection.id === editingResource.connectionId ? 'selected' : ''}`} key={connection.id}><input type="radio" name="connectionId" value={connection.id} defaultChecked={connection.id === editingResource.connectionId} required /><span>{connection.platform}</span></label>)}</div>{connectedConnections.length ? null : <div className="tracker-auto-progress-note">Connect an external platform before editing this file link.</div>}<label className="lbl">Assigned member</label><select className="ifield" name="assigneeId" defaultValue={editingTask.assignees[0]?.id ?? ''} disabled={!editingTask.canAssign}>{editingTask.collaborators.map((member) => <option key={member.id} value={member.id}>{member.fullName}</option>)}</select><label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!editingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div><div className="tracker-auto-progress-note">Progress is calculated automatically from task status and cannot be entered manually.</div><div className="modal-acts"><button type="button" className="btn-o" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>Cancel</button><button className="btn" disabled={saving || !connectedConnections.length}>{saving ? 'Saving…' : 'Save Changes'}</button></div></form></div></div> : null}
+  </section>;
 }
+
+function TrackerKpi({ icon, value, label, tone }: { icon: string; value: string | number; label: string; tone?: 'yel' | 'grn' }) { return <div className={`tracker-kpi ${tone ?? ''}`}><i>{icon}</i><div><strong>{value}</strong><span>{label}</span></div></div>; }
+function TrackerResourceCard({ task, resource, onEdit, onOpen, onAttach }: { task: TrackerTask; resource: TrackerResource | null; onEdit: () => void; onOpen: () => void; onAttach: () => void }) {
+  const assignee = task.assignees[0];
+  return <article className="tracker-resource-card"><div className="tracker-resource-top"><div className="tracker-file-icon">{resource?.platform.slice(0, 1).toUpperCase() ?? '▤'}</div><div className="tracker-resource-copy"><strong>{resource?.title ?? task.title}</strong><span>{resource ? `${resource.platform} · ${task.title}` : 'No file linked'}</span></div><Badge value={task.status} /></div><div className="tracker-owner"><span className="tracker-owner-avatar">{assignee?.avatarUrl ? <img src={assignee.avatarUrl} alt="" /> : initials(assignee?.fullName ?? 'Unassigned')}</span><span>{assignee ? assignee.fullName : 'Unassigned'}</span></div><div className="tracker-progress-row"><span>Progress <small>Automatic from status</small></span><strong>{task.progress}%</strong></div><div className="tracker-progress-track"><i style={{ width: `${task.progress}%` }} /></div><div className="tracker-resource-footer"><span>Updated {relativeDate(task.latestActivityAt)}</span><div>{resource ? <><button className="btn-o btn-sm tracker-edit-button" disabled={!task.canEditResource} title={task.canEditResource ? 'Edit external file link' : 'Only the active assignee or project leader can edit this file link'} onClick={onEdit}>⌑ Edit</button><button className="btn btn-sm" onClick={onOpen}>Open File</button></> : <button className="btn-o btn-sm" onClick={onAttach}>Attach</button>}</div></div></article>;
+}
+function activityLabel(activity: TrackerActivity) { if (activity.kind === 'integration') return activity.action ?? `${activity.platform ?? 'Integration'} activity`; const actor = activity.actor?.fullName ?? 'A project member'; if (activity.type === 'task_completed') return `${actor} completed ${activity.taskTitle ?? 'a task'}`; if (activity.type === 'progress_activity') return activity.toValue ? `${actor} linked ${activity.toValue}` : `${actor} updated task progress`; if (activity.type === 'assignment_change') return `${actor} assigned ${activity.taskTitle ?? 'a task'}`; return `${actor} changed ${activity.taskTitle ?? 'a task'} to ${(activity.toValue ?? 'a new status').replaceAll('_', ' ')}`; }
 
 export function IntegrationsPage({ notify }: { notify: Notice }) {
   const [tools, setTools] = useState<Array<{ id: string; provider: string; name: string; category: string; connections: Array<{ status: string; lastSyncedAt?: string }> }> | null>(null);
@@ -209,6 +297,15 @@ function SettingsTitle({ children }: { children: React.ReactNode }) { return <di
 function Toggle({ title, description, checked, onChange }: { title: string; description: string; checked: boolean; onChange: () => void }) { return <div className="setting-row"><div><strong>{title}</strong><span>{description}</span></div><button type="button" className={`big-toggle ${checked ? 'on' : ''}`} aria-pressed={checked} onClick={onChange}><i /></button></div>; }
 function Security({ title, description, action, onClick, danger = false }: { title: string; description: string; action: string; onClick: () => void; danger?: boolean }) { return <div className={`security-row ${danger ? 'danger' : ''}`}><div><strong>{title}</strong><span>{description}</span></div><button className={danger ? 'btn-red btn-sm' : 'btn-o btn-sm'} onClick={onClick}>{action}</button></div>; }
 function date(value?: string | null) { return value ? new Date(value).toLocaleDateString() : 'Not set'; }
+function relativeDate(value?: string | null) {
+  if (!value) return 'not yet';
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000));
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} hr ago`;
+  if (seconds < 172800) return 'yesterday';
+  return new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: new Date(value).getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
+}
 function initials(name: string) { return name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase(); }
 function shiftMonth(value: Date, by: number) { return new Date(value.getFullYear(), value.getMonth() + by, 1); }
 function sameDay(a: Date, b: Date) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
