@@ -14,8 +14,20 @@ const Badge = ({ value }: { value: string }) => <span className={`bdg ${value ==
 
 export function TasksPage({ notify }: { notify: Notice }) {
   const [tasks, setTasks] = useState<Task[] | null>(null);
+  const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null);
   useEffect(() => { void request<Task[]>('/tasks/mine').then(setTasks).catch((error: Error) => notify(error.message)); }, [notify]);
-  return <section className="sp on"><Head title="My Tasks" /><div className="cc legacy-table-card">{tasks === null ? <Empty>Loading tasks…</Empty> : tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Assigned By</th><th>Deadline</th><th>Priority</th><th>Auto-Progress</th><th>Status</th></tr></thead><tbody>{tasks.map((task) => <tr key={task.id}><td><strong>{task.title}</strong></td><td>{task.project?.title ?? '—'}</td><td>{task.assignedBy ?? '—'}</td><td>{date(task.deadline)}</td><td><Badge value={task.priority} /></td><td>{task.progress ?? 0}%</td><td><Badge value={task.status} /></td></tr>)}</tbody></table> : <Empty>Tasks assigned to you will appear here.</Empty>}</div><div className="cc"><div className="cc-head"><h3>Connected External Tools Progress</h3></div><div className="g4 legacy-tool-progress">{['Design & Presentation', 'Documents', 'File Storage', 'Task Management'].map((label) => <div className="mini-state" key={label}><strong>{label}</strong><span>Connect a tool when your project needs one.</span></div>)}</div></div></section>;
+  async function updateStatus(task: Task, status: 'pending' | 'ongoing' | 'completed') {
+    if (task.status === status) return;
+    setUpdatingTaskId(task.id);
+    try {
+      await request(`/tasks/${task.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      const progress = status === 'completed' ? 100 : status === 'ongoing' ? 50 : 0;
+      setTasks((current) => current?.map((item) => item.id === task.id ? { ...item, status, progress } : item) ?? null);
+      notify(`Task marked ${status === 'ongoing' ? 'in progress' : status}.`);
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not update this task.'); }
+    finally { setUpdatingTaskId(null); }
+  }
+  return <section className="sp on"><Head title="My Tasks" /><div className="cc legacy-table-card">{tasks === null ? <Empty>Loading tasks…</Empty> : tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Assigned By</th><th>Deadline</th><th>Priority</th><th>Auto-Progress</th><th>Status</th></tr></thead><tbody>{tasks.map((task) => <tr key={task.id}><td><strong>{task.title}</strong></td><td>{task.project?.title ?? '—'}</td><td>{task.assignedBy ?? '—'}</td><td>{date(task.deadline)}</td><td><Badge value={task.priority} /></td><td>{task.progress ?? 0}%</td><td><select className="task-status-select" value={task.status} aria-label={`Status for ${task.title}`} disabled={updatingTaskId === task.id} onChange={(event) => void updateStatus(task, event.target.value as 'pending' | 'ongoing' | 'completed')}><option value="pending">Not Started</option><option value="ongoing">In Progress</option><option value="completed">Completed</option></select></td></tr>)}</tbody></table> : <Empty>Tasks assigned to you will appear here.</Empty>}</div><div className="cc"><div className="cc-head"><h3>Connected External Tools Progress</h3></div><div className="g4 legacy-tool-progress">{['Design & Presentation', 'Documents', 'File Storage', 'Task Management'].map((label) => <div className="mini-state" key={label}><strong>{label}</strong><span>Connect a tool when your project needs one.</span></div>)}</div></div></section>;
 }
 
 export function CalendarPage({ notify }: { notify: Notice }) {
