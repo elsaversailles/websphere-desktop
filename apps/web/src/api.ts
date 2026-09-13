@@ -1,4 +1,5 @@
 const apiBase = import.meta.env.VITE_API_URL || '/api';
+export function apiUrl(path: string) { return `${apiBase}${path}`; }
 export const sessionInvalidatedEvent = 'websphere:session-invalidated';
 export const sessionExpiredMessage = 'Your session has expired. Please sign in again.';
 
@@ -44,7 +45,7 @@ function invalidateSession() {
 export async function request<T>(path: string, init: ApiRequestInit = {}): Promise<T> {
   const { skipSessionInvalidation, ...requestInit } = init;
   const formData = init.body instanceof FormData;
-  const response = await fetch(`${apiBase}${path}`, {
+  const response = await fetch(apiUrl(path), {
     ...requestInit,
     headers: { ...(!formData ? { 'content-type': 'application/json' } : {}), ...(access ? { authorization: `Bearer ${access}` } : {}), ...requestInit.headers },
   });
