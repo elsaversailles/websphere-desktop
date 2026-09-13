@@ -356,6 +356,8 @@ model ToolConnection {
   status ConnectionStatus @default(connected)
   encAccessToken String @db.Text
   encRefreshToken String? @db.Text
+  refreshIv String?
+  refreshAuthTag String?
   iv String
   authTag String
   expiresAt DateTime?

@@ -4,7 +4,7 @@ import { SignJWT, jwtVerify } from 'jose';
 import { randomBytes } from 'node:crypto';
 import { completionRate, projectAnalytics, recommendations } from './analytics.js';
 import { CryptoService, validatePassword } from './security.js';
-import { connectors } from './connectors.js';
+import { connectors, type OAuthTokens } from './connectors.js';
 import { PrismaService } from './prisma.service.js';
 import { ConfigService } from './config.service.js';
 import { RedisService } from './redis.service.js';
@@ -194,11 +194,11 @@ export class AppService {
       activity: [...workflowActivity, ...usageActivity].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 24),
     };
   }
-  async linkTaskResource(caller: Caller, taskId: string, input: { connectionId: string; title: string; externalUrl: string }) {
+  async linkTaskResource(caller: Caller, taskId: string, input: { connectionId: string; title: string; externalUrl: string; externalId?: string }) {
     const task = await this.task(caller, taskId);
     const connection = await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } });
     if (!connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before linking a file', 400);
-    const resource = await this.prisma.linkedResource.create({ data: { connectionId: connection.id, projectId: task.projectId, taskId, externalId: randomBytes(12).toString('hex'), title: input.title, externalUrl: input.externalUrl }, include: { connection: { include: { tool: true } } } });
+    const resource = await this.prisma.linkedResource.create({ data: { connectionId: connection.id, projectId: task.projectId, taskId, externalId: input.externalId ?? randomBytes(12).toString('hex'), title: input.title, externalUrl: input.externalUrl }, include: { connection: { include: { tool: true } } } });
     await Promise.all([
       this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Linked “${resource.title}” to “${task.title}”` } }),
       this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: WorkflowEventType.progress_activity, fromValue: 'resource_linked', toValue: resource.title } }),
@@ -243,8 +243,10 @@ export class AppService {
   async syncIntegration(caller: Caller, connectionId: string) {
     const connection = await this.prisma.toolConnection.findFirst({ where: { id: connectionId, userId: caller.id }, include: { tool: true } });
     if (!connection || connection.status !== 'connected') fail('INTEGRATION_UNAVAILABLE', 'This integration is not connected', 400);
-    let result: { summary: string } = { summary: 'synchronized' };
-    try { result = await connectors[connection.provider as ProviderId].sync(); }
+    const tokens = await this.connectionTokens(connection);
+    const targets = await this.prisma.linkedResource.findMany({ where: { connectionId: connection.id }, select: { externalId: true, title: true, externalUrl: true } });
+    let result: { summary: string } = { summary: '' };
+    try { result = await connectors[connection.provider as ProviderId].sync(tokens, targets); }
     catch { fail('INTEGRATION_SYNC_FAILED', `Could not sync ${connection.tool.name}. Try again shortly.`, 502); }
     const updated = await this.prisma.toolConnection.update({ where: { id: connection.id }, data: { lastSyncedAt: new Date(), syncState: result.summary } });
     await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Synced ${connection.tool.name}` } });
@@ -282,28 +284,63 @@ export class AppService {
   async markRead(caller: Caller, id: string) { return this.prisma.notification.updateMany({ where: { id, userId: caller.id }, data: { read: true } }); }
   async preferences(caller: Caller, data?: any) { if (data) return this.prisma.notificationPreference.upsert({ where: { userId: caller.id }, update: data, create: { userId: caller.id, ...data } }); return this.prisma.notificationPreference.upsert({ where: { userId: caller.id }, update: {}, create: { userId: caller.id } }); }
   async integrations(caller: Caller) { return this.prisma.connectedTool.findMany({ include: { connections: { where: { userId: caller.id }, select: { id: true, status: true, lastSyncedAt: true } } } }); }
+  async integrationConnections(caller: Caller) { return this.prisma.toolConnection.findMany({ where: { userId: caller.id }, select: { id: true, provider: true, status: true, expiresAt: true, lastSyncedAt: true, syncState: true, tool: { select: { name: true, category: true } } }, orderBy: { lastSyncedAt: 'desc' } }); }
+  async googlePickerToken(caller: Caller, connectionId: string) {
+    const connection = await this.prisma.toolConnection.findFirst({ where: { id: connectionId, userId: caller.id, provider: 'google', status: 'connected' }, include: { tool: true } });
+    if (!connection) fail('INTEGRATION_UNAVAILABLE', 'Connect Google Drive before choosing a Google file.', 400);
+    const developerKey = process.env.GOOGLE_PICKER_API_KEY?.trim();
+    if (!developerKey) fail('OAUTH_NOT_CONFIGURED', 'Google Picker is not configured yet. Ask an administrator to add GOOGLE_PICKER_API_KEY.', 503);
+    const appId = process.env.GOOGLE_CLOUD_PROJECT_NUMBER?.trim();
+    if (!appId) fail('OAUTH_NOT_CONFIGURED', 'Google Picker is not configured yet. Ask an administrator to add GOOGLE_CLOUD_PROJECT_NUMBER.', 503);
+    const tokens = await this.connectionTokens(connection);
+    return { accessToken: tokens.accessToken, developerKey, appId };
+  }
   private oauthStateKey(state: string) { return `oauth:state:${state}`; }
   async oauthAuthorize(caller: Caller, provider: ProviderId, redirectUri: string) {
+    if (!connectors[provider]) fail('VALIDATION_FAILED', 'This integration provider is not supported');
+    try { new URL(redirectUri); } catch { fail('VALIDATION_FAILED', 'A valid OAuth callback URL is required', 400); }
     const state = randomBytes(20).toString('hex');
     await this.redis.set(this.oauthStateKey(state), JSON.stringify({ userId: caller.id, provider, redirectUri }), 600);
-    const authorizeUrl = connectors[provider].authorizeUrl(state, redirectUri);
+    let authorizeUrl: string;
+    try { authorizeUrl = connectors[provider].authorizeUrl(state, redirectUri); }
+    catch (error) {
+      if (error instanceof Error && error.message === 'OAUTH_NOT_CONFIGURED') fail('OAUTH_NOT_CONFIGURED', 'This integration is not configured yet. Ask an administrator to add its OAuth credentials.', 503);
+      if (error instanceof Error && error.message === 'INTEGRATION_NOT_IMPLEMENTED') fail('INTEGRATION_NOT_IMPLEMENTED', 'This integration is not available yet.', 501);
+      throw error;
+    }
     return { state, authorizeUrl };
   }
-  async oauthCallback(caller: Caller, provider: ProviderId, code: string, state: string, redirectUri: string) {
+  private encryptedTokens(tokens: OAuthTokens) {
+    const access = this.crypto.encrypt(tokens.accessToken);
+    const refresh = tokens.refreshToken ? this.crypto.encrypt(tokens.refreshToken) : null;
+    return { encAccessToken: access.ciphertext, encRefreshToken: refresh?.ciphertext ?? null, iv: access.iv, authTag: access.authTag, refreshIv: refresh?.iv ?? null, refreshAuthTag: refresh?.authTag ?? null, expiresAt: tokens.expiresAt ?? null };
+  }
+  private async connectionTokens(connection: any): Promise<OAuthTokens> {
+    const refreshToken = connection.encRefreshToken && connection.refreshIv && connection.refreshAuthTag ? this.crypto.decrypt({ ciphertext: connection.encRefreshToken, iv: connection.refreshIv, authTag: connection.refreshAuthTag }) : undefined;
+    let tokens: OAuthTokens = { accessToken: this.crypto.decrypt({ ciphertext: connection.encAccessToken, iv: connection.iv, authTag: connection.authTag }), refreshToken, expiresAt: connection.expiresAt ?? undefined };
+    if (!tokens.expiresAt || tokens.expiresAt.getTime() > Date.now() + 30_000) return tokens;
+    try { tokens = await connectors[connection.provider as ProviderId].refresh(tokens); }
+    catch {
+      await this.prisma.toolConnection.update({ where: { id: connection.id }, data: { status: 'expired', syncState: 'Reconnect required' } });
+      fail('INTEGRATION_EXPIRED', `${connection.tool.name} needs to be reconnected before it can sync.`, 401);
+    }
+    await this.prisma.toolConnection.update({ where: { id: connection.id }, data: this.encryptedTokens(tokens) });
+    return tokens;
+  }
+  async oauthCallback(provider: ProviderId, code: string, state: string, redirectUri?: string) {
     if (!code || !state) fail('OAUTH_EXCHANGE_FAILED', 'Authorization code and state are required');
     const stored = await this.redis.take(this.oauthStateKey(state));
     if (!stored) fail('OAUTH_EXCHANGE_FAILED', 'OAuth state is invalid or expired');
     const record = JSON.parse(stored!) as { userId: string; provider: ProviderId; redirectUri: string };
-    if (record.userId !== caller.id || record.provider !== provider) fail('OAUTH_EXCHANGE_FAILED', 'OAuth state does not match this request');
+    if (record.provider !== provider || (redirectUri && redirectUri !== record.redirectUri)) fail('OAUTH_EXCHANGE_FAILED', 'OAuth state does not match this request');
     let tokens;
-    try { tokens = await connectors[provider].exchangeCode(code, redirectUri || record.redirectUri); }
+    try { tokens = await connectors[provider].exchangeCode(code, record.redirectUri); }
     catch { fail('OAUTH_EXCHANGE_FAILED', 'The provider rejected the authorization code'); }
-    const enc = this.crypto.encrypt(tokens!.accessToken);
-    const encRefresh = tokens!.refreshToken ? this.crypto.encrypt(tokens!.refreshToken) : null;
+    const encrypted = this.encryptedTokens(tokens!);
     return this.prisma.toolConnection.upsert({
-      where: { userId_provider: { userId: caller.id, provider } },
-      update: { encAccessToken: enc.ciphertext, encRefreshToken: encRefresh?.ciphertext, iv: enc.iv, authTag: enc.authTag, status: 'connected', expiresAt: tokens!.expiresAt },
-      create: { userId: caller.id, provider, encAccessToken: enc.ciphertext, encRefreshToken: encRefresh?.ciphertext, iv: enc.iv, authTag: enc.authTag, expiresAt: tokens!.expiresAt },
+      where: { userId_provider: { userId: record.userId, provider } },
+      update: { ...encrypted, status: 'connected', syncState: null },
+      create: { userId: record.userId, provider, ...encrypted, status: 'connected' },
     });
   }
   private static readonly NON_ACADEMIC_PATTERNS = [/\bhack(ing)?\b.*\b(bank|account|password|network)\b/i, /\bmake\b.*\b(bomb|explosive|weapon)\b/i, /\bcheat(ing)?\b.*\b(exam|test|spouse|partner)\b/i, /\b(illegal drugs?|buy drugs)\b/i, /\bself[- ]harm\b/i];

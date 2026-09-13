@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, Redirect, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { z } from 'zod';
 import { aiAskSchema, calendarEventSchema, ideaSchema, loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, profileUpdateSchema, projectSchema, registerSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, taskStatusSchema } from '@websphere/shared';
@@ -97,8 +97,9 @@ export class AppController {
 
   @Get('integrations/catalog') async catalog(@Headers('authorization') auth: string) { return this.app.integrations(await this.caller(auth)); }
   @Get('integrations/:provider/authorize') async authorize(@Headers('authorization') auth: string, @Param('provider') provider: any, @Query('redirectUri') redirectUri: string) { return this.app.oauthAuthorize(await this.caller(auth), provider, redirectUri); }
-  @Get('integrations/:provider/callback') async callback(@Headers('authorization') auth: string, @Param('provider') provider: any, @Query('code') code: string, @Query('state') state: string, @Query('redirectUri') redirectUri: string) { return this.app.oauthCallback(await this.caller(auth), provider, code, state, redirectUri); }
-  @Get('integrations/connections') async connections(@Headers('authorization') auth: string) { const caller = await this.caller(auth); return this.app.prisma.toolConnection.findMany({ where: { userId: caller.id }, include: { tool: true } }); }
+  @Public() @Redirect() @Get('integrations/:provider/callback') async callback(@Param('provider') provider: any, @Query('code') code: string, @Query('state') state: string, @Query('redirectUri') redirectUri?: string) { await this.app.oauthCallback(provider, code, state, redirectUri); const destination = new URL('/integrations', process.env.WEB_ORIGIN ?? 'http://localhost:5173'); destination.searchParams.set('connected', String(provider)); return { url: destination.toString(), statusCode: 302 }; }
+  @Get('integrations/connections') async connections(@Headers('authorization') auth: string) { return this.app.integrationConnections(await this.caller(auth)); }
+  @Get('integrations/connections/:id/google-picker-token') async googlePickerToken(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.googlePickerToken(await this.caller(auth), id); }
   @Post('integrations/connections/:id/sync') async sync(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.syncIntegration(await this.caller(auth), id); }
   @Post('resources/:id/launch') async launchResource(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.launchResource(await this.caller(auth), id); }
   @Patch('resources/:id') async updateResource(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { const caller = await this.caller(auth); const updated = await this.app.updateLinkedResource(caller, id, parse(resourceUpdateSchema, body)); this.realtime.publishTaskUpdated(updated.projectId, await this.app.task(caller, updated.taskId)); return updated; }

@@ -47,6 +47,7 @@ export const resourceLinkSchema = z.object({
   connectionId: z.string().cuid(),
   title: z.string().trim().min(2).max(180),
   externalUrl: z.string().url().max(4000),
+  externalId: z.string().trim().min(1).max(512).optional(),
 });
 export const resourceUpdateSchema = resourceLinkSchema.extend({
   assigneeId: z.string().cuid().optional(),

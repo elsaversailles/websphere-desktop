@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { io } from 'socket.io-client';
-import { ApiRequestError, getAccessToken, request, socketBaseUrl, type User } from '../api';
+import { ApiRequestError, apiUrl, getAccessToken, request, socketBaseUrl, type User } from '../api';
 import { ChartCanvas } from './ChartCanvas';
 
 type Notice = (message: string) => void;
@@ -165,6 +165,19 @@ type TrackerConnection = { id: string; provider: string; platform: string; categ
 type TrackerActivity = { id: string; kind: 'workflow' | 'integration'; createdAt: string; type?: string; taskTitle?: string | null; projectTitle?: string; actor?: { id: string; fullName: string; avatarUrl?: string | null } | null; fromValue?: string | null; toValue?: string | null; action?: string; platform?: string; provider?: string };
 type TrackerData = { tasks: TrackerTask[]; connections: TrackerConnection[]; activity: TrackerActivity[] };
 type TrackerCard = { task: TrackerTask; resource: TrackerResource | null };
+type GooglePickedFile = { connectionId: string; id: string; name: string; url: string };
+
+async function loadGooglePicker() {
+  const browserWindow = window as any;
+  if (!browserWindow.gapi) await new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[data-google-picker]');
+    const script = existing ?? document.createElement('script');
+    if (!existing) { script.src = 'https://apis.google.com/js/api.js'; script.async = true; script.dataset.googlePicker = 'true'; document.head.append(script); }
+    script.addEventListener('load', () => resolve(), { once: true });
+    script.addEventListener('error', () => reject(new Error('Google Picker could not be loaded.')), { once: true });
+  });
+  await new Promise<void>((resolve, reject) => browserWindow.gapi.load('picker', { callback: resolve, onerror: () => reject(new Error('Google Picker could not be initialized.')) }));
+}
 
 export function TrackerPage({ notify }: { notify: Notice }) {
   const [data, setData] = useState<TrackerData | null>(null);
@@ -173,6 +186,8 @@ export function TrackerPage({ notify }: { notify: Notice }) {
   const [linkingTaskId, setLinkingTaskId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [editingResourceId, setEditingResourceId] = useState<string | null>(null);
+  const [linkConnectionId, setLinkConnectionId] = useState('');
+  const [pickedGoogleFile, setPickedGoogleFile] = useState<GooglePickedFile | null>(null);
   const [editStatus, setEditStatus] = useState<TrackerTask['status']>('pending');
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -198,6 +213,9 @@ export function TrackerPage({ notify }: { notify: Notice }) {
   const linkingTask = tasks.find((task) => task.id === linkingTaskId) ?? null;
   const editingTask = tasks.find((task) => task.id === editingTaskId) ?? null;
   const editingResource = editingTask?.resources.find((resource) => resource.id === editingResourceId) ?? null;
+  const activeLinkConnection = connectedConnections.find((connection) => connection.id === linkConnectionId) ?? connectedConnections[0];
+  const usingGooglePicker = activeLinkConnection?.provider === 'google';
+  function beginLink(taskId: string) { setLinkingTaskId(taskId); setLinkConnectionId(connectedConnections[0]?.id ?? ''); setPickedGoogleFile(null); }
 
   async function saveExternalFile(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -216,14 +234,37 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     event.preventDefault();
     if (!linkingTask) return;
     const form = new FormData(event.currentTarget);
+    const connectionId = String(form.get('connectionId') ?? '');
+    const connection = connectedConnections.find((item) => item.id === connectionId);
+    if (connection?.provider === 'google' && (!pickedGoogleFile || pickedGoogleFile.connectionId !== connectionId)) { notify('Choose a Google Drive file before attaching it.'); return; }
     setSaving(true);
     try {
-      await request(`/tasks/${linkingTask.id}/resources`, { method: 'POST', body: JSON.stringify({ connectionId: form.get('connectionId'), title: form.get('title'), externalUrl: form.get('externalUrl') }) });
+      await request(`/tasks/${linkingTask.id}/resources`, { method: 'POST', body: JSON.stringify({ connectionId, title: form.get('title'), externalUrl: form.get('externalUrl'), ...(pickedGoogleFile?.connectionId === connectionId ? { externalId: pickedGoogleFile.id } : {}) }) });
       setLinkingTaskId(null);
       await refresh();
       notify('File link attached to the task.');
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not attach this file link.'); }
     finally { setSaving(false); }
+  }
+  async function chooseGoogleFile() {
+    if (!activeLinkConnection || activeLinkConnection.provider !== 'google') return;
+    try {
+      const { accessToken, developerKey, appId } = await request<{ accessToken: string; developerKey: string; appId: string }>(`/integrations/connections/${activeLinkConnection.id}/google-picker-token`);
+      await loadGooglePicker();
+      const google = (window as any).google;
+      const picker = new google.picker.PickerBuilder()
+        .setDeveloperKey(developerKey)
+        .setAppId(appId)
+        .setOAuthToken(accessToken)
+        .setOrigin(window.location.origin)
+        .addView(new google.picker.DocsView(google.picker.ViewId.DOCS).setIncludeFolders(true))
+        .setCallback((data: any) => {
+          if (data[google.picker.Response.ACTION] !== google.picker.Action.PICKED) return;
+          const file = data[google.picker.Response.DOCUMENTS]?.[0];
+          if (file) setPickedGoogleFile({ connectionId: activeLinkConnection.id, id: file[google.picker.Document.ID], name: file[google.picker.Document.NAME], url: file[google.picker.Document.URL] });
+        }).build();
+      picker.setVisible(true);
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not open Google Drive.'); }
   }
   async function syncFiles() {
     if (!connectedConnections.length) { notify('Connect an external tool before syncing files.'); return; }
@@ -240,12 +281,12 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not open this file.'); }
   }
 
-  return <section className="sp on tracker-page"><Head title="Task Progress Tracker" action={<div className="tracker-head-actions"><button className="btn-o btn-sm" onClick={() => { if (!tasks.length) notify('Create or receive a task before attaching a file.'); else if (!connectedConnections.length) notify('Connect an external tool before attaching a file.'); else setLinkingTaskId(tasks[0].id); }}>⌕ Attach File Link</button><button className="btn btn-sm" disabled={syncing} onClick={() => void syncFiles()}>{syncing ? 'Syncing…' : '↻ Sync Files'}</button></div>} />
+  return <section className="sp on tracker-page"><Head title="Task Progress Tracker" action={<div className="tracker-head-actions"><button className="btn-o btn-sm" onClick={() => { if (!tasks.length) notify('Create or receive a task before attaching a file.'); else if (!connectedConnections.length) notify('Connect an external tool before attaching a file.'); else beginLink(tasks[0].id); }}>⌕ Attach File Link</button><button className="btn btn-sm" disabled={syncing} onClick={() => void syncFiles()}>{syncing ? 'Syncing…' : '↻ Sync Files'}</button></div>} />
     <div className="tracker-kpis"><TrackerKpi icon="▤" value={tasks.reduce((total, task) => total + task.resources.length, 0)} label="Total Files" /><TrackerKpi icon="◷" value={tasks.filter((task) => task.status === 'ongoing').length} label="In Progress" tone="yel" /><TrackerKpi icon="✓" value={complete} label="Completed" tone="grn" /><TrackerKpi icon="▥" value={`${average}%`} label="Avg. Progress" /></div>
     <div className="tracker-toolbar"><div className="tracker-filter"><span>Filter:</span><div>{trackerFilters.map((value) => <button type="button" className={filter === value ? 'on' : ''} key={value} onClick={() => setFilter(value)}>{trackerFilterLabel[value]}</button>)}</div></div><label className="tracker-platform">Platform:<select value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">All Platforms</option>{connectedConnections.map((connection) => <option key={connection.id} value={connection.provider}>{connection.platform}</option>)}</select></label></div>
-    {data === null ? <div className="cc"><Empty>Loading your tracker…</Empty></div> : projectSections.length ? <div className="tracker-project-sections">{projectSections.map((section) => <section className="tracker-project-section" key={section.title}><div className="tracker-project-heading"><span>Project</span><h3>{section.title}</h3></div><div className="tracker-resource-grid">{section.cards.map(({ task, resource }) => <TrackerResourceCard key={resource?.id ?? task.id} task={task} resource={resource} onEdit={() => { if (!resource) return; setEditingTaskId(task.id); setEditingResourceId(resource.id); setEditStatus(task.status); }} onOpen={() => resource && void openResource(resource)} onAttach={() => connectedConnections.length ? setLinkingTaskId(task.id) : notify('Connect an external tool before attaching a file.')} />)}</div></section>)}</div> : <div className="cc"><Empty>{tasks.length ? 'No linked files match the selected filters.' : 'Tasks from your projects will appear here, along with any files you link to them.'}</Empty></div>}
+    {data === null ? <div className="cc"><Empty>Loading your tracker…</Empty></div> : projectSections.length ? <div className="tracker-project-sections">{projectSections.map((section) => <section className="tracker-project-section" key={section.title}><div className="tracker-project-heading"><span>Project</span><h3>{section.title}</h3></div><div className="tracker-resource-grid">{section.cards.map(({ task, resource }) => <TrackerResourceCard key={resource?.id ?? task.id} task={task} resource={resource} onEdit={() => { if (!resource) return; setEditingTaskId(task.id); setEditingResourceId(resource.id); setEditStatus(task.status); }} onOpen={() => resource && void openResource(resource)} onAttach={() => connectedConnections.length ? beginLink(task.id) : notify('Connect an external tool before attaching a file.')} />)}</div></section>)}</div> : <div className="cc"><Empty>{tasks.length ? 'No linked files match the selected filters.' : 'Tasks from your projects will appear here, along with any files you link to them.'}</Empty></div>}
     <div className="tracker-lower-grid"><section className="cc tracker-activity"><div className="cc-head"><h3>Recent File Activity</h3><span>Latest updates</span></div>{data?.activity.length ? <div className="tracker-activity-list">{data.activity.slice(0, 8).map((activity) => <div className="tracker-activity-row" key={activity.id}><i>{activity.kind === 'integration' ? '↻' : '▤'}</i><div><strong>{activityLabel(activity)}</strong><span>{relativeDate(activity.createdAt)}</span></div></div>)}</div> : <Empty>Linked-file and task updates will appear here.</Empty>}</section><section className="cc tracker-collaborators"><div className="cc-head"><h3>Project Collaborators</h3><span>{collaborators.length || '—'} members</span></div>{collaborators.length ? <div className="tracker-collaborator-list">{collaborators.map((member) => <div className="tracker-collaborator" key={member.id}><span className="tracker-collaborator-avatar">{member.avatarUrl ? <img src={member.avatarUrl} alt="" /> : initials(member.fullName)}</span><strong>{member.fullName}</strong></div>)}</div> : <Empty>Collaborators appear when you have assigned project tasks.</Empty>}</section></div>
-    {linkingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLinkingTaskId(null); }}><div className="modal-box tracker-link-modal"><div className="modal-ttl"><span>Attach file link</span><button type="button" className="modal-close" onClick={() => setLinkingTaskId(null)}>×</button></div><p>Attach a file from one of your connected tools to <strong>{linkingTask.title}</strong>.</p><form onSubmit={linkFile}><label className="lbl">Connected platform</label><select className="ifield" name="connectionId" required defaultValue={connectedConnections[0]?.id}>{connectedConnections.map((connection) => <option key={connection.id} value={connection.id}>{connection.platform}</option>)}</select><label className="lbl">File name</label><input className="ifield" name="title" required minLength={2} maxLength={180} placeholder="e.g. Research presentation slides" /><label className="lbl">File link</label><input className="ifield" name="externalUrl" type="url" required placeholder="https://…" /><div className="modal-acts"><button type="button" className="btn-o" onClick={() => setLinkingTaskId(null)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Attaching…' : 'Attach Link'}</button></div></form></div></div> : null}
+    {linkingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLinkingTaskId(null); }}><div className="modal-box tracker-link-modal"><div className="modal-ttl"><span>Attach file link</span><button type="button" className="modal-close" onClick={() => setLinkingTaskId(null)}>×</button></div><p>Attach a file from one of your connected tools to <strong>{linkingTask.title}</strong>.</p><form onSubmit={linkFile}><label className="lbl">Connected platform</label><select className="ifield" name="connectionId" required value={activeLinkConnection?.id ?? ''} onChange={(event) => { setLinkConnectionId(event.target.value); setPickedGoogleFile(null); }}>{connectedConnections.map((connection) => <option key={connection.id} value={connection.id}>{connection.platform}</option>)}</select>{usingGooglePicker ? <><label className="lbl">Google Drive file</label><button className="btn-o" type="button" onClick={() => void chooseGoogleFile()}>{pickedGoogleFile ? 'Choose a different Google file' : 'Choose from Google Drive'}</button>{pickedGoogleFile ? <div className="tracker-auto-progress-note">Selected: <strong>{pickedGoogleFile.name}</strong></div> : <div className="tracker-auto-progress-note">Google files must be chosen from Drive so only selected files can be accessed.</div>}<label className="lbl">File name</label><input className="ifield" name="title" required readOnly value={pickedGoogleFile?.name ?? ''} placeholder="Choose a file from Google Drive" /><label className="lbl">File link</label><input className="ifield" name="externalUrl" type="url" required readOnly value={pickedGoogleFile?.url ?? ''} placeholder="Choose a file from Google Drive" /></> : <><label className="lbl">File name</label><input className="ifield" name="title" required minLength={2} maxLength={180} placeholder="e.g. Research presentation slides" /><label className="lbl">File link</label><input className="ifield" name="externalUrl" type="url" required placeholder="https://…" /></>}<div className="modal-acts"><button type="button" className="btn-o" onClick={() => setLinkingTaskId(null)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Attaching…' : 'Attach Link'}</button></div></form></div></div> : null}
     {editingTask && editingResource ? <div className="modal-ov open tracker-edit-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) { setEditingTaskId(null); setEditingResourceId(null); } }}><div className="modal-box tracker-edit-modal"><div className="modal-ttl"><span>Edit External File Link</span><button type="button" className="modal-close" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>×</button></div><form onSubmit={(event) => void saveExternalFile(event)}><label className="lbl">File name</label><input className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={editingResource.title} /><label className="lbl">External file URL</label><input className="ifield" name="externalUrl" type="url" required defaultValue={editingResource.externalUrl} /><label className="lbl">Platform</label><div className="tracker-platform-options">{connectedConnections.map((connection) => <label className={`tracker-platform-option ${connection.id === editingResource.connectionId ? 'selected' : ''}`} key={connection.id}><input type="radio" name="connectionId" value={connection.id} defaultChecked={connection.id === editingResource.connectionId} required /><span>{connection.platform}</span></label>)}</div>{connectedConnections.length ? null : <div className="tracker-auto-progress-note">Connect an external platform before editing this file link.</div>}<label className="lbl">Assigned member</label><select className="ifield" name="assigneeId" defaultValue={editingTask.assignees[0]?.id ?? ''} disabled={!editingTask.canAssign}>{editingTask.collaborators.map((member) => <option key={member.id} value={member.id}>{member.fullName}</option>)}</select><label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!editingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div><div className="tracker-auto-progress-note">Progress is calculated automatically from task status and cannot be entered manually.</div><div className="modal-acts"><button type="button" className="btn-o" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>Cancel</button><button className="btn" disabled={saving || !connectedConnections.length}>{saving ? 'Saving…' : 'Save Changes'}</button></div></form></div></div> : null}
   </section>;
 }
@@ -259,10 +300,25 @@ function activityLabel(activity: TrackerActivity) { if (activity.kind === 'integ
 
 export function IntegrationsPage({ notify }: { notify: Notice }) {
   const [tools, setTools] = useState<Array<{ id: string; provider: string; name: string; category: string; connections: Array<{ status: string; lastSyncedAt?: string }> }> | null>(null);
-  useEffect(() => { void request<any[]>('/integrations/catalog').then(setTools).catch((error: Error) => notify(error.message)); }, [notify]);
+  const [connecting, setConnecting] = useState<string | null>(null);
+  useEffect(() => {
+    void request<any[]>('/integrations/catalog').then(setTools).catch((error: Error) => notify(error.message));
+    const provider = new URLSearchParams(window.location.search).get('connected');
+    if (provider) { notify(`${provider === 'microsoft' ? 'Microsoft 365' : provider[0].toUpperCase() + provider.slice(1)} connected successfully.`); window.history.replaceState({}, '', `${window.location.pathname}${window.location.hash}`); }
+  }, [notify]);
+  async function connect(tool: { provider: string; name: string }) {
+    if (!['google', 'microsoft', 'figma'].includes(tool.provider)) { notify(`${tool.name} is not available yet.`); return; }
+    setConnecting(tool.provider);
+    try {
+      const callbackPath = apiUrl(`/integrations/${tool.provider}/callback`);
+      const callbackUrl = callbackPath.startsWith('http') ? callbackPath : new URL(callbackPath, window.location.origin).toString();
+      const { authorizeUrl } = await request<{ authorizeUrl: string }>(`/integrations/${tool.provider}/authorize?redirectUri=${encodeURIComponent(callbackUrl)}`);
+      window.location.assign(authorizeUrl);
+    } catch (error) { notify(error instanceof Error ? error.message : `Could not connect ${tool.name}.`); setConnecting(null); }
+  }
   const connected = tools?.filter((tool) => tool.connections.length).length ?? 0;
   const sections = useMemo(() => groupBy(tools ?? [], (tool) => tool.category || 'Other'), [tools]);
-  return <section className="sp on"><div className="ext-workspace-header"><div><div className="ext-workspace-title">Apps & External Tools</div><div className="ext-workspace-sub" /></div><div className="ext-header-actions"><button className="btn-o btn-sm" onClick={() => notify('More apps will appear in the catalog when available.')}>⌕ Browse Apps</button><button className="btn btn-sm" onClick={() => notify('All connected tools synced!')}>↻ Sync All</button></div></div><div className="ext-status-bar"><span className="ext-status-pill"><i className="dot-pulse connected" />{connected} Connected</span><i className="ext-divider" /><span className="ext-status-pill"><i className="dot-pulse idle" />0 Active Sessions</span><i className="ext-divider" /><span className="ext-status-pill">✓ 0 Tasks Auto-Completed Today</span><span className="ext-last-sync">Last synced: not yet</span></div>{tools === null ? <div className="cc"><Empty>Loading apps…</Empty></div> : tools.length ? Object.entries(sections).map(([category, values]) => <div key={category}><div className="ext-section-label">{category}</div><div className="ext-app-grid">{values.map((tool) => <article className={`ext-app-card ${tool.connections.length ? 'connected' : ''}`} key={tool.id}><div className="ext-card-top"><div className="ext-app-icon">{tool.name.slice(0, 1)}</div><span className={`ext-conn-badge ${tool.connections.length ? 'connected' : 'not-connected'}`}>{tool.connections.length ? '● Connected' : 'Not Connected'}</span></div><div className="ext-app-name">{tool.name}</div><div className="ext-app-category">{tool.category}</div><div className="ext-recent-activity">{tool.connections.length ? 'Connected — ready to launch and link to a task.' : `Connect ${tool.name} when your project needs it.`}</div><div className="ext-card-footer"><span className="ext-task-link">No task linked yet</span><button className={`ext-action-btn ${tool.connections.length ? 'launch' : 'connect'}`} onClick={() => notify(tool.connections.length ? `${tool.name} is ready to launch.` : `${tool.name} connection setup is ready for provider credentials.`)}>{tool.connections.length ? 'Launch' : 'Connect'}</button></div></article>)}</div></div>) : <div className="cc"><Empty>Connect a tool when your project needs one.</Empty></div>}</section>;
+  return <section className="sp on"><div className="ext-workspace-header"><div><div className="ext-workspace-title">Apps & External Tools</div><div className="ext-workspace-sub" /></div><div className="ext-header-actions"><button className="btn-o btn-sm" onClick={() => notify('More apps will appear in the catalog when available.')}>⌕ Browse Apps</button><button className="btn btn-sm" onClick={() => notify('Use Sync Files in Task Progress Tracker to sync your connected tools.')}>↻ Sync All</button></div></div><div className="ext-status-bar"><span className="ext-status-pill"><i className="dot-pulse connected" />{connected} Connected</span><i className="ext-divider" /><span className="ext-status-pill"><i className="dot-pulse idle" />0 Active Sessions</span><i className="ext-divider" /><span className="ext-status-pill">✓ 0 Tasks Auto-Completed Today</span><span className="ext-last-sync">Last synced: not yet</span></div>{tools === null ? <div className="cc"><Empty>Loading apps…</Empty></div> : tools.length ? Object.entries(sections).map(([category, values]) => <div key={category}><div className="ext-section-label">{category}</div><div className="ext-app-grid">{values.map((tool) => <article className={`ext-app-card ${tool.connections.length ? 'connected' : ''}`} key={tool.id}><div className="ext-card-top"><div className="ext-app-icon">{tool.name.slice(0, 1)}</div><span className={`ext-conn-badge ${tool.connections.length ? 'connected' : 'not-connected'}`}>{tool.connections.length ? '● Connected' : 'Not Connected'}</span></div><div className="ext-app-name">{tool.name}</div><div className="ext-app-category">{tool.category}</div><div className="ext-recent-activity">{tool.connections.length ? 'Connected — ready to launch and link to a task.' : `Connect ${tool.name} when your project needs it.`}</div><div className="ext-card-footer"><span className="ext-task-link">No task linked yet</span><button className={`ext-action-btn ${tool.connections.length ? 'launch' : 'connect'}`} disabled={connecting === tool.provider} onClick={() => tool.connections.length ? notify(`${tool.name} is ready to launch.`) : void connect(tool)}>{tool.connections.length ? 'Launch' : connecting === tool.provider ? 'Opening…' : ['google', 'microsoft', 'figma'].includes(tool.provider) ? 'Connect' : 'Coming Soon'}</button></div></article>)}</div></div>) : <div className="cc"><Empty>Connect a tool when your project needs one.</Empty></div>}</section>;
 }
 
 export function AdminSettingsPage({ notify }: { notify: Notice }) {
