@@ -7,6 +7,7 @@ export type AckDto = { ok: boolean; error?: ApiError };
 export type CallKind = 'voice' | 'video';
 export type CallParticipant = { socketId: string; userId: string; fullName?: string };
 export type CallSignal = { type: 'offer' | 'answer' | 'ice-candidate'; sdp?: string; candidate?: RTCIceCandidateInit | null };
+export type CallHostAction = 'mute-all' | 'remove-participant' | 'end-call';
 export type IceServerConfig = { urls: string | string[]; username?: string; credential?: string };
 
 export const registerSchema = z.object({
@@ -74,18 +75,27 @@ export type ServerToClientEvents = {
   'activity:new': (activity: unknown) => void;
   'sync:reconcile': (state: unknown) => void;
   'call:invite': (call: { groupId: string; kind: CallKind; initiatorSocketId: string; initiatorUserId: string }) => void;
-  'call:participant-joined': (call: { groupId: string; participant: CallParticipant }) => void;
+  'call:participant-joined': (call: { groupId: string; participant: CallParticipant; hostSocketId: string }) => void;
   'call:participant-left': (call: { groupId: string; socketId: string }) => void;
   'call:signal': (signal: { groupId: string; fromSocketId: string; signal: CallSignal }) => void;
+  'call:host-changed': (call: { groupId: string; hostSocketId: string | null }) => void;
+  'call:screen-share': (call: { groupId: string; socketId: string; sharing: boolean }) => void;
+  'call:mute-request': (call: { groupId: string }) => void;
+  'call:removed': (call: { groupId: string }) => void;
+  'call:ended': (call: { groupId: string }) => void;
+  'call:raise-hand': (call: { groupId: string; socketId: string; raised: boolean }) => void;
 };
 export type ClientToServerEvents = {
   'chat:send': (message: { groupId: string; body: string }, ack: (result: AckDto) => void) => void;
   'group:join': (groupId: string, ack: (result: AckDto) => void) => void;
   'project:join': (projectId: string, ack: (result: AckDto) => void) => void;
   'sync:request': (cursor: { projectId: string; cursor?: string }, ack: (state: unknown) => void) => void;
-  'call:join': (call: { groupId: string; kind: CallKind }, ack: (result: AckDto & { participants?: CallParticipant[] }) => void) => void;
+  'call:join': (call: { groupId: string; kind: CallKind }, ack: (result: AckDto & { participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[] }) => void) => void;
   'call:leave': (call: { groupId: string }, ack: (result: AckDto) => void) => void;
   'call:signal': (signal: { groupId: string; targetSocketId: string; signal: CallSignal }, ack: (result: AckDto) => void) => void;
+  'call:screen-share': (share: { groupId: string; sharing: boolean }, ack: (result: AckDto) => void) => void;
+  'call:host-action': (action: { groupId: string; action: CallHostAction; targetSocketId?: string }, ack: (result: AckDto) => void) => void;
+  'call:raise-hand': (hand: { groupId: string; raised: boolean }, ack: (result: AckDto) => void) => void;
 };
 
 export const apiError = (code: string, message: string, fields?: Record<string, string>): ApiError => ({ code, message, ...(fields ? { fields } : {}) });

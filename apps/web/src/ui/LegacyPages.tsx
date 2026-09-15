@@ -13,10 +13,15 @@ const Empty = ({ children }: { children: React.ReactNode }) => <div className="l
 const Head = ({ title, action }: { title: string; action?: React.ReactNode }) => <div className="ph"><h2>{title}</h2>{action}</div>;
 const Badge = ({ value }: { value: string }) => <span className={`bdg ${value === 'completed' || value === 'active' ? 'g' : value === 'pending' ? 'y' : 'ac'}`}>{value.replaceAll('_', ' ')}</span>;
 
-export function TasksPage({ notify }: { notify: Notice }) {
+export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTaskId?: string }) {
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null);
   useEffect(() => { void request<Task[]>('/tasks/mine').then(setTasks).catch((error: Error) => notify(error.message)); }, [notify]);
+  useEffect(() => {
+    if (!focusedTaskId || !tasks?.some((task) => task.id === focusedTaskId)) return;
+    const frame = requestAnimationFrame(() => document.getElementById(`task-${focusedTaskId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    return () => cancelAnimationFrame(frame);
+  }, [focusedTaskId, tasks]);
   async function updateStatus(task: Task, status: 'pending' | 'ongoing' | 'for_review' | 'completed') {
     if (task.status === status) return;
     setUpdatingTaskId(task.id);
@@ -28,7 +33,7 @@ export function TasksPage({ notify }: { notify: Notice }) {
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not update this task.'); }
     finally { setUpdatingTaskId(null); }
   }
-  return <section className="sp on"><Head title="My Tasks" /><div className="cc legacy-table-card">{tasks === null ? <Empty>Loading tasks…</Empty> : tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Assigned By</th><th>Deadline</th><th>Priority</th><th>Auto-Progress</th><th>Status</th></tr></thead><tbody>{tasks.map((task) => <tr key={task.id}><td><strong>{task.title}</strong></td><td>{task.project?.title ?? '—'}</td><td>{task.assignedBy ?? '—'}</td><td>{date(task.deadline)}</td><td><Badge value={task.priority} /></td><td>{task.progress ?? 0}%</td><td><select className="task-status-select" value={task.status} aria-label={`Status for ${task.title}`} disabled={updatingTaskId === task.id} onChange={(event) => void updateStatus(task, event.target.value as 'pending' | 'ongoing' | 'for_review' | 'completed')}><option value="pending">Not Started</option><option value="ongoing">In Progress</option><option value="for_review">For Review</option><option value="completed">Completed</option></select></td></tr>)}</tbody></table> : <Empty>Tasks assigned to you will appear here.</Empty>}</div><div className="cc"><div className="cc-head"><h3>Connected External Tools Progress</h3></div><div className="g4 legacy-tool-progress">{['Design & Presentation', 'Documents', 'File Storage', 'Task Management'].map((label) => <div className="mini-state" key={label}><strong>{label}</strong><span>Connect a tool when your project needs one.</span></div>)}</div></div></section>;
+  return <section className="sp on"><Head title="My Tasks" /><div className="cc legacy-table-card">{tasks === null ? <Empty>Loading tasks…</Empty> : tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Assigned By</th><th>Deadline</th><th>Priority</th><th>Auto-Progress</th><th>Status</th></tr></thead><tbody>{tasks.map((task) => <tr id={`task-${task.id}`} className={task.id === focusedTaskId ? 'notification-target' : ''} key={task.id}><td><strong>{task.title}</strong></td><td>{task.project?.title ?? '—'}</td><td>{task.assignedBy ?? '—'}</td><td>{date(task.deadline)}</td><td><Badge value={task.priority} /></td><td>{task.progress ?? 0}%</td><td><select className="task-status-select" value={task.status} aria-label={`Status for ${task.title}`} disabled={updatingTaskId === task.id} onChange={(event) => void updateStatus(task, event.target.value as 'pending' | 'ongoing' | 'for_review' | 'completed')}><option value="pending">Not Started</option><option value="ongoing">In Progress</option><option value="for_review">For Review</option><option value="completed">Completed</option></select></td></tr>)}</tbody></table> : <Empty>Tasks assigned to you will appear here.</Empty>}</div><div className="cc"><div className="cc-head"><h3>Connected External Tools Progress</h3></div><div className="g4 legacy-tool-progress">{['Design & Presentation', 'Documents', 'File Storage', 'Task Management'].map((label) => <div className="mini-state" key={label}><strong>{label}</strong><span>Connect a tool when your project needs one.</span></div>)}</div></div></section>;
 }
 
 export function CalendarPage({ notify }: { notify: Notice }) {
@@ -101,8 +106,8 @@ export function ProjectsAnalyticsPage({ kind, notify }: { kind: 'workflow' | 'pr
   return <section className="sp on"><Head title="Predictive Monitoring" action={picker} /><div className="krow c3"><Kpi value={score ? 1 : '—'} label="High Risk Tasks" tone="red" /><Kpi value={analytics?.deltaDays ?? '—'} label="Possible Delays" tone="yel" /><Kpi value={analytics ? Math.max(0, (projects?.find((p) => p.id === selected)?.tasks.length ?? 0) - (score ? 1 : 0)) : '—'} label="On-Track Tasks" tone="grn" /></div><div className="cc"><div className="cc-head"><h3>Risk Assessment by Task</h3></div>{analytics ? <div className="risk-cards"><RiskRing score={score} title="Project Risk" /></div> : <Empty>Project risk and progress insights will appear here once you have project data.</Empty>}</div><div className="cc prediction-alerts"><div className="lbl">AI Predictions &amp; Alerts</div>{analytics?.recommendations?.length ? analytics.recommendations.map((value: string, index: number) => <div className="alert y" key={index}>{value}</div>) : <Empty>Your AI predictions and alerts will appear here.</Empty>}</div><div className="cc"><div className="cc-head"><h3>Predicted Timeline</h3></div>{analytics ? <table className="tbl"><thead><tr><th>Project</th><th>Original Deadline</th><th>Predicted Completion</th><th>Risk</th><th>Recommendation</th></tr></thead><tbody><tr><td>{projects?.find((p) => p.id === selected)?.title}</td><td>{date(projects?.find((p) => p.id === selected)?.deadline)}</td><td>{date(analytics.predictedCompletion)}</td><td><Badge value={analytics.riskLevel ?? 'low'} /></td><td>{analytics.recommendations?.[0] ?? 'No action needed'}</td></tr></tbody></table> : <Empty>Predicted timelines will appear here.</Empty>}</div></section>;
 }
 
-export function NotificationsPage({ notify }: { notify: Notice }) {
-  const [items, setItems] = useState<Array<{ id: string; message: string; read: boolean; createdAt: string }> | null>(null);
+export function NotificationsPage({ notify, onNotificationClick }: { notify: Notice; onNotificationClick: (notification: { id: string; read: boolean; relatedId?: string | null; relatedType?: string | null }) => void }) {
+  const [items, setItems] = useState<Array<{ id: string; message: string; read: boolean; createdAt: string; relatedId?: string | null; relatedType?: string | null }> | null>(null);
   async function refresh() { setItems(await request('/notifications')); }
   useEffect(() => { void refresh().catch((error: Error) => notify(error.message)); }, [notify]);
   useEffect(() => {
@@ -111,7 +116,11 @@ export function NotificationsPage({ notify }: { notify: Notice }) {
     return () => { socket.disconnect(); };
   }, []);
   async function markAll() { if (!items) return; await Promise.all(items.filter((item) => !item.read).map((item) => request(`/notifications/${item.id}/read`, { method: 'PATCH' }))); await refresh(); notify('Notifications marked as read.'); }
-  return <section className="sp on"><Head title="Notifications" action={<button className="btn-o btn-sm" onClick={() => void markAll()}>Mark All Read</button>} /><div className="cc no-bottom">{items === null ? <Empty>Loading notifications…</Empty> : items.length ? items.map((item) => <div className="notif-item" key={item.id}><div className="ndot" style={{ opacity: item.read ? .35 : 1 }} /><div><div className="ntxt">{item.message}</div><div className="ntime">{new Date(item.createdAt).toLocaleString()}</div></div></div>) : <Empty>You have no notifications yet.</Empty>}</div></section>;
+  function activateNotification(item: NonNullable<typeof items>[number]) {
+    setItems((current) => current?.map((notification) => notification.id === item.id ? { ...notification, read: true } : notification) ?? null);
+    onNotificationClick(item);
+  }
+  return <section className="sp on"><Head title="Notifications" action={<button className="btn-o btn-sm" onClick={() => void markAll()}>Mark All Read</button>} /><div className="cc no-bottom">{items === null ? <Empty>Loading notifications…</Empty> : items.length ? items.map((item) => <button type="button" className="notif-item notif-entry" key={item.id} onClick={() => activateNotification(item)}><span className="ndot" style={{ opacity: item.read ? .35 : 1 }} /><span><span className="ntxt">{item.message}</span><span className="ntime">{new Date(item.createdAt).toLocaleString()}</span></span></button>) : <Empty>You have no notifications yet.</Empty>}</div></section>;
 }
 
 export function ProfilePage({ user, onUserUpdated, onSessionInvalidated, notify }: { user: User; onUserUpdated: (user: User) => void; onSessionInvalidated: () => void; notify: Notice }) {

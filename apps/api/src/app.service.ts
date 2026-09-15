@@ -16,7 +16,7 @@ import { AuditLogService } from './audit-log.service.js';
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const WorkflowEventType = { status_change: 'status_change', task_completed: 'task_completed', assignment_change: 'assignment_change', progress_activity: 'progress_activity' } as const;
-const NotificationType = { task_assignment: 'task_assignment' } as const;
+const NotificationType = { task_assignment: 'task_assignment', group_activity: 'group_activity' } as const;
 type Role = (typeof Role)[keyof typeof Role];
 type TaskStatus = 'pending' | 'ongoing' | 'for_review' | 'completed';
 type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva' | 'figma';
@@ -117,7 +117,17 @@ export class AppService {
   async joinGroup(caller: Caller, code: string) { const entry = await this.prisma.joinCode.findUnique({ where: { code }, include: { group: true } }); if (!entry || !entry.active || (entry.expiresAt && entry.expiresAt < new Date())) fail('INVALID_JOIN_CODE', 'Join code is invalid or expired', 400); await this.prisma.groupMember.upsert({ where: { groupId_userId: { groupId: entry.groupId, userId: caller.id } }, update: {}, create: { groupId: entry.groupId, userId: caller.id } }); return entry.group; }
   async groups(caller: Caller) { return this.prisma.group.findMany({ where: { members: { some: { userId: caller.id } } }, include: { members: { where: { userId: caller.id }, select: { role: true } }, _count: { select: { projects: true, ideas: true } } } }); }
   async group(caller: Caller, id: string) { await this.member(id, caller.id); return this.prisma.group.findUniqueOrThrow({ where: { id }, include: { members: { include: { user: { select: { id: true, fullName: true, avatarUrl: true } } } }, joinCodes: { where: { active: true, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, orderBy: { id: 'desc' }, take: 1 }, projects: true, ideas: true } }); }
-  async addGroupMember(caller: Caller, groupId: string, userId: string) { await this.member(groupId, caller.id); return this.prisma.groupMember.upsert({ where: { groupId_userId: { groupId, userId } }, update: {}, create: { groupId, userId } }); }
+  async addGroupMember(caller: Caller, groupId: string, userId: string) {
+    await this.member(groupId, caller.id);
+    const existing = await this.prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId } } });
+    if (existing) return existing;
+    const membership = await this.prisma.groupMember.create({ data: { groupId, userId } });
+    if (caller.id !== userId) {
+      const group = await this.prisma.group.findUniqueOrThrow({ where: { id: groupId }, select: { name: true } });
+      await this.notify([userId], NotificationType.group_activity, `You were added to “${group.name}” group chat`, groupId, 'group');
+    }
+    return membership;
+  }
   async addGroupMemberByEmail(caller: Caller, groupId: string, email: string) { const user = await this.prisma.user.findUnique({ where: { email } }); if (!user) fail('NOT_FOUND', 'No registered account uses that email address', 404); return this.addGroupMember(caller, groupId, user.id); }
   async removeGroupMember(caller: Caller, groupId: string, userId: string) { await this.member(groupId, caller.id, true); await this.prisma.groupMember.delete({ where: { groupId_userId: { groupId, userId } } }); return { ok: true }; }
   async createProject(caller: Caller, input: any) { await this.member(input.groupId, caller.id); const memberIds = [...new Set([caller.id, ...(input.memberIds ?? [])])]; for (const userId of memberIds) await this.member(input.groupId, userId); return this.prisma.project.create({ data: { ...input, createdBy: caller.id, members: { create: memberIds.map((userId) => ({ userId, role: userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } }, include: { members: true } }); }
@@ -417,6 +427,7 @@ export class AppService {
   }
   async ticket(caller: Caller, input: any) { return this.prisma.supportTicket.create({ data: { ...input, userId: caller.id } }); }
   async admin(caller: Caller) { if (caller.role !== Role.Administrator) fail('RBAC_FORBIDDEN', 'Administrator access is required', 403); }
+  async adminSupportTickets(caller: Caller) { await this.admin(caller); return this.prisma.supportTicket.findMany({ include: { user: { select: { fullName: true, email: true } } }, orderBy: { createdAt: 'desc' }, take: 24 }); }
   async adminUpdateUser(caller: Caller, targetId: string, data: any) {
     await this.admin(caller);
     const updated = await this.prisma.user.update({ where: { id: targetId }, data });
