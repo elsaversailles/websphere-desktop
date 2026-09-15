@@ -126,3 +126,13 @@
 /* Actionable notifications use the same compact controls across the dashboard and inbox. */
 .notif-popover-item{width:100%;border:0;background:transparent;color:inherit;text-align:left}.notif-popover-item:hover,.notif-popover-item:focus-visible{background:rgba(0,56,168,.07)}.notif-entry{width:100%;border:0;background:transparent;color:inherit;text-align:left}.notif-entry:hover,.notif-entry:focus-visible{background:rgba(0,56,168,.06)}
 .notification-target td{background:rgba(14,160,208,.13)!important;box-shadow:inset 3px 0 0 var(--acc)}
+
+/* The sidebar can condense to an icon rail without hiding workspace navigation. */
+.sidebar{transition:width .2s ease,padding .2s ease}.sb-head{display:flex;align-items:center;gap:7px;padding:0 0 16px;margin-bottom:6px}.sb-head .sb-brand{flex:1;min-width:0;margin:0;padding:0}.sidebar-toggle,.sidebar-reopen{display:grid;place-items:center;width:30px;height:30px;border:1px solid rgba(255,255,255,.28);border-radius:7px;background:rgba(0,56,168,.92);color:#fff;box-shadow:0 4px 12px rgba(11,58,82,.18)}.sidebar-toggle{flex:0 0 30px;background:rgba(255,255,255,.1);box-shadow:none}.sidebar-toggle:hover,.sidebar-reopen:hover{background:rgba(0,56,168,.75)}.sidebar.collapsed{width:0;padding:0;border-right:0;overflow:hidden}.sidebar.collapsed>*{opacity:0;pointer-events:none}.sidebar-reopen{position:fixed;z-index:30;top:14px;left:14px}
+
+/* Calls stay inside the active group chat, preserving the WebSphere shell and group context. */
+.gc-main-chat .call-stage{position:relative;z-index:1;inset:auto;flex:1;min-height:0;padding:14px 16px 18px;box-shadow:none}.gc-main-chat .call-media-grid{grid-template-columns:repeat(auto-fit,minmax(160px,1fr));grid-auto-rows:minmax(120px,1fr);padding:12px 0 16px}.gc-main-chat .call-media-grid.has-presentation{grid-template-columns:minmax(0,1fr) minmax(132px,.3fr)}.gc-main-chat .call-people-panel{right:14px;bottom:78px;width:min(310px,calc(100% - 28px));max-height:calc(100% - 112px)}
+@media(max-width:780px){.sidebar,.sidebar.collapsed,.sidebar-reopen{display:none}.gc-main-chat .call-stage{padding:12px}.gc-main-chat .call-media-grid{grid-auto-rows:minmax(110px,1fr);padding:10px 0 14px}.gc-main-chat .call-people-panel{right:10px;bottom:72px;width:calc(100% - 20px)}}
+
+/* Dashboard project creation uses the viewport while retaining a soft, blurred perimeter. */
+.project-modal-overlay{padding:clamp(16px,4vw,56px);background:rgba(11,58,82,.34);backdrop-filter:blur(16px)}.modal-box.project-modal{width:min(1180px,100%);height:min(90dvh,960px);max-height:100%;padding:clamp(24px,3.5vw,52px)}@media(max-width:640px){.project-modal-overlay{padding:14px}.modal-box.project-modal{height:calc(100dvh - 28px);max-height:calc(100dvh - 28px);padding:26px 20px}}
