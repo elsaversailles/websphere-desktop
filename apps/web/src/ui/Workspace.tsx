@@ -13,13 +13,14 @@ import { AdminSettingsPage, CalendarPage, IntegrationsPage, NotificationsPage, P
 type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tools' | 'tracker' | 'notifications' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'settings';
 type WorkspaceProps = { session: Session; onSessionChange: (session: Session) => void; onLogout: () => void; notify: (message: string) => void };
 type Link = { id: Page; label: string; icon: string };
+type NotificationEntry = { id: string; read: boolean; relatedId?: string | null; relatedType?: string | null };
 
 const userSections: Array<{ title: string; links: Link[] }> = [
   { title: 'Main', links: [{ id: 'dashboard', label: 'Dashboard', icon: '⌂' }] },
   { title: 'Groups & Projects', links: [{ id: 'groups', label: 'My Groups', icon: '♧' }, { id: 'chat', label: 'Group Chat', icon: '□' }, { id: 'ideas', label: 'Idea Management', icon: '◇' }, { id: 'projects', label: 'My Projects', icon: '▱' }, { id: 'tasks', label: 'My Tasks', icon: '✓' }] },
   { title: 'Analytics', links: [{ id: 'workflow', label: 'Workflow Analytics', icon: '▥' }, { id: 'predictive', label: 'Predictive Monitoring', icon: '◉' }] },
   { title: 'Tools', links: [{ id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'tools', label: 'Apps/External Tools', icon: '▦' }, { id: 'tracker', label: 'Task Progress Tracker', icon: '▤' }] },
-  { title: 'Account', links: [{ id: 'notifications', label: 'Notifications', icon: '♢' }, { id: 'profile', label: 'Profile & Settings', icon: '♙' }] },
+  { title: 'Account', links: [{ id: 'profile', label: 'Profile & Settings', icon: '♙' }] },
 ];
 const adminSections: Array<{ title: string; links: Link[] }> = [
   { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
@@ -29,6 +30,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const administrator = session.role === 'Administrator';
   const [page, setPage] = useState<Page>(administrator ? 'admin' : 'dashboard');
   const [selectedGroupId, setSelectedGroupId] = useState('');
+  const [selectedTaskId, setSelectedTaskId] = useState('');
   const [incomingCall, setIncomingCall] = useState<{ groupId: string; kind: CallKind } | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const sections = administrator ? adminSections : userSections;
@@ -36,6 +38,27 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   function navigate(target: Page) {
     if (target === 'assistant') setAssistantOpen(true);
     else setPage(target);
+  }
+
+  function openNotification(notification: NotificationEntry) {
+    if (!notification.read) void request(`/notifications/${notification.id}/read`, { method: 'PATCH' }).catch(() => undefined);
+    switch (notification.relatedType?.trim().toLowerCase()) {
+      case 'group':
+      case 'group_chat':
+      case 'chat':
+        if (notification.relatedId) setSelectedGroupId(notification.relatedId);
+        setPage('chat');
+        break;
+      case 'project': setPage('projects'); break;
+      case 'task':
+        setSelectedTaskId(notification.relatedId ?? '');
+        setPage('tasks');
+        break;
+      case 'idea': setPage('ideas'); break;
+      case 'calendar':
+      case 'event': setPage('calendar'); break;
+      default: setPage('notifications');
+    }
   }
 
   useEffect(() => {
@@ -68,20 +91,20 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       <div className="sb-bot"><div className="uchip">{session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className="ava">{initials(session.user.fullName)}</span>}<span><strong className="u-name">{session.user.fullName}</strong><small className="u-role">{administrator ? 'Administrator' : 'Member'}</small></span></div><button className="logout-btn" onClick={() => void logout()}>↪ Logout</button></div>
     </aside>
     <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><GlobeIcon />WebSphere</span><select value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}</select></div><div className="main">
-      {page === 'dashboard' ? <Dashboard name={session.user.fullName} notify={notify} onPage={navigate} /> : null}
+      {page === 'dashboard' ? <Dashboard name={session.user.fullName} notify={notify} onPage={navigate} onNotificationClick={openNotification} /> : null}
       {page === 'groups' ? <GroupsPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onIdeas={() => setPage('ideas')} onChat={() => setPage('chat')} notify={notify} /> : null}
       {page === 'ideas' ? <IdeasPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} /> : null}
       {page === 'projects' ? <ProjectsPage notify={notify} /> : null}
       {page === 'admin' ? <AdminPage notify={notify} /> : null}
       {page === 'accounts' ? <AdminAccounts notify={notify} /> : null}
       {page === 'chat' ? <GroupChatPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} incomingCall={incomingCall?.groupId === selectedGroupId ? incomingCall : null} onIncomingCallHandled={() => setIncomingCall(null)} /> : null}
-      {page === 'tasks' ? <TasksPage notify={notify} /> : null}
+      {page === 'tasks' ? <TasksPage notify={notify} focusedTaskId={selectedTaskId} /> : null}
       {page === 'workflow' ? <ProjectsAnalyticsPage kind="workflow" notify={notify} /> : null}
       {page === 'predictive' ? <ProjectsAnalyticsPage kind="predictive" notify={notify} /> : null}
       {page === 'calendar' ? <CalendarPage notify={notify} /> : null}
       {page === 'tools' ? <IntegrationsPage notify={notify} /> : null}
       {page === 'tracker' ? <TrackerPage notify={notify} /> : null}
-      {page === 'notifications' ? <NotificationsPage notify={notify} /> : null}
+      {page === 'notifications' ? <NotificationsPage notify={notify} onNotificationClick={openNotification} /> : null}
       {page === 'profile' ? <ProfilePage user={session.user} onUserUpdated={updateUser} onSessionInvalidated={() => { clearSession(); onLogout(); }} notify={notify} /> : null}
       {page === 'settings' ? <AdminSettingsPage notify={notify} /> : null}
     </div></div>
@@ -92,9 +115,23 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
 
 function AdminPage({ notify }: { notify: (message: string) => void }) {
   type Monitoring = { users: { total: number; active: number; locked: number; suspended: number; newSignups7d: number }; projects: { active: number; completed: number }; activity: { tasksCompleted24h: number; openSupportTickets: number }; health: { database: string; redis: string; overall: string } };
+  type SupportTicket = { id: string; category: string; subject: string; body: string; status: string; createdAt: string; user: { fullName: string; email: string } };
   const [data, setData] = useState<Monitoring | null>(null);
-  useEffect(() => { void request<Monitoring>('/admin/monitoring').then(setData).catch((error: Error) => notify(error.message)); }, [notify]);
-  return <section className="sp on"><div className="ph"><div><h2>User Activity</h2></div></div><div className="krow">{data ? <><Kpi label="Active Projects" value={data.projects.active} /><Kpi label="Active Users" value={data.users.active} /><Kpi label="Flagged Inactive" value={data.users.locked + data.users.suspended} tone="yel" /><Kpi label="System Status" value={data.health.overall === 'up' ? 'Online' : 'Degraded'} tone={data.health.overall === 'up' ? 'grn' : 'red'} /></> : <div className="cc">Loading system activity…</div>}</div><div className="g2"><div className="cc"><div className="cc-head"><h3>System Health</h3></div><Health label="Database" detail="Connected to the WebSphere database" ok={data?.health.database === 'up'} /><Health label="Redis" detail="Session and job queue store" ok={data?.health.redis === 'up'} /><Health label="File Storage" detail="Linux instance storage" ok /></div><div className="cc"><div className="cc-head"><h3>Recent User Activity</h3></div>{data ? <><Health label="New signups (7 days)" detail={`${data.users.newSignups7d} accounts created`} ok /><Health label="Tasks completed (24h)" detail={`${data.activity.tasksCompleted24h} tasks marked complete`} ok /><Health label="Open support tickets" detail={`${data.activity.openSupportTickets} awaiting response`} ok={data.activity.openSupportTickets === 0} /><Health label="Completed projects" detail={`${data.projects.completed} projects completed`} ok /></> : <div className="empty-message">Live audit activity will appear here.</div>}</div></div></section>;
+  const [tickets, setTickets] = useState<SupportTicket[] | null>(null);
+  async function refresh() {
+    try {
+      const [monitoring, supportTickets] = await Promise.all([request<Monitoring>('/admin/monitoring'), request<SupportTicket[]>('/admin/support/tickets')]);
+      setData(monitoring);
+      setTickets(supportTickets);
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not load administrator data.'); }
+  }
+  useEffect(() => { void refresh(); }, [notify]);
+  return <section className="sp on">
+    <div className="ph"><div><h2>User Activity</h2></div></div>
+    <div className="krow">{data ? <><Kpi label="Active Projects" value={data.projects.active} /><Kpi label="Active Users" value={data.users.active} /><Kpi label="Flagged Inactive" value={data.users.locked + data.users.suspended} tone="yel" /><Kpi label="System Status" value={data.health.overall === 'up' ? 'Online' : 'Degraded'} tone={data.health.overall === 'up' ? 'grn' : 'red'} /></> : <div className="cc">Loading system activity…</div>}</div>
+    <div className="g2"><div className="cc"><div className="cc-head"><h3>System Health</h3></div><Health label="Database" detail="Connected to the WebSphere database" ok={data?.health.database === 'up'} /><Health label="Redis" detail="Session and job queue store" ok={data?.health.redis === 'up'} /><Health label="File Storage" detail="Linux instance storage" ok /></div><div className="cc"><div className="cc-head"><h3>Recent User Activity</h3></div>{data ? <><Health label="New signups (7 days)" detail={`${data.users.newSignups7d} accounts created`} ok /><Health label="Tasks completed (24h)" detail={`${data.activity.tasksCompleted24h} tasks marked complete`} ok /><Health label="Open support tickets" detail={`${data.activity.openSupportTickets} awaiting response`} ok={data.activity.openSupportTickets === 0} /><Health label="Completed projects" detail={`${data.projects.completed} projects completed`} ok /></> : <div className="empty-message">Live audit activity will appear here.</div>}</div></div>
+    <section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{tickets?.length ?? 0} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => void refresh()}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <div className="support-ticket-list">{tickets.map((ticket) => <article className="support-ticket" key={ticket.id}><div className="support-ticket-top"><div><strong>{ticket.subject}</strong><span>{ticket.user.fullName} · {ticket.user.email}</span></div><span className={`support-ticket-status ${ticket.status}`}>{ticket.status.replace('_', ' ')}</span></div><p>{ticket.body}</p><footer><span>{ticket.category.replaceAll('_', ' ')}</span><time dateTime={ticket.createdAt}>{new Date(ticket.createdAt).toLocaleString()}</time></footer></article>)}</div> : <div className="empty-message">New support requests will appear here.</div>}</section>
+  </section>;
 }
 
 function AdminAccounts({ notify }: { notify: (message: string) => void }) {

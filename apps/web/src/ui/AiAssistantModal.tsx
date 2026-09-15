@@ -17,12 +17,9 @@ export function AiAssistantModal({ open, onClose, notify }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
-  const [minimized, setMinimized] = useState(false);
-  const [expanded, setExpanded] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => { if (open) setMinimized(false); }, [open]);
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages, busy, minimized]);
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages, busy]);
 
   async function send(text: string) {
     const value = text.trim();
@@ -49,18 +46,15 @@ export function AiAssistantModal({ open, onClose, notify }: Props) {
 
   if (!open) return null;
   return <div className="ai-modal-ov" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className={`ai-modal-box ${expanded ? 'expanded' : ''} ${minimized ? 'minimized' : ''}`}>
+    <div className="ai-modal-box">
       <div className="ai-modal-header">
         <span className="ai-modal-icon">✦</span>
         <div className="ai-modal-title"><strong>WebSphere AI Assistant</strong><small>Academic Project Intelligence</small></div>
         <div className="ai-modal-actions">
-          <button type="button" title="Minimize" onClick={() => setMinimized((value) => !value)}>−</button>
-          <button type="button" title={expanded ? 'Restore' : 'Expand'} onClick={() => setExpanded((value) => !value)}>▢</button>
           <button type="button" title="Close" onClick={onClose}>×</button>
         </div>
       </div>
-      {!minimized ? <>
-        <div className="ai-modal-body">
+      <div className="ai-modal-body">
           <div className="ai-modal-msg assistant">
             <p>Hello. I am <strong>WebSphere AI</strong>, your academic project planning assistant. Before creating a project, I help you and your group <strong>generate and vote on project ideas</strong> to find the best one.</p>
             <ul>
@@ -77,13 +71,12 @@ export function AiAssistantModal({ open, onClose, notify }: Props) {
           </div>)}
           {busy ? <div className="ai-modal-msg assistant typing"><span className="ai-typing-dot" /><span className="ai-typing-dot" /><span className="ai-typing-dot" /></div> : null}
           <div ref={bottomRef} />
-        </div>
-        <div className="ai-modal-quick">{quickActions.map((action) => <button key={action.label} type="button" disabled={busy} onClick={() => void send(action.prompt)}>{action.label}</button>)}</div>
-        <form className="ai-modal-inputrow" onSubmit={onSubmit}>
-          <input value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Ask about project titles, thesis topics, tools, or academic planning…" disabled={busy} />
-          <button type="submit" disabled={busy || !prompt.trim()} aria-label="Send"><SendIcon /></button>
-        </form>
-      </> : null}
+      </div>
+      <div className="ai-modal-quick">{quickActions.map((action) => <button key={action.label} type="button" disabled={busy} onClick={() => void send(action.prompt)}>{action.label}</button>)}</div>
+      <form className="ai-modal-inputrow" onSubmit={onSubmit}>
+        <input value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Ask about project titles, thesis topics, tools, or academic planning…" disabled={busy} />
+        <button type="submit" disabled={busy || !prompt.trim()} aria-label="Send"><SendIcon /></button>
+      </form>
     </div>
   </div>;
 }
