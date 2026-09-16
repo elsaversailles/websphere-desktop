@@ -1,7 +1,8 @@
 FROM node:20-alpine
 ARG NODE_OPTIONS=--max-old-space-size=512
 ENV NODE_OPTIONS=$NODE_OPTIONS
+RUN apk add --no-cache openssl
 WORKDIR /app
 COPY . .
-RUN corepack enable && pnpm install --no-frozen-lockfile && pnpm --filter @websphere/api exec prisma generate --schema ../../prisma/schema.prisma && pnpm --filter @websphere/worker build
+RUN corepack enable && pnpm install --frozen-lockfile --filter @websphere/worker... && pnpm --filter @websphere/worker exec prisma generate --schema ../../prisma/schema.prisma && pnpm --filter @websphere/worker build
 CMD ["node", "apps/worker/dist/index.js"]
