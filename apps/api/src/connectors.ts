@@ -167,6 +167,43 @@ class AsanaConnector implements Connector {
   }
   async launchUrl(target: LinkTarget) { return target.externalUrl; }
 }
+class CanvaConnector implements Connector {
+  readonly provider = 'canva' as const;
+  private readonly authorizationEndpoint = 'https://www.canva.com/api/oauth/authorize';
+  private readonly tokenEndpoint = 'https://api.canva.com/rest/v1/oauth/token';
+  private credentials() { return { clientId: required('CANVA_CLIENT_ID'), clientSecret: required('CANVA_CLIENT_SECRET') }; }
+  authorizeUrl(state: string, redirectUri: string, codeChallenge?: string) {
+    if (!codeChallenge) throw new Error('OAUTH_EXCHANGE_FAILED');
+    const { clientId } = this.credentials();
+    return `${this.authorizationEndpoint}?${new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', state, scope: 'design:meta:read', code_challenge: codeChallenge, code_challenge_method: 'S256' }).toString()}`;
+  }
+  async exchangeCode(code: string, redirectUri: string, codeVerifier?: string) {
+    if (!code || !redirectUri || !codeVerifier) throw new Error('OAUTH_EXCHANGE_FAILED');
+    const { clientId, clientSecret } = this.credentials();
+    const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+    return tokensFrom(await requestForm(this.tokenEndpoint, new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: codeVerifier, redirect_uri: redirectUri }), { authorization: `Basic ${basic}` }));
+  }
+  async refresh(tokens: OAuthTokens) {
+    if (!tokens.refreshToken) throw new Error('OAUTH_RECONNECT_REQUIRED');
+    const { clientId, clientSecret } = this.credentials();
+    const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+    return tokensFrom(await requestForm(this.tokenEndpoint, new URLSearchParams({ grant_type: 'refresh_token', refresh_token: tokens.refreshToken }), { authorization: `Basic ${basic}` }), tokens.refreshToken);
+  }
+  async sync(tokens: OAuthTokens, targets: SyncTarget[] = []): Promise<SyncResult> {
+    if (!targets.length) {
+      const data = await requestJson('https://api.canva.com/rest/v1/designs?page_size=100', tokens.accessToken);
+      const count = Array.isArray(data.items) ? data.items.length : 0;
+      return { summary: `Synced ${count} Canva design${count === 1 ? '' : 's'}` };
+    }
+    const results = await Promise.all(targets.map(async (target) => {
+      try { await requestJson(`https://api.canva.com/rest/v1/designs/${encodeURIComponent(target.externalId)}`, tokens.accessToken); return true; }
+      catch { return false; }
+    }));
+    const available = results.filter(Boolean).length;
+    return { summary: `Synced ${available} of ${targets.length} linked Canva design${targets.length === 1 ? '' : 's'}` };
+  }
+  async launchUrl(target: LinkTarget) { return target.externalUrl; }
+}
 class UnavailableConnector implements Connector {
   constructor(readonly provider: ProviderId) {}
   authorizeUrl(_state: string, _redirectUri: string): string { throw new Error('INTEGRATION_NOT_IMPLEMENTED'); }
@@ -177,5 +214,5 @@ class UnavailableConnector implements Connector {
 }
 export const connectors: Record<ProviderId, Connector> = {
   google: new GoogleConnector(), microsoft: new MicrosoftConnector(), figma: new FigmaConnector(),
-  trello: new TrelloConnector(), asana: new AsanaConnector(), canva: new UnavailableConnector('canva'),
+  trello: new TrelloConnector(), asana: new AsanaConnector(), canva: new CanvaConnector(),
 };
