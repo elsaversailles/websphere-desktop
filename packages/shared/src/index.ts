@@ -64,10 +64,6 @@ export const resourceUpdateSchema = resourceLinkSchema.extend({
   assigneeId: z.string().cuid().optional(),
   status: z.enum(['pending', 'ongoing', 'for_review', 'completed']).optional(),
 });
-export const projectTrelloMonitorSchema = z.object({
-  connectionId: z.string().cuid(),
-  boardId: z.string().trim().min(1).max(128),
-});
 export const ideaSchema = z.object({ title: z.string().trim().min(2).max(180), body: z.string().trim().min(1) });
 export const calendarEventSchema = z.object({ title: z.string().trim().min(2), type: z.enum(['meeting','work_session','presentation','activity']), startAt: z.coerce.date(), endAt: z.coerce.date().optional(), projectId: z.string().cuid().optional() });
 export const supportTicketSchema = z.object({ category: z.enum(['account_reactivation','account_deletion','password_concern','bug_report','other']), subject: z.string().trim().min(2), body: z.string().trim().min(1) });

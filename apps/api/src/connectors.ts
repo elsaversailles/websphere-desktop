@@ -3,9 +3,7 @@ export type OAuthTokens = { accessToken: string; refreshToken?: string; expiresA
 export type LinkTarget = { projectId?: string; taskId?: string; externalId: string; title: string; externalUrl: string };
 export type SyncTarget = Pick<LinkTarget, 'externalId' | 'title' | 'externalUrl'>;
 export type SyncResult = { summary: string };
-export type TrelloBoard = { id: string; name: string; url: string };
-export type TrelloMonitor = { board: TrelloBoard & { lastActivityAt?: string | null }; totalOpenCards: number; overdueCards: number; dueSoonCards: number; cardsByList: Array<{ listId: string; listName: string; count: number }>; memberWorkload: Array<{ memberId: string; fullName: string; openCards: number }>; cards: Array<{ id: string; name: string; url: string; due?: string | null; dueComplete: boolean; listName: string; members: Array<{ id: string; fullName: string }> }> };
-export interface Connector { readonly provider: ProviderId; authorizeUrl(state: string, redirectUri: string, codeChallenge?: string): string; exchangeCode(code: string, redirectUri: string, codeVerifier?: string): Promise<OAuthTokens>; refresh(tokens: OAuthTokens): Promise<OAuthTokens>; sync(tokens: OAuthTokens, targets?: SyncTarget[]): Promise<SyncResult>; launchUrl(target: LinkTarget): Promise<string>; listBoards?(tokens: OAuthTokens): Promise<TrelloBoard[]>; monitorBoard?(tokens: OAuthTokens, boardId: string): Promise<TrelloMonitor>; }
+export interface Connector { readonly provider: ProviderId; authorizeUrl(state: string, redirectUri: string, codeChallenge?: string): string; exchangeCode(code: string, redirectUri: string, codeVerifier?: string): Promise<OAuthTokens>; refresh(tokens: OAuthTokens): Promise<OAuthTokens>; sync(tokens: OAuthTokens, targets?: SyncTarget[]): Promise<SyncResult>; launchUrl(target: LinkTarget): Promise<string>; }
 
 type OAuthPayload = { access_token?: string; refresh_token?: string; expires_in?: number };
 const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error('OAUTH_NOT_CONFIGURED'); return value; };
@@ -132,29 +130,9 @@ class TrelloConnector implements Connector {
     return tokensFrom(await requestTokenJson(this.tokenEndpoint, { client_id: clientId, client_secret: clientSecret, grant_type: 'refresh_token', refresh_token: tokens.refreshToken }), tokens.refreshToken);
   }
   async sync(tokens: OAuthTokens): Promise<SyncResult> {
-    const boards = await this.listBoards(tokens);
-    return { summary: `Synced ${boards.length} open Trello board${boards.length === 1 ? '' : 's'}` };
-  }
-  async listBoards(tokens: OAuthTokens): Promise<TrelloBoard[]> {
     const boards = await requestJson('https://api.trello.com/1/members/me/boards?fields=id,name,url,closed&filter=open', tokens.accessToken);
-    return Array.isArray(boards) ? boards.filter((board) => typeof board?.id === 'string' && typeof board?.name === 'string' && typeof board?.url === 'string').map((board) => ({ id: board.id, name: board.name, url: board.url })) : [];
-  }
-  async monitorBoard(tokens: OAuthTokens, boardId: string): Promise<TrelloMonitor> {
-    const id = encodeURIComponent(boardId);
-    const [board, lists, cards] = await Promise.all([
-      requestJson(`https://api.trello.com/1/boards/${id}?fields=id,name,url,dateLastActivity`, tokens.accessToken),
-      requestJson(`https://api.trello.com/1/boards/${id}/lists?filter=open&fields=id,name`, tokens.accessToken),
-      requestJson(`https://api.trello.com/1/boards/${id}/cards?filter=open&fields=id,name,url,due,dueComplete,idList,closed,idMembers&members=true&member_fields=fullName`, tokens.accessToken),
-    ]);
-    if (!board?.id || !board?.name || !board?.url || !Array.isArray(lists) || !Array.isArray(cards)) throw new Error('INTEGRATION_SYNC_FAILED');
-    const listNames = new Map(lists.map((list: any) => [list.id, list.name]));
-    const now = Date.now();
-    const soon = now + 7 * 24 * 60 * 60_000;
-    const normalizedCards = cards.filter((card: any) => typeof card?.id === 'string' && typeof card?.name === 'string').map((card: any) => ({ id: card.id, name: card.name, url: typeof card.url === 'string' ? card.url : board.url, due: typeof card.due === 'string' ? card.due : null, dueComplete: Boolean(card.dueComplete), listId: String(card.idList ?? ''), listName: listNames.get(card.idList) ?? 'Unlisted', members: Array.isArray(card.members) ? card.members.filter((member: any) => typeof member?.id === 'string' && typeof member?.fullName === 'string').map((member: any) => ({ id: member.id, fullName: member.fullName })) : [] }));
-    const cardsByList = [...new Set(normalizedCards.map((card) => card.listId))].map((listId) => ({ listId, listName: listNames.get(listId) ?? 'Unlisted', count: normalizedCards.filter((card) => card.listId === listId).length }));
-    const workload = new Map<string, { memberId: string; fullName: string; openCards: number }>();
-    for (const card of normalizedCards) for (const member of card.members) workload.set(member.id, { memberId: member.id, fullName: member.fullName, openCards: (workload.get(member.id)?.openCards ?? 0) + 1 });
-    return { board: { id: board.id, name: board.name, url: board.url, lastActivityAt: board.dateLastActivity ?? null }, totalOpenCards: normalizedCards.length, overdueCards: normalizedCards.filter((card) => card.due && !card.dueComplete && new Date(card.due).getTime() < now).length, dueSoonCards: normalizedCards.filter((card) => card.due && !card.dueComplete && new Date(card.due).getTime() >= now && new Date(card.due).getTime() <= soon).length, cardsByList, memberWorkload: [...workload.values()].sort((a, b) => b.openCards - a.openCards), cards: normalizedCards.map(({ listId: _listId, ...card }) => card) };
+    const count = Array.isArray(boards) ? boards.length : 0;
+    return { summary: `Synced ${count} open Trello board${count === 1 ? '' : 's'}` };
   }
   async launchUrl(target: LinkTarget) { return target.externalUrl; }
 }

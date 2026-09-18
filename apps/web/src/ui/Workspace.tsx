@@ -8,10 +8,9 @@ import { GroupChatPage } from './GroupChatPage';
 import { GroupsPage } from './GroupsPage';
 import { IdeasPage } from './IdeasPage';
 import { ProjectsPage } from './ProjectsPage';
-import { TrelloMonitoringPage } from './TrelloMonitoringPage';
 import { AdminSettingsPage, CalendarPage, IntegrationsPage, NotificationsPage, ProfilePage, ProjectsAnalyticsPage, TasksPage, TrackerPage } from './LegacyPages';
 
-type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tools' | 'trello' | 'tracker' | 'notifications' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'settings';
+type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tools' | 'tracker' | 'notifications' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'settings';
 type WorkspaceProps = { session: Session; onSessionChange: (session: Session) => void; onLogout: () => void; notify: (message: string) => void };
 type Link = { id: Page; label: string; icon: string };
 type NotificationEntry = { id: string; read: boolean; relatedId?: string | null; relatedType?: string | null };
@@ -20,7 +19,7 @@ const userSections: Array<{ title: string; links: Link[] }> = [
   { title: 'Main', links: [{ id: 'dashboard', label: 'Dashboard', icon: '⌂' }] },
   { title: 'Groups & Projects', links: [{ id: 'groups', label: 'My Groups', icon: '♧' }, { id: 'chat', label: 'Group Chat', icon: '□' }, { id: 'ideas', label: 'Idea Management', icon: '◇' }, { id: 'projects', label: 'My Projects', icon: '▱' }, { id: 'tasks', label: 'My Tasks', icon: '✓' }] },
   { title: 'Analytics', links: [{ id: 'workflow', label: 'Workflow Analytics', icon: '▥' }, { id: 'predictive', label: 'Predictive Monitoring', icon: '◉' }] },
-  { title: 'Tools', links: [{ id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'tools', label: 'Apps/External Tools', icon: '▦' }, { id: 'trello', label: 'Trello Monitoring', icon: '▦' }, { id: 'tracker', label: 'Task Progress Tracker', icon: '▤' }] },
+  { title: 'Tools', links: [{ id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'tools', label: 'Apps/External Tools', icon: '▦' }, { id: 'tracker', label: 'Task Progress Tracker', icon: '▤' }] },
   { title: 'Account', links: [{ id: 'profile', label: 'Profile & Settings', icon: '♙' }] },
 ];
 const adminSections: Array<{ title: string; links: Link[] }> = [
@@ -106,7 +105,6 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'predictive' ? <ProjectsAnalyticsPage kind="predictive" notify={notify} /> : null}
       {page === 'calendar' ? <CalendarPage notify={notify} /> : null}
       {page === 'tools' ? <IntegrationsPage notify={notify} /> : null}
-      {page === 'trello' ? <TrelloMonitoringPage notify={notify} /> : null}
       {page === 'tracker' ? <TrackerPage notify={notify} /> : null}
       {page === 'notifications' ? <NotificationsPage notify={notify} onNotificationClick={openNotification} /> : null}
       {page === 'profile' ? <ProfilePage user={session.user} onUserUpdated={updateUser} onSessionInvalidated={() => { clearSession(); onLogout(); }} notify={notify} /> : null}
