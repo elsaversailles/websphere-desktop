@@ -1,7 +1,7 @@
 import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
 import { hash, verify } from 'argon2';
 import { SignJWT, jwtVerify } from 'jose';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { completionRate, projectAnalytics, recommendations } from './analytics.js';
 import { CryptoService, validatePassword } from './security.js';
 import { connectors, type OAuthTokens } from './connectors.js';
@@ -12,6 +12,7 @@ import { EmailService } from './email.service.js';
 import { JobsService } from './jobs.service.js';
 import { DomainEventsService } from './domain-events.service.js';
 import { AuditLogService } from './audit-log.service.js';
+import { PushService } from './push.service.js';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
@@ -38,8 +39,9 @@ export class AppService {
   private readonly jobs: JobsService;
   private readonly events: DomainEventsService;
   private readonly audit: AuditLogService;
+  private readonly push: PushService;
 
-  constructor(prisma: PrismaService, config: ConfigService, crypto: CryptoService, redis: RedisService, email: EmailService, jobs: JobsService, events: DomainEventsService, audit: AuditLogService) {
+  constructor(prisma: PrismaService, config: ConfigService, crypto: CryptoService, redis: RedisService, email: EmailService, jobs: JobsService, events: DomainEventsService, audit: AuditLogService, push: PushService) {
     this.prisma = prisma;
     this.accessSecret = new TextEncoder().encode(config.get('JWT_ACCESS_SECRET'));
     this.refreshSecret = new TextEncoder().encode(config.get('JWT_REFRESH_SECRET'));
@@ -50,6 +52,7 @@ export class AppService {
     this.jobs = jobs;
     this.events = events;
     this.audit = audit;
+    this.push = push;
   }
   private refreshKey(jti: string) { return `auth:refresh:${jti}`; }
   private usedRefreshKey(jti: string) { return `auth:refresh:used:${jti}`; }
@@ -57,6 +60,10 @@ export class AppService {
   private failedLoginKey(userId: string) { return `auth:login-failures:${userId}`; }
   private resetKey(token: string) { return `auth:password-reset:${token}`; }
   private userResetKey(userId: string) { return `auth:password-reset:user:${userId}`; }
+  private registrationOtpKey(verificationId: string) { return `auth:registration-otp:${verificationId}`; }
+  private registrationOtpAttemptKey(verificationId: string) { return `auth:registration-otp-attempts:${verificationId}`; }
+  private registrationOtpRateKey(email: string) { return `auth:registration-otp-rate:${createHash('sha256').update(email).digest('hex')}`; }
+  private otpHash(verificationId: string, code: string) { return createHash('sha256').update(`${verificationId}:${code}`).digest('hex'); }
   private refreshTtlSeconds() {
     const match = this.config.get('JWT_REFRESH_TTL').match(/^(\d+)(s|m|h|d)$/);
     if (!match) throw new Error('JWT_REFRESH_TTL must use a whole-number s, m, h, or d duration');
@@ -68,7 +75,49 @@ export class AppService {
   }
   async issue(user: { id: string; role: Role; tokenVersion: number }) { const jti = randomBytes(16).toString('hex'); const [access, refresh] = await Promise.all([this.sign(user), this.sign(user, true, jti)]); const ttl = this.refreshTtlSeconds(); await Promise.all([this.redis.set(this.refreshKey(jti), JSON.stringify({ userId: user.id }), ttl), this.redis.addToSet(this.userRefreshKey(user.id), jti, ttl)]); return { access, refresh, role: user.role }; }
   async caller(header?: string, options: { allowLocked?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
-  async register(input: any) { const policy = validatePassword(input.password); if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`, 400, { password: policy.reason }); const exists = await this.prisma.user.findUnique({ where: { email: input.email } }); if (exists) fail('EMAIL_IN_USE', 'Email is already in use', 409, { email: 'already in use' }); const user = await this.prisma.user.create({ data: { ...input, passwordHash: await hash(input.password), password: undefined } as any }); await this.audit.log('AuthModule', 'account_registered', 'info', `New account registered for ${user.email}`, user.id); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
+  async sendRegistrationOtp(rawEmail: string) {
+    const email = rawEmail.trim().toLowerCase();
+    const exists = await this.prisma.user.findUnique({ where: { email } });
+    if (exists) fail('EMAIL_IN_USE', 'An account already uses that email address.', 409, { email: 'already in use' });
+    const sends = await this.redis.incrementWithExpiry(this.registrationOtpRateKey(email), this.config.get('REGISTRATION_OTP_SEND_WINDOW_SECONDS'));
+    if (sends > this.config.get('REGISTRATION_OTP_MAX_SENDS')) fail('OTP_RATE_LIMITED', 'Too many codes were requested. Please wait before trying again.', 429);
+    const verificationId = randomBytes(32).toString('hex');
+    const code = randomInt(100_000, 1_000_000).toString();
+    await this.email.sendRegistrationVerification(email, code);
+    await this.redis.set(this.registrationOtpKey(verificationId), JSON.stringify({ email, codeHash: this.otpHash(verificationId, code) }), this.config.get('REGISTRATION_OTP_TTL_SECONDS'));
+    return { ok: true, verificationId };
+  }
+
+  async register(input: any) {
+    const { verificationId, verificationCode, ...registration } = input;
+    const policy = validatePassword(registration.password);
+    if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`, 400, { password: policy.reason });
+    const stored = await this.redis.get(this.registrationOtpKey(verificationId));
+    if (!stored) fail('OTP_EXPIRED', 'This verification code has expired. Request a new code and try again.', 400, { verificationCode: 'expired' });
+    const verification = (() => {
+      try { return JSON.parse(stored!) as { email: string; codeHash: string }; }
+      catch { return fail('OTP_INVALID', 'This verification code is invalid. Request a new code and try again.', 400, { verificationCode: 'invalid' }); }
+    })();
+    const suppliedHash = this.otpHash(verificationId, verificationCode);
+    const codeMatches = verification.codeHash.length === suppliedHash.length && timingSafeEqual(Buffer.from(verification.codeHash), Buffer.from(suppliedHash));
+    const emailMatches = verification.email === registration.email.trim().toLowerCase();
+    if (!codeMatches || !emailMatches) {
+      const attempts = await this.redis.incrementWithExpiry(this.registrationOtpAttemptKey(verificationId), this.config.get('REGISTRATION_OTP_TTL_SECONDS'));
+      if (attempts >= this.config.get('REGISTRATION_OTP_MAX_ATTEMPTS')) {
+        await this.redis.delete(this.registrationOtpKey(verificationId), this.registrationOtpAttemptKey(verificationId));
+        fail('OTP_EXPIRED', 'Too many incorrect attempts. Request a new verification code.', 400, { verificationCode: 'too many attempts' });
+      }
+      fail('OTP_INVALID', 'Enter the six-digit code from your email.', 400, { verificationCode: 'invalid' });
+    }
+    const claimed = await this.redis.take(this.registrationOtpKey(verificationId));
+    if (!claimed) fail('OTP_EXPIRED', 'This verification code has expired. Request a new code and try again.', 400, { verificationCode: 'expired' });
+    const exists = await this.prisma.user.findUnique({ where: { email: registration.email } });
+    if (exists) fail('EMAIL_IN_USE', 'An account already uses that email address.', 409, { email: 'already in use' });
+    const user = await this.prisma.user.create({ data: { ...registration, email: registration.email.trim().toLowerCase(), passwordHash: await hash(registration.password), password: undefined } as any });
+    await this.redis.delete(this.registrationOtpAttemptKey(verificationId));
+    await this.audit.log('AuthModule', 'account_registered', 'info', `New account registered for ${user.email}`, user.id);
+    return { user: this.publicUser(user), ...(await this.issue(user)) };
+  }
   async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0 } })]); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in`, user.id); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
   async refreshToken(token: string) { try { const verified = await jwtVerify(token, this.refreshSecret); const subject = verified.payload.sub; if (!subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const jti = String(verified.payload.jti); const stored = await this.redis.take(this.refreshKey(jti)); if (!stored) { if (await this.redis.get(this.usedRefreshKey(jti))) await this.prisma.user.update({ where: { id: subject }, data: { tokenVersion: { increment: 1 } } }); fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } const record = JSON.parse(stored!) as { userId: string }; if (record.userId !== subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const user = await this.prisma.user.findUnique({ where: { id: record.userId } }); if (!user || user.status !== 'active' || user.tokenVersion !== Number(verified.payload.tv)) { await this.redis.removeFromSet(this.userRefreshKey(record.userId), jti); fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } const ttl = this.refreshTtlSeconds(); await Promise.all([this.redis.set(this.usedRefreshKey(jti), '1', ttl), this.redis.removeFromSet(this.userRefreshKey(record.userId), jti)]); return this.issue(user); } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } }
   private async removeRefreshSessions(userId: string) { const key = this.userRefreshKey(userId); const jtis = await this.redis.setMembers(key); await this.redis.delete(...jtis.map((jti) => this.refreshKey(jti)), key); }
@@ -285,9 +334,18 @@ export class AppService {
   private async calendarEventAccess(caller: Caller, id: string) { const event = await this.prisma.calendarEvent.findUniqueOrThrow({ where: { id } }); if (event.projectId) await this.projectMember(event.projectId, caller.id); else if (event.ownerId !== caller.id) fail('RBAC_FORBIDDEN', 'Only the event owner or project members can modify this event', 403); return event; }
   async updateCalendarEvent(caller: Caller, id: string, input: any) { await this.calendarEventAccess(caller, id); return this.prisma.calendarEvent.update({ where: { id }, data: input }); }
   async deleteCalendarEvent(caller: Caller, id: string) { await this.calendarEventAccess(caller, id); return this.prisma.calendarEvent.delete({ where: { id } }); }
+  pushConfig() { return this.push.publicConfig(); }
+  async subscribePush(caller: Caller, subscription: { endpoint: string; keys: { p256dh: string; auth: string } }) {
+    await this.prisma.pushSubscription.deleteMany({ where: { endpoint: subscription.endpoint } });
+    return this.prisma.pushSubscription.create({ data: { userId: caller.id, endpoint: subscription.endpoint, p256dh: subscription.keys.p256dh, auth: subscription.keys.auth } });
+  }
+  async unsubscribePush(caller: Caller, endpoint: string) { return this.prisma.pushSubscription.deleteMany({ where: { userId: caller.id, endpoint } }); }
   async notify(userIds: string[], type: NotificationType, message: string, relatedId?: string, relatedType?: string) {
     const created = await Promise.all(userIds.map((userId) => this.prisma.notification.create({ data: { userId, type, message, relatedId, relatedType } })));
-    for (const notification of created) this.events.emitNotification(notification.userId, notification);
+    for (const notification of created) {
+      this.events.emitNotification(notification.userId, notification);
+      void this.push.deliver(notification).catch(() => undefined);
+    }
     return { ok: true, delivered: created.length };
   }
   async notifications(caller: Caller) { return this.prisma.notification.findMany({ where: { userId: caller.id }, orderBy: { createdAt: 'desc' } }); }
