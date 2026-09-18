@@ -9,7 +9,6 @@ export function ChartCanvas({ config, height = 220 }: { config: ChartConfigurati
     if (!canvasRef.current) return;
     chartRef.current = new Chart(canvasRef.current, config);
     return () => chartRef.current?.destroy();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(config)]);
 
   return <canvas ref={canvasRef} style={{ maxHeight: height }} />;

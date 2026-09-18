@@ -56,7 +56,7 @@ describe('RealtimeGateway room authorization', () => {
 
     const result = await gateway.callJoin(client, { groupId: 'group-1', kind: 'video' });
 
-    expect(result).toEqual({ ok: true, participants: [] });
+    expect(result).toEqual({ ok: true, participants: [], hostSocketId: 'socket-1', raisedHandSocketIds: [] });
     expect(client.join).toHaveBeenCalledWith('call:group-1');
     expect(gateway.server.to).toHaveBeenCalledWith('group:group-1');
     expect(groupEmit).toHaveBeenCalledWith('call:invite', expect.objectContaining({ groupId: 'group-1', kind: 'video' }));
