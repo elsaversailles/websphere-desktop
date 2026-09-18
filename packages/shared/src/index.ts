@@ -17,6 +17,16 @@ export const registerSchema = z.object({
   institution: z.string().trim().min(2).max(160),
   course: z.string().trim().min(2).max(160),
 });
+export const registrationOtpRequestSchema = z.object({ email: z.string().trim().email() });
+export const verifiedRegisterSchema = registerSchema.extend({
+  verificationId: z.string().regex(/^[a-f0-9]{64}$/i),
+  verificationCode: z.string().regex(/^\d{6}$/),
+});
+export const pushSubscriptionSchema = z.object({
+  endpoint: z.string().url().max(4000),
+  keys: z.object({ p256dh: z.string().min(1).max(512), auth: z.string().min(1).max(512) }),
+});
+export const pushUnsubscribeSchema = z.object({ endpoint: z.string().url().max(4000) });
 export const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
 export const passwordChangeSchema = z.object({
   oldPassword: z.string().min(1),
@@ -60,6 +70,7 @@ export const supportTicketSchema = z.object({ category: z.enum(['account_reactiv
 export const aiAskSchema = z.object({ prompt: z.string().trim().min(1).max(12000), scopeType: z.enum(['project','group','idea']).optional(), scopeId: z.string().cuid().optional(), parts: z.array(z.object({ type: z.string() })).optional() });
 
 export type RegisterDto = z.infer<typeof registerSchema>;
+export type VerifiedRegisterDto = z.infer<typeof verifiedRegisterSchema>;
 export type PasswordChangeDto = z.infer<typeof passwordChangeSchema>;
 export type PasswordResetDto = z.infer<typeof passwordResetSchema>;
 export type ProfileUpdateDto = z.infer<typeof profileUpdateSchema>;

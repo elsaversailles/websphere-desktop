@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, Redirect, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { z } from 'zod';
-import { aiAskSchema, calendarEventSchema, ideaSchema, loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, profileUpdateSchema, projectSchema, registerSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, taskStatusSchema } from '@websphere/shared';
+import { aiAskSchema, calendarEventSchema, ideaSchema, loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
 import { AppService } from './app.service.js';
 import { LocalStorageService } from './local-storage.service.js';
 import { RedisService } from './redis.service.js';
@@ -16,7 +16,8 @@ export class AppController {
   constructor(private readonly app: AppService, private readonly storage: LocalStorageService, private readonly redis: RedisService, private readonly realtime: RealtimeGateway, private readonly turn: TurnService) {}
   private caller(auth?: string) { return this.app.caller(auth); }
   @Public() @Get('health') async health() { await this.app.prisma.$queryRaw`SELECT 1`; await this.redis.ping(); return { ok: true, database: 'up', redis: 'up', timestamp: new Date().toISOString() }; }
-  @Public() @Post(['users', 'auth/register']) register(@Body() body: unknown) { return this.app.register(parse(registerSchema, body)); }
+  @Public() @Post('auth/registration/otp') registrationOtp(@Body() body: unknown) { return this.app.sendRegistrationOtp(parse(registrationOtpRequestSchema, body).email); }
+  @Public() @Post(['users', 'auth/register']) register(@Body() body: unknown) { return this.app.register(parse(verifiedRegisterSchema, body)); }
   @Public() @Post('auth/login') login(@Body() body: unknown) { const input = parse(loginSchema, body); return this.app.login(input.email, input.password); }
   @Public() @Post('auth/admin/login') adminLogin(@Body() body: unknown) { const input = parse(loginSchema, body); return this.app.login(input.email, input.password, true); }
   @Public() @Post('auth/refresh') refresh(@Body('refresh') refresh: string) { return this.app.refreshToken(refresh); }
@@ -82,7 +83,9 @@ export class AppController {
   @Patch('notifications/:id/read') async read(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.markRead(await this.caller(auth), id); }
   @Get('notifications/preferences') async preference(@Headers('authorization') auth: string) { return this.app.preferences(await this.caller(auth)); }
   @Put('notifications/preferences') async setPreference(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.preferences(await this.caller(auth), body); }
-  @Post('push/subscribe') async subscribe(@Headers('authorization') auth: string, @Body() body: { endpoint: string; keys: { p256dh: string; auth: string } }) { const caller = await this.caller(auth); return this.app.prisma.pushSubscription.create({ data: { userId: caller.id, endpoint: body.endpoint, p256dh: body.keys.p256dh, auth: body.keys.auth } }); }
+  @Public() @Get('push/config') pushConfig() { return this.app.pushConfig(); }
+  @Post('push/subscribe') async subscribe(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.subscribePush(await this.caller(auth), parse(pushSubscriptionSchema, body)); }
+  @Delete('push/subscribe') async unsubscribe(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.unsubscribePush(await this.caller(auth), parse(pushUnsubscribeSchema, body).endpoint); }
 
   @Post('ai/ask') async ask(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(aiAskSchema, body); return this.app.ai(await this.caller(auth), input.prompt, input); }
   @Post('ai/planning') async planning(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(aiAskSchema, body); return this.app.ai(await this.caller(auth), input.prompt, input); }
