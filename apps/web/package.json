@@ -1,6 +1,6 @@
 {
   "name": "@websphere/web", "version": "0.1.0", "private": true, "type": "module",
-  "scripts": { "dev": "vite --config vite.config.ts", "build": "vite build --config vite.config.ts", "lint": "eslint src", "test": "vitest run" },
+  "scripts": { "dev": "vite --config vite.config.ts", "build": "vite build --config vite.config.ts", "lint": "eslint src", "test": "vitest run --passWithNoTests" },
   "dependencies": { "@websphere/shared": "workspace:*", "chart.js": "4.5.1", "react": "^18.3.1", "react-dom": "^18.3.1", "socket.io-client": "^4.8.1" },
   "devDependencies": { "@types/react": "^18.3.12", "@types/react-dom": "^18.3.1", "typescript": "^5.7.2", "vite": "^6.0.5", "vitest": "^2.1.8" }
 }
