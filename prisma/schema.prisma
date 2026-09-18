@@ -185,7 +185,6 @@ model Project {
   workflow WorkflowEvent[]
   snapshots AnalyticsSnapshot[]
   linkedResources LinkedResource[]
-  toolMonitors ProjectToolMonitor[]
   embeddings Embedding[]
 }
 model ProjectMember {
@@ -367,7 +366,6 @@ model ToolConnection {
   user User @relation(fields: [userId], references: [id])
   tool ConnectedTool @relation(fields: [provider], references: [provider])
   linkedResources LinkedResource[]
-  projectMonitors ProjectToolMonitor[]
   usage ToolUsage[]
   @@unique([userId, provider])
 }
@@ -383,23 +381,6 @@ model LinkedResource {
   connection ToolConnection @relation(fields: [connectionId], references: [id])
   project Project? @relation(fields: [projectId], references: [id])
   task Task? @relation(fields: [taskId], references: [id])
-}
-model ProjectToolMonitor {
-  id String @id @default(cuid())
-  projectId String
-  connectionId String
-  provider ProviderId
-  externalId String
-  title String
-  externalUrl String @db.Text
-  createdBy String
-  createdAt DateTime @default(now())
-  lastSyncedAt DateTime?
-  syncState String?
-  project Project @relation(fields: [projectId], references: [id])
-  connection ToolConnection @relation(fields: [connectionId], references: [id])
-  @@unique([projectId, provider, externalId])
-  @@index([connectionId])
 }
 model ToolUsage {
   id String @id @default(cuid())

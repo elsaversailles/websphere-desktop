@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, Redirect, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { z } from 'zod';
-import { aiAskSchema, calendarEventSchema, ideaSchema, loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, profileUpdateSchema, projectTrelloMonitorSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
+import { aiAskSchema, calendarEventSchema, ideaSchema, loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
 import { AppService } from './app.service.js';
 import { LocalStorageService } from './local-storage.service.js';
 import { RedisService } from './redis.service.js';
@@ -55,9 +55,6 @@ export class AppController {
   @Post('projects') async createProject(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.createProject(await this.caller(auth), parse(projectSchema, body)); }
   @Get('projects') async projects(@Headers('authorization') auth: string) { return this.app.projects(await this.caller(auth)); }
   @ProjectScope() @Get('projects/:id') async project(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.project(await this.caller(auth), id); }
-  @ProjectScope() @Get('projects/:id/trello/monitors') async trelloMonitors(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.projectTrelloMonitors(await this.caller(auth), id); }
-  @ProjectScope() @Post('projects/:id/trello/monitors') async addTrelloMonitor(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.addProjectTrelloMonitor(await this.caller(auth), id, parse(projectTrelloMonitorSchema, body)); }
-  @ProjectScope() @Delete('projects/:id/trello/monitors/:monitorId') async removeTrelloMonitor(@Headers('authorization') auth: string, @Param() params: { id: string; monitorId: string }) { return this.app.removeProjectTrelloMonitor(await this.caller(auth), params.id, params.monitorId); }
   @ProjectScope() @Patch('projects/:id') async updateProject(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.updateProject(await this.caller(auth), id, body); }
   @ProjectScope() @Patch('projects/:id/status') async statusProject(@Headers('authorization') auth: string, @Param('id') id: string, @Body('status') status: string) { return this.app.updateProject(await this.caller(auth), id, { status }); }
   @ProjectScope() @Get('projects/:id/team') async team(@Headers('authorization') auth: string, @Param('id') id: string) { const project = await this.app.project(await this.caller(auth), id); return project.members; }
@@ -105,8 +102,6 @@ export class AppController {
   @Get('integrations/:provider/authorize') async authorize(@Headers('authorization') auth: string, @Param('provider') provider: any, @Query('redirectUri') redirectUri: string) { return this.app.oauthAuthorize(await this.caller(auth), provider, redirectUri); }
   @Public() @Redirect() @Get('integrations/:provider/callback') async callback(@Param('provider') provider: any, @Query('code') code: string, @Query('state') state: string, @Query('redirectUri') redirectUri?: string) { await this.app.oauthCallback(provider, code, state, redirectUri); const destination = new URL('/integrations', process.env.WEB_ORIGIN ?? 'http://localhost:5173'); destination.searchParams.set('connected', String(provider)); return { url: destination.toString(), statusCode: 302 }; }
   @Get('integrations/connections') async connections(@Headers('authorization') auth: string) { return this.app.integrationConnections(await this.caller(auth)); }
-  @Get('integrations/connections/:id/trello/boards') async trelloBoards(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.trelloBoards(await this.caller(auth), id); }
-  @Get('integrations/connections/:id/trello/boards/:boardId/monitor') async trelloBoardMonitor(@Headers('authorization') auth: string, @Param() params: { id: string; boardId: string }) { return this.app.trelloBoardMonitor(await this.caller(auth), params.id, params.boardId); }
   @Get('integrations/connections/:id/google-picker-token') async googlePickerToken(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.googlePickerToken(await this.caller(auth), id); }
   @Post('integrations/connections/:id/sync') async sync(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.syncIntegration(await this.caller(auth), id); }
   @Post('resources/:id/launch') async launchResource(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.launchResource(await this.caller(auth), id); }
