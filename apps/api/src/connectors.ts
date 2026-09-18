@@ -136,6 +136,37 @@ class TrelloConnector implements Connector {
   }
   async launchUrl(target: LinkTarget) { return target.externalUrl; }
 }
+class AsanaConnector implements Connector {
+  readonly provider = 'asana' as const;
+  private readonly authorizationEndpoint = 'https://app.asana.com/-/oauth_authorize';
+  private readonly tokenEndpoint = 'https://app.asana.com/-/oauth_token';
+  private credentials() { return { clientId: required('ASANA_CLIENT_ID'), clientSecret: required('ASANA_CLIENT_SECRET') }; }
+  authorizeUrl(state: string, redirectUri: string, codeChallenge?: string) {
+    if (!codeChallenge) throw new Error('OAUTH_EXCHANGE_FAILED');
+    const { clientId } = this.credentials();
+    return `${this.authorizationEndpoint}?${new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', state, scope: 'projects:read tasks:read', code_challenge: codeChallenge, code_challenge_method: 'S256' }).toString()}`;
+  }
+  async exchangeCode(code: string, redirectUri: string, codeVerifier?: string) {
+    if (!code || !redirectUri || !codeVerifier) throw new Error('OAUTH_EXCHANGE_FAILED');
+    const { clientId, clientSecret } = this.credentials();
+    return tokensFrom(await requestForm(this.tokenEndpoint, new URLSearchParams({ grant_type: 'authorization_code', client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, code, code_verifier: codeVerifier })));
+  }
+  async refresh(tokens: OAuthTokens) {
+    if (!tokens.refreshToken) throw new Error('OAUTH_RECONNECT_REQUIRED');
+    const { clientId, clientSecret } = this.credentials();
+    return tokensFrom(await requestForm(this.tokenEndpoint, new URLSearchParams({ grant_type: 'refresh_token', client_id: clientId, client_secret: clientSecret, refresh_token: tokens.refreshToken })), tokens.refreshToken);
+  }
+  async sync(tokens: OAuthTokens, targets: SyncTarget[] = []): Promise<SyncResult> {
+    if (!targets.length) return { summary: 'No Asana tasks linked yet' };
+    const results = await Promise.all(targets.map(async (target) => {
+      try { await requestJson(`https://app.asana.com/api/1.0/tasks/${encodeURIComponent(target.externalId)}?opt_fields=gid,name,modified_at,permalink_url`, tokens.accessToken); return true; }
+      catch { return false; }
+    }));
+    const available = results.filter(Boolean).length;
+    return { summary: `Synced ${available} of ${targets.length} linked Asana task${targets.length === 1 ? '' : 's'}` };
+  }
+  async launchUrl(target: LinkTarget) { return target.externalUrl; }
+}
 class UnavailableConnector implements Connector {
   constructor(readonly provider: ProviderId) {}
   authorizeUrl(_state: string, _redirectUri: string): string { throw new Error('INTEGRATION_NOT_IMPLEMENTED'); }
@@ -146,5 +177,5 @@ class UnavailableConnector implements Connector {
 }
 export const connectors: Record<ProviderId, Connector> = {
   google: new GoogleConnector(), microsoft: new MicrosoftConnector(), figma: new FigmaConnector(),
-  trello: new TrelloConnector(), asana: new UnavailableConnector('asana'), canva: new UnavailableConnector('canva'),
+  trello: new TrelloConnector(), asana: new AsanaConnector(), canva: new UnavailableConnector('canva'),
 };

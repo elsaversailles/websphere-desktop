@@ -368,7 +368,7 @@ export class AppService {
     if (!connectors[provider]) fail('VALIDATION_FAILED', 'This integration provider is not supported');
     try { new URL(redirectUri); } catch { fail('VALIDATION_FAILED', 'A valid OAuth callback URL is required', 400); }
     const state = randomBytes(20).toString('hex');
-    const codeVerifier = provider === 'trello' ? randomBytes(48).toString('base64url') : undefined;
+    const codeVerifier = provider === 'trello' || provider === 'asana' ? randomBytes(48).toString('base64url') : undefined;
     const codeChallenge = codeVerifier ? createHash('sha256').update(codeVerifier).digest('base64url') : undefined;
     await this.redis.set(this.oauthStateKey(state), JSON.stringify({ userId: caller.id, provider, redirectUri, codeVerifier }), 600);
     let authorizeUrl: string;
