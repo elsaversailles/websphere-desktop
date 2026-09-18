@@ -4,7 +4,7 @@ import { SignJWT, jwtVerify } from 'jose';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { completionRate, projectAnalytics, recommendations } from './analytics.js';
 import { CryptoService, validatePassword } from './security.js';
-import { connectors, type OAuthTokens } from './connectors.js';
+import { connectors, type OAuthTokens, type TrelloBoard } from './connectors.js';
 import { PrismaService } from './prisma.service.js';
 import { ConfigService } from './config.service.js';
 import { RedisService } from './redis.service.js';
@@ -311,6 +311,64 @@ export class AppService {
     await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Synced ${connection.tool.name}` } });
     return { ...updated, platform: connection.tool.name, summary: result.summary };
   }
+  async trelloBoards(caller: Caller, connectionId: string): Promise<TrelloBoard[]> {
+    const connection = await this.prisma.toolConnection.findFirst({ where: { id: connectionId, userId: caller.id, provider: 'trello', status: 'connected' }, include: { tool: true } });
+    if (!connection) fail('INTEGRATION_UNAVAILABLE', 'Connect Trello before choosing a board to monitor.', 400);
+    const trello = connectors.trello;
+    if (!trello.listBoards) return fail('INTEGRATION_NOT_IMPLEMENTED', 'Trello board monitoring is not available yet.', 501);
+    const listBoards = trello.listBoards as NonNullable<typeof trello.listBoards>;
+    try { return await listBoards.call(trello, await this.connectionTokens(connection)); }
+    catch { return fail('INTEGRATION_SYNC_FAILED', 'Could not load Trello boards. Reconnect Trello and try again.', 502); }
+  }
+  async addProjectTrelloMonitor(caller: Caller, projectId: string, input: { connectionId: string; boardId: string }) {
+    await this.projectMember(projectId, caller.id, true);
+    const connection = await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, provider: 'trello', status: 'connected' }, include: { tool: true } });
+    if (!connection) fail('INTEGRATION_UNAVAILABLE', 'Connect your Trello account before sharing a board with this project.', 400);
+    const boards = await this.trelloBoards(caller, connection.id);
+    const board = boards.find((item) => item.id === input.boardId);
+    if (!board) return fail('RBAC_FORBIDDEN', 'That Trello board is not available to your connected account.', 403);
+    const monitor = await this.prisma.projectToolMonitor.upsert({
+      where: { projectId_provider_externalId: { projectId, provider: 'trello', externalId: board.id } },
+      update: { connectionId: connection.id, title: board.name, externalUrl: board.url, createdBy: caller.id, syncState: null },
+      create: { projectId, connectionId: connection.id, provider: 'trello', externalId: board.id, title: board.name, externalUrl: board.url, createdBy: caller.id },
+    });
+    await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Shared Trello board “${board.name}” with the project` } });
+    return { id: monitor.id, board };
+  }
+  async trelloBoardMonitor(caller: Caller, connectionId: string, boardId: string) {
+    const connection = await this.prisma.toolConnection.findFirst({ where: { id: connectionId, userId: caller.id, provider: 'trello', status: 'connected' }, include: { tool: true } });
+    if (!connection) fail('INTEGRATION_UNAVAILABLE', 'Connect Trello before monitoring a board.', 400);
+    const board = (await this.trelloBoards(caller, connection.id)).find((item) => item.id === boardId);
+    if (!board) return fail('RBAC_FORBIDDEN', 'That Trello board is not available to your connected account.', 403);
+    const trello = connectors.trello;
+    if (!trello.monitorBoard) return fail('INTEGRATION_NOT_IMPLEMENTED', 'Trello board monitoring is not available yet.', 501);
+    const monitorBoard = trello.monitorBoard as NonNullable<typeof trello.monitorBoard>;
+    try { return await monitorBoard.call(trello, await this.connectionTokens(connection), board.id); }
+    catch { return fail('INTEGRATION_SYNC_FAILED', 'Could not refresh this Trello board. Try again shortly.', 502); }
+  }
+  async projectTrelloMonitors(caller: Caller, projectId: string) {
+    await this.projectMember(projectId, caller.id);
+    const monitors = await this.prisma.projectToolMonitor.findMany({ where: { projectId, provider: 'trello' }, include: { connection: { include: { tool: true } } }, orderBy: { createdAt: 'desc' } });
+    const trello = connectors.trello;
+    if (!trello.monitorBoard) return fail('INTEGRATION_NOT_IMPLEMENTED', 'Trello board monitoring is not available yet.', 501);
+    const monitorBoard = trello.monitorBoard as NonNullable<typeof trello.monitorBoard>;
+    return Promise.all(monitors.map(async (monitor: any) => {
+      try {
+        const data = await monitorBoard.call(trello, await this.connectionTokens(monitor.connection), monitor.externalId);
+        await this.prisma.projectToolMonitor.update({ where: { id: monitor.id }, data: { lastSyncedAt: new Date(), syncState: null, title: data.board.name, externalUrl: data.board.url } });
+        return { id: monitor.id, status: 'connected', data, lastSyncedAt: new Date() };
+      } catch {
+        await this.prisma.projectToolMonitor.update({ where: { id: monitor.id }, data: { syncState: 'Reconnect the Trello account that shared this board.' } });
+        return { id: monitor.id, status: 'error', message: 'This shared Trello board could not be refreshed.' };
+      }
+    }));
+  }
+  async removeProjectTrelloMonitor(caller: Caller, projectId: string, monitorId: string) {
+    await this.projectMember(projectId, caller.id, true);
+    const deleted = await this.prisma.projectToolMonitor.deleteMany({ where: { id: monitorId, projectId, provider: 'trello' } });
+    if (!deleted.count) fail('NOT_FOUND', 'Trello board monitor not found', 404);
+    return { ok: true };
+  }
   async idea(caller: Caller, groupId: string, input: any) { await this.member(groupId, caller.id); return this.prisma.idea.create({ data: { ...input, groupId, authorId: caller.id } }); }
   async ideas(caller: Caller, groupId: string) { await this.member(groupId, caller.id); return this.prisma.idea.findMany({ where: { groupId }, orderBy: { createdAt: 'desc' } }); }
   async reviseIdea(caller: Caller, id: string, input: any) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can revise an unselected idea', 403); return this.prisma.idea.update({ where: { id }, data: { ...input, status: 'refined' } }); }
@@ -368,9 +426,11 @@ export class AppService {
     if (!connectors[provider]) fail('VALIDATION_FAILED', 'This integration provider is not supported');
     try { new URL(redirectUri); } catch { fail('VALIDATION_FAILED', 'A valid OAuth callback URL is required', 400); }
     const state = randomBytes(20).toString('hex');
-    await this.redis.set(this.oauthStateKey(state), JSON.stringify({ userId: caller.id, provider, redirectUri }), 600);
+    const codeVerifier = provider === 'trello' ? randomBytes(48).toString('base64url') : undefined;
+    const codeChallenge = codeVerifier ? createHash('sha256').update(codeVerifier).digest('base64url') : undefined;
+    await this.redis.set(this.oauthStateKey(state), JSON.stringify({ userId: caller.id, provider, redirectUri, codeVerifier }), 600);
     let authorizeUrl: string;
-    try { authorizeUrl = connectors[provider].authorizeUrl(state, redirectUri); }
+    try { authorizeUrl = connectors[provider].authorizeUrl(state, redirectUri, codeChallenge); }
     catch (error) {
       if (error instanceof Error && error.message === 'OAUTH_NOT_CONFIGURED') fail('OAUTH_NOT_CONFIGURED', 'This integration is not configured yet. Ask an administrator to add its OAuth credentials.', 503);
       if (error instanceof Error && error.message === 'INTEGRATION_NOT_IMPLEMENTED') fail('INTEGRATION_NOT_IMPLEMENTED', 'This integration is not available yet.', 501);
@@ -399,10 +459,10 @@ export class AppService {
     if (!code || !state) fail('OAUTH_EXCHANGE_FAILED', 'Authorization code and state are required');
     const stored = await this.redis.take(this.oauthStateKey(state));
     if (!stored) fail('OAUTH_EXCHANGE_FAILED', 'OAuth state is invalid or expired');
-    const record = JSON.parse(stored!) as { userId: string; provider: ProviderId; redirectUri: string };
+    const record = JSON.parse(stored!) as { userId: string; provider: ProviderId; redirectUri: string; codeVerifier?: string };
     if (record.provider !== provider || (redirectUri && redirectUri !== record.redirectUri)) fail('OAUTH_EXCHANGE_FAILED', 'OAuth state does not match this request');
     let tokens;
-    try { tokens = await connectors[provider].exchangeCode(code, record.redirectUri); }
+    try { tokens = await connectors[provider].exchangeCode(code, record.redirectUri, record.codeVerifier); }
     catch { fail('OAUTH_EXCHANGE_FAILED', 'The provider rejected the authorization code'); }
     const encrypted = this.encryptedTokens(tokens!);
     return this.prisma.toolConnection.upsert({
