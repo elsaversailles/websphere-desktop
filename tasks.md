@@ -380,9 +380,10 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - Implement `GET /notifications` (message, timestamp, type, read), `PATCH /notifications/:id/read`, and `InAppChannel` that persists `Notification` (source of truth) and emits `notification:new`; resolve `relatedId`/`relatedType` deep links
     - Tests to write (integration): center lists notifications; in-app emit on domain events; deep-link resolves to record
     - _Requirements: US-062.1, 62.2, US-063.1, 63.2; Design: NotificationsModule (pipeline)_
-  - [ ] 19.2 Email + web push channels, fan-out, and deadline/predictive alerts
-    - Implement `EmailChannel` (AWS SES via SMTP), `WebPushChannel` (VAPID + service worker + `POST /push/subscribe`), and a BullMQ fan-out queue with retry/backoff; deliver deadline reminders and delay-risk alerts via email + push even when the app is closed; prune `410 Gone` subscriptions
-    - Tests to write (integration, mocked SES/push): deadline + delay-risk fan-out to email/push; retry/backoff; dead subscription pruned
+  - [-] 19.2 Email + web push channels, fan-out, and deadline/predictive alerts
+    - Implemented SMTP email delivery for registration verification OTPs and password-reset links; registration now requires a valid OTP before an account is created, and email failures are returned in the active modal.
+    - Implemented browser push configuration, service-worker subscriptions, VAPID delivery, and stale (`410 Gone`) subscription cleanup. Unit tests cover VAPID delivery and pruning.
+    - Remaining: configure and verify production SES SMTP credentials/sender identity; perform a real browser push delivery test; add BullMQ fan-out/retry coverage for deadline and predictive alerts.
     - _Requirements: US-064.1, 64.2, US-065.1, 65.2, NFR 8; Design: NotificationsModule (channels), Error Handling (notification delivery)_
   - [x] 19.3 Notification preferences and channel selection
     - Implement `GET/PUT /notifications/preferences` (tasks, deadlines, group activity, AI suggestions, email/push toggles); channel selection consults preferences per type
@@ -406,13 +407,15 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - `// Feature: websphere-platform, Property 22: OAuth tokens are never stored in plaintext and round-trip losslessly`
     - Generate random token strings; assert stored record contains no plaintext substring and AES-GCM decryption returns the exact original
     - _Requirements: US-067.2, NFR 3; Design: Property 22_
-  - [ ] 20.4 Link, launch, sync, status, and usage feeding analytics
-    - Implement `POST /integrations/:provider/link`, `GET /integrations/links/:id/launch` (deep link; expired → `409 INTEGRATION_RECONNECT_REQUIRED`), `GET /integrations/connections` (status + sync activity), `POST /integrations/connections/:id/sync`; record `ToolUsage` surfaced to analytics
-    - Tests to write (integration): link records target; launch opens in context; sync updates status; usage logged
+  - [-] 20.4 Link, launch, sync, status, and usage feeding analytics
+    - Implemented task-resource linking, safe external launch URLs, connection status, manual sync, and `ToolUsage` activity used by analytics.
+    - Remaining: endpoint-level integration tests covering links, launch, sync status, and usage logging.
     - _Requirements: US-068.1, 68.2, US-069.1, 69.2; Design: IntegrationsModule (link/launch/sync)_
-  - [ ] 20.5 Implement all six provider adapters
-    - Implement Google (Drive/Docs), Microsoft 365 (Graph), Trello, Asana, Canva, and Figma adapters behind the common `Connector` interface (authorizeUrl, exchangeCode, refresh, sync, link, launchUrl)
-    - Tests to write: per-adapter unit tests for URL building and token handling
+  - [-] 20.5 Implement all six provider adapters
+    - Implemented Google Drive, Microsoft 365, Trello, Asana, and Canva OAuth adapters behind the common `Connector` interface. Canva uses Authorization Code + PKCE and syncs accessible designs. Its public app review is required before non-owner Canva users can connect.
+    - Figma OAuth is implemented locally with Authorization Code + PKCE and linked-design verification; it awaits Figma Client ID/Secret configuration and commit/CI deployment.
+    - Removed the defunct Trello monitoring/sidebar flow; Trello is retained only as a standard user connection.
+    - Tests to write: per-adapter unit tests for URL building, code exchange, refresh, and sync handling.
     - _Requirements: US-067.1, 67.2, US-068.1, 68.2, US-069.1, 69.2; Design: IntegrationsModule (six adapters)_
   - [ ]* 20.6 Contract tests for the six adapters
     - Verify each adapter conforms to the `Connector` contract using mocked provider responses; assert encrypted-only token storage and correct expired/reconnect states
@@ -462,9 +465,9 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
   - Ensure all tests pass, ask the user if questions arise.
 
 - [-] 24. Phase 18 — Hardening and deployment
-  - [ ] 24.1 Production Docker Compose for Lightsail, SES wiring, HTTPS
-    - Finalize `docker/docker-compose.yml` with api, worker, web+nginx (TLS termination, static + reverse proxy), mysql, redis, and mcp services; wire SES SMTP env; enforce HTTPS at nginx
-    - Tests to write: compose config validation / smoke bring-up asserting all services start and `/health` is reachable over TLS
+- [-] 24.1 Production Docker Compose for Lightsail, SES wiring, HTTPS
+    - Production Docker Compose, HTTPS, sequential GitHub Actions deployment, and health checks are in place. Releases are deployed only through the GitHub CI workflow.
+    - Remaining: provide SES SMTP credentials and verified sender in the production environment, then perform an end-to-end email delivery smoke test.
     - _Requirements: NFR 5, 19, 20; Design: Architecture (Docker Compose, nginx)_
   - [ ]* 24.2 End-to-end critical-flow test
     - Automate: register → create/join group → submit ideas → open poll → vote → finalize winning idea → create project → create/assign tasks → update task status → view analytics/risk/prediction → receive notifications; assert idea→project link, automatic workflow recording, derived progress, and live updates
@@ -481,6 +484,15 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
+
+### Current integration and notification handoff (2026-09-18)
+
+- [x] Registration verification uses a six-digit OTP sent before account creation; password-reset delivery uses the same SES SMTP service.
+- [x] Browser notifications use VAPID and are sent when a subscribed user receives an in-app notification.
+- [x] Asana OAuth is implemented and deployed.
+- [x] Canva OAuth is implemented and deployed. The configured Client ID and redirect request have been verified; the current Canva secret must be rotated because it was exposed during local debugging. Canva public review is required for non-owner users.
+- [-] Figma OAuth needs a Figma OAuth app (`current_user:read`, `file_content:read`), production `FIGMA_CLIENT_ID`/`FIGMA_CLIENT_SECRET`, and the pending local Figma commit merged through CI.
+- [-] SES production setup needs SMTP credentials from SES → SMTP settings, a verified `SES_FROM` identity, and a final real-recipient delivery test.
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; they are NOT implemented during core execution but SHOULD be written for verification.
 - Each task references specific requirements (granular sub-requirements) and design elements for traceability.

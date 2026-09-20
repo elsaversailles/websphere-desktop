@@ -85,14 +85,27 @@ class FigmaConnector extends DirectOAuthConnector {
   protected readonly clientIdEnv = 'FIGMA_CLIENT_ID';
   protected readonly clientSecretEnv = 'FIGMA_CLIENT_SECRET';
   protected authorizationParams() { return { scope: 'current_user:read,file_content:read' }; }
-  async sync(tokens: OAuthTokens, targets: SyncTarget[] = []): Promise<SyncResult> {
-    await requestJson('https://api.figma.com/v1/me', tokens.accessToken);
-    return { summary: targets.length ? `Verified Figma access and ${targets.length} linked file${targets.length === 1 ? '' : 's'}` : 'Verified Figma account access' };
+  override authorizeUrl(state: string, redirectUri: string, codeChallenge?: string) {
+    if (!codeChallenge) throw new Error('OAUTH_EXCHANGE_FAILED');
+    return `${this.authorizationEndpoint}?${new URLSearchParams({ client_id: required(this.clientIdEnv), redirect_uri: redirectUri, response_type: 'code', state, ...this.authorizationParams(), code_challenge: codeChallenge, code_challenge_method: 'S256' }).toString()}`;
   }
-  override async exchangeCode(code: string, redirectUri: string) {
-    if (!code || !redirectUri) throw new Error('OAUTH_EXCHANGE_FAILED');
+  async sync(tokens: OAuthTokens, targets: SyncTarget[] = []): Promise<SyncResult> {
+    if (!targets.length) {
+      await requestJson('https://api.figma.com/v1/me', tokens.accessToken);
+      return { summary: 'Verified Figma account access' };
+    }
+    const results = await Promise.all(targets.map(async (target) => {
+      const key = target.externalUrl.match(/figma\\.com\\\/(?:file|design)\\\/([^/?#]+)/i)?.[1] ?? target.externalId;
+      try { await requestJson(`https://api.figma.com/v1/files/${encodeURIComponent(key)}?depth=1`, tokens.accessToken); return true; }
+      catch { return false; }
+    }));
+    const available = results.filter(Boolean).length;
+    return { summary: `Synced ${available} of ${targets.length} linked Figma design${targets.length === 1 ? '' : 's'}` };
+  }
+  override async exchangeCode(code: string, redirectUri: string, codeVerifier?: string) {
+    if (!code || !redirectUri || !codeVerifier) throw new Error('OAUTH_EXCHANGE_FAILED');
     const basic = Buffer.from(`${required(this.clientIdEnv)}:${required(this.clientSecretEnv)}`).toString('base64');
-    return tokensFrom(await requestForm(this.tokenEndpoint, new URLSearchParams({ redirect_uri: redirectUri, code, grant_type: 'authorization_code' }), { authorization: `Basic ${basic}` }));
+    return tokensFrom(await requestForm(this.tokenEndpoint, new URLSearchParams({ redirect_uri: redirectUri, code, code_verifier: codeVerifier, grant_type: 'authorization_code' }), { authorization: `Basic ${basic}` }));
   }
   override async refresh(tokens: OAuthTokens) {
     if (!tokens.refreshToken) throw new Error('OAUTH_RECONNECT_REQUIRED');
