@@ -98,6 +98,11 @@ enum TicketStatus {
   resolved
   rejected
 }
+enum AnnouncementPriority {
+  normal
+  important
+  urgent
+}
 model User {
   id String @id @default(cuid())
   email String @unique
@@ -121,6 +126,7 @@ model User {
   votes Vote[]
   aiInteractions AiInteraction[]
   supportTickets SupportTicket[]
+  announcements Announcement[]
 }
 model Admin {
   id String @id @default(cuid())
@@ -138,6 +144,20 @@ model Group {
   ideas Idea[]
   projects Project[]
   messages ChatMessage[]
+  announcements Announcement[]
+}
+model Announcement {
+  id String @id @default(cuid())
+  groupId String
+  authorId String
+  title String
+  body String @db.Text
+  priority AnnouncementPriority @default(normal)
+  createdAt DateTime @default(now())
+  group Group @relation(fields: [groupId], references: [id])
+  author User @relation(fields: [authorId], references: [id])
+  @@index([groupId, createdAt])
+  @@index([authorId])
 }
 model GroupMember {
   id String @id @default(cuid())

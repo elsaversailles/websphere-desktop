@@ -184,8 +184,54 @@
 .activity-verb{color:var(--sub);font-weight:600}
 .activity-copy small{margin-top:3px;color:var(--sub);font-size:10px;font-weight:600}
 /* project progress overview rows */
-.project-progress-row{display:grid;grid-template-columns:minmax(0,1fr) 110px 44px;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(168,216,240,.42)}
-.project-progress-row:last-child{border-bottom:0}
-.project-progress-row>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:600}
-.project-progress-row strong{text-align:right;font-size:12px}
-@media(max-width:560px){.project-progress-row{grid-template-columns:minmax(0,1fr) 70px 40px}.deadline-row{flex-wrap:wrap}}
+/* project progress overview: meta line, right-aligned percentage, full-width bar beneath */
+.progress-item{padding:11px 0;border-bottom:1px solid rgba(168,216,240,.42)}
+.progress-item:first-child{padding-top:2px}
+.progress-item:last-child{border-bottom:0;padding-bottom:2px}
+.progress-item-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px}
+.progress-item-copy{min-width:0}
+.progress-item-copy strong,.progress-item-copy small{display:block}
+.progress-item-copy strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:800;line-height:1.3}
+.progress-item-copy small{margin-top:3px;color:var(--sub);font-size:10px;font-weight:600}
+.progress-item .pb-wrap{height:7px;flex:none;width:100%}
+.progress-item .pb-val{flex:0 0 auto;font-size:12px}
+/* online roster: per-person avatar colour plus a presence lamp */
+.roster-list{display:grid}
+.roster-row{display:flex;align-items:center;gap:11px;padding:10px 0;border-bottom:1px solid rgba(168,216,240,.42)}
+.roster-row:last-child{border-bottom:0}
+.roster-avatar{width:30px;height:30px;font-size:11px;color:#fff}
+.roster-copy{flex:1;min-width:0}
+.roster-copy strong,.roster-copy small{display:block}
+.roster-copy strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:700}
+.roster-copy small{margin-top:2px;color:var(--sub);font-size:10px;font-weight:600}
+.roster-status{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:var(--card2);border:1px solid rgba(58,130,160,.45)}
+.roster-status.on{background:var(--grn);border-color:var(--grn);box-shadow:0 0 0 2px rgba(30,158,98,.2)}
+/* announcements: priority drives the left rail and tint */
+.announce-list{display:grid;gap:10px}
+.announce-row{padding:11px 13px;border-left:3px solid var(--acc);border-radius:0 9px 9px 0;background:rgba(0,56,168,.05)}
+.announce-row.tone-g{border-left-color:var(--grn);background:rgba(30,158,98,.06)}
+.announce-row.tone-ac{border-left-color:var(--acc);background:rgba(0,56,168,.05)}
+.announce-row.tone-y{border-left-color:var(--yel);background:rgba(201,125,16,.07)}
+.announce-row.tone-r{border-left-color:var(--red);background:rgba(214,59,59,.07)}
+.announce-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+.announce-head strong{font-size:12px;font-weight:800;line-height:1.3}
+.announce-head small{flex:0 0 auto;color:var(--sub);font-size:9px;font-weight:700}
+.announce-row p{margin-top:4px;color:var(--ink);font-size:11px;line-height:1.45}
+.announce-row cite{display:block;margin-top:6px;color:var(--sub);font-size:10px;font-style:normal;font-weight:700}
+/* milestones: green for wins, blue for awards, red for what is still ahead */
+.milestone-list{display:grid;gap:9px}
+.milestone-row{display:flex;align-items:center;gap:11px;padding:11px 13px;border:1px solid rgba(168,216,240,.55);border-radius:10px;background:rgba(234,246,252,.6)}
+.milestone-row.tone-g{border-color:rgba(30,158,98,.28);background:rgba(30,158,98,.07)}
+.milestone-row.tone-ac{border-color:rgba(0,56,168,.24);background:rgba(0,56,168,.05)}
+.milestone-row.tone-y{border-color:rgba(201,125,16,.28);background:rgba(201,125,16,.07)}
+.milestone-row.tone-r{border-color:rgba(214,59,59,.26);background:rgba(214,59,59,.06)}
+.milestone-badge{display:grid;place-items:center;flex:0 0 auto;width:28px;height:28px;border-radius:50%;background:rgba(0,56,168,.14);color:var(--acc)}
+.milestone-badge.g{background:rgba(30,158,98,.18);color:var(--grn)}
+.milestone-badge.ac{background:rgba(0,56,168,.14);color:var(--acc)}
+.milestone-badge.y{background:rgba(201,125,16,.18);color:var(--yel)}
+.milestone-badge.r{background:rgba(214,59,59,.16);color:var(--red)}
+.milestone-copy{min-width:0}
+.milestone-copy strong,.milestone-copy small{display:block}
+.milestone-copy strong{font-size:12px;font-weight:800;line-height:1.3}
+.milestone-copy small{margin-top:3px;color:var(--sub);font-size:10px;font-weight:600}
+@media(max-width:560px){.deadline-row{flex-wrap:wrap}}

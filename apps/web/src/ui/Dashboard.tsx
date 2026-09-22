@@ -4,20 +4,30 @@ import { getAccessToken, request, socketBaseUrl } from '../api';
 import type { GroupHub as GroupHubData, GroupSummary } from './types';
 import { type Tone, avatarTone, dateKey, deadlineCountdown, deadlineHealth, initials, priorityHealth, projectHealth, relativeTime, worstTone } from './health';
 
-type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string }; tasks: Array<{ status: string }> };
+type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string }; tasks: Array<{ status: string }>; _count?: { members: number } };
 type DashboardTask = { id: string; title: string; status: string; priority?: string | null; deadline?: string | null; project?: { id: string; title: string } | null };
 type DashboardNotification = { id: string; message: string; read: boolean; relatedId?: string | null; relatedType?: string | null };
 type DashboardActivity = { id: string; type: string; fromValue?: string | null; toValue?: string | null; createdAt: string; taskTitle?: string | null; projectTitle: string; actor?: { id: string; fullName: string; avatarUrl?: string | null } | null };
+type DashboardTeammate = { id: string; fullName: string; avatarUrl?: string | null; role: string; groupName: string; online: boolean };
+type DashboardAnnouncement = { id: string; title: string; body: string; priority: 'normal' | 'important' | 'urgent'; createdAt: string; groupName: string; authorName: string; authorRole: string };
+type DashboardMilestone = { id: string; kind: 'achievement' | 'award' | 'next'; icon: 'check' | 'star' | 'target'; title: string; detail: string; at: string };
 type DashboardData = {
   glance: { activeProjects: number; pendingTasks: number; ideasSubmitted: number };
   projects: DashboardProject[];
   tasks: DashboardTask[];
   notifications: DashboardNotification[];
   activity?: DashboardActivity[];
+  online?: DashboardTeammate[];
+  announcements?: DashboardAnnouncement[];
+  milestones?: DashboardMilestone[];
 };
 type DashboardProps = { name: string; notify: (message: string) => void; onPage: (page: 'groups' | 'ideas' | 'projects' | 'tasks' | 'assistant' | 'notifications') => void; onNotificationClick: (notification: DashboardNotification) => void };
 
 const WEEKDAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+/** Announcement priority reuses the same scale: urgent demands attention, normal is routine. */
+const ANNOUNCEMENT_TONE: Record<string, Tone> = { urgent: 'r', important: 'y', normal: 'ac' };
+/** Wins are green, awards are blue, and the milestone still ahead of you is red. */
+const MILESTONE_TONE: Record<string, Tone> = { achievement: 'g', award: 'ac', next: 'r' };
 
 export function Dashboard({ name, notify, onPage, onNotificationClick }: DashboardProps) {
   const [data, setData] = useState<DashboardData | null>(null);
@@ -83,6 +93,10 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
       .sort((a, b) => a.health.days - b.health.days)
       .slice(0, 5);
   }, [data]);
+
+  /** The panel header says "All active projects", so archived and completed work is filtered out. */
+  const activeProjects = useMemo(() => (data?.projects ?? []).filter((project) => project.status === 'active'), [data]);
+  const onlineCount = useMemo(() => (data?.online ?? []).filter((teammate) => teammate.online).length, [data]);
 
   async function openCreateDialog() {
     setCreateOpen(true);
@@ -225,16 +239,49 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
       </DataCard>
     </div>
     <div className="g2">
-      <DataCard title="Project Progress Overview">
-        {data.projects.length ? data.projects.slice(0, 5).map((project) => {
+      <DataCard title="Project Progress Overview" note="All active projects">
+        {activeProjects.length ? activeProjects.slice(0, 4).map((project) => {
           const progress = project.tasks.length ? Math.round(project.tasks.filter((task) => task.status === 'completed').length / project.tasks.length * 100) : 0;
           const health = projectHealth(progress, project.status);
-          return <div className="project-progress-row" key={project.id}><span>{project.title}</span><div className="pb-wrap"><div className={`pb ${health.tone}`} style={{ width: `${progress}%` }} /></div><strong className={`pb-val ${health.tone}`}>{progress}%</strong></div>;
+          const members = project._count?.members ?? 0;
+          return <div className="progress-item" key={project.id}>
+            <div className="progress-item-head">
+              <span className="progress-item-copy"><strong>{project.title}</strong><small>{[project.group.name, members ? `${members} member${members === 1 ? '' : 's'}` : null, project.deadline ? `Due ${new Date(project.deadline).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : null].filter(Boolean).join(' · ')}</small></span>
+              <strong className={`pb-val ${health.tone}`}>{progress}%</strong>
+            </div>
+            <div className="pb-wrap"><div className={`pb ${health.tone}`} style={{ width: `${progress}%` }} /></div>
+          </div>;
         }) : <Empty text="Project progress will appear here once you start working." />}
       </DataCard>
-      <DataCard title="Online"><Empty text="Group members will appear here after you invite them." /></DataCard>
+      <DataCard title="Online" note={onlineCount ? `${onlineCount} now online` : 'Now online'}>
+        {data.online?.length ? <div className="roster-list">{data.online.map((teammate) => <div className="roster-row" key={teammate.id}>
+          <span className={`ava roster-avatar tone-${avatarTone(teammate.id)}`} aria-hidden="true">{initials(teammate.fullName)}</span>
+          <span className="roster-copy"><strong>{teammate.fullName}</strong><small>{teammate.groupName}{teammate.role === 'Project_Leader' ? ' · Leader' : ''}</small></span>
+          <span className={`roster-status ${teammate.online ? 'on' : ''}`} title={teammate.online ? 'Online' : 'Offline'}><span className="sr-only">{teammate.online ? 'Online' : 'Offline'}</span></span>
+        </div>)}</div> : <Empty text="Group members will appear here after you invite them." />}
+      </DataCard>
     </div>
-    <div className="g2 bottom-grid"><DataCard title="Announcements">{data.notifications.length ? <div>{data.notifications.slice(0, 4).map((item) => <button type="button" className="notif-item notif-entry" key={item.id} onClick={() => activateNotification(item)}><span className="ndot"/><span><strong className="ntxt">{item.message}</strong><small className="ntime">{item.read ? 'Read' : 'New'}</small></span></button>)}</div> : <Empty text="Your announcements will appear here." />}</DataCard><DataCard title="Milestones & Achievements"><Empty text="Your milestones and achievements will appear here." /></DataCard></div>
+    <div className="g2 bottom-grid">
+      <DataCard title="Announcements" action="View All" onAction={() => onPage('notifications')}>
+        {data.announcements?.length ? <div className="announce-list">{data.announcements.map((item) => {
+          const tone = ANNOUNCEMENT_TONE[item.priority] ?? 'ac';
+          return <article className={`announce-row tone-${tone}`} key={item.id}>
+            <div className="announce-head"><strong>{item.title}</strong><small>{relativeTime(item.createdAt)}</small></div>
+            <p>{item.body}</p>
+            <cite>— {item.authorName}{item.authorRole === 'Project_Leader' ? ', Leader' : ''} · {item.groupName}</cite>
+          </article>;
+        })}</div> : <Empty text="Announcements from your group leaders will appear here." />}
+      </DataCard>
+      <DataCard title="Milestones &amp; Achievements">
+        {data.milestones?.length ? <div className="milestone-list">{data.milestones.map((item) => {
+          const tone = MILESTONE_TONE[item.kind] ?? 'ac';
+          return <div className={`milestone-row tone-${tone}`} key={item.id}>
+            <span className={`milestone-badge ${tone}`} aria-hidden="true"><MilestoneIcon icon={item.icon} /></span>
+            <span className="milestone-copy"><strong>{item.title}</strong><small>{item.detail}</small></span>
+          </div>;
+        })}</div> : <Empty text="Finish a task or project and your milestones will show up here." />}
+      </DataCard>
+    </div>
     <button className="help-btn" type="button" onClick={() => setHelpOpen(true)} aria-haspopup="dialog"><SupportIcon />Need help?</button>
   </section>;
 }
@@ -272,5 +319,11 @@ function monthMatrix(year: number, month: number) {
 function DataCard({ title, action, note, onAction, children }: { title: string; action?: string; note?: string; onAction?: () => void; children: React.ReactNode }) { return <section className="cc"><div className="cc-head"><h3>{title}</h3>{action ? <button className="btn btn-sm" onClick={onAction}>{action}</button> : note ? <span className="cc-note">{note}</span> : null}</div>{children}</section>; }
 function Empty({ text, action, onAction }: { text: string; action?: string; onAction?: () => void }) { return <div className="empty-message"><p>{text}</p>{action ? <button className="btn-o btn-sm" onClick={onAction}>{action}</button> : null}</div>; }
 function Kpi({ label, value, tone }: { label: string; value: number; tone?: string }) { return <div className="kpi"><div className={`kval ${tone ?? ''}`}>{value}</div><div className="klbl">{label}</div></div>; }
+function MilestoneIcon({ icon }: { icon: 'check' | 'star' | 'target' }) {
+  const shared = { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 3, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+  if (icon === 'check') return <svg {...shared}><path d="M20 6 9 17l-5-5" /></svg>;
+  if (icon === 'star') return <svg {...shared} strokeWidth={2} fill="currentColor"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2Z" /></svg>;
+  return <svg {...shared} strokeWidth={2.4}><circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" /></svg>;
+}
 function BellIcon() { return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></svg>; }
 function SupportIcon() { return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 15a4 4 0 0 1-4 4H9l-5 3v-7a4 4 0 0 1-1-2.7V8a4 4 0 0 1 4-4h9a4 4 0 0 1 4 4z"/><path d="M9.5 10a2.5 2.5 0 1 1 4.2 1.8c-.9.7-1.7 1.2-1.7 2.2M12 17h.01"/></svg>; }
