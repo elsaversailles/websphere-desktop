@@ -35,6 +35,20 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const [incomingCall, setIncomingCall] = useState<{ groupId: string; kind: CallKind } | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const sections = administrator ? adminSections : userSections;
+  /** Sidebar is two-level: only section headers show by default, and the section owning the current page stays open. */
+  const [openSections, setOpenSections] = useState<string[]>(() => {
+    const landing: Page = administrator ? 'admin' : 'dashboard';
+    const owner = (administrator ? adminSections : userSections).find((section) => section.links.some((link) => link.id === landing));
+    return owner ? [owner.title] : [];
+  });
+  useEffect(() => {
+    const owner = sections.find((section) => section.links.some((link) => link.id === page));
+    if (owner) setOpenSections((current) => current.includes(owner.title) ? current : [...current, owner.title]);
+  }, [page, sections]);
+
+  function toggleSection(title: string) {
+    setOpenSections((current) => current.includes(title) ? current.filter((entry) => entry !== title) : [...current, title]);
+  }
 
   function navigate(target: Page) {
     if (target === 'assistant') setAssistantOpen(true);
@@ -88,7 +102,20 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   return <main className="page on">{incomingCall && (page !== 'chat' || incomingCall.groupId !== selectedGroupId) ? <div className="workspace-call-invite call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => { setSelectedGroupId(incomingCall.groupId); setPage('chat'); }}>Join call</button><button className="btn-o btn-sm" onClick={() => setIncomingCall(null)}>Dismiss</button></div> : null}<div className="layout">
     <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
       <div className="sb-head"><button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'} title={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'}><SidebarToggleIcon collapsed={sidebarCollapsed} /></button><button className="sb-brand" onClick={() => setPage(administrator ? 'admin' : 'dashboard')}><GlobeIcon /><span className="sb-brand-label">WebSphere</span></button></div>
-      <nav aria-label="Main navigation">{sections.map((section) => <div className="sb-group" key={section.title}><div className="sb-sec">{section.title}</div>{section.links.map((link) => <button className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => setPage(link.id)} title={sidebarCollapsed ? link.label : undefined}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>)}</nav>
+      <nav aria-label="Main navigation">{sections.map((section) => {
+        const expanded = openSections.includes(section.title);
+        const holdsActivePage = section.links.some((link) => link.id === page);
+        const submenuId = `sb-sub-${section.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`;
+        return <div className={`sb-group ${expanded ? 'open' : ''}`} key={section.title}>
+          <button type="button" className={`sb-sec ${holdsActivePage ? 'has-active' : ''}`} aria-expanded={expanded} aria-controls={submenuId} onClick={() => toggleSection(section.title)}>
+            <span>{section.title}</span>
+            <ChevronIcon />
+          </button>
+          <div className="sb-sub" id={submenuId}>
+            <div className="sb-sub-inner">{section.links.map((link) => <button className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => setPage(link.id)} tabIndex={expanded ? undefined : -1} title={sidebarCollapsed ? link.label : undefined}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>
+          </div>
+        </div>;
+      })}</nav>
       <div className="sb-bot"><div className="uchip">{session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className="ava">{initials(session.user.fullName)}</span>}<span className="user-detail"><strong className="u-name">{session.user.fullName}</strong><small className="u-role">{administrator ? 'Administrator' : 'Member'}</small></span></div><button className="logout-btn" onClick={() => void logout()} title={sidebarCollapsed ? 'Log out' : undefined}><span aria-hidden="true">↪</span><span className="logout-label">Logout</span></button></div>
     </aside>
     {sidebarCollapsed ? <button className="sidebar-reopen" type="button" onClick={() => setSidebarCollapsed(false)} aria-label="Show sidebar navigation" title="Show sidebar navigation"><SidebarToggleIcon collapsed /></button> : null}
@@ -143,6 +170,7 @@ function AdminAccounts({ notify }: { notify: (message: string) => void }) {
 }
 
 function GlobeIcon() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#0EA0D0" strokeWidth="2"/><ellipse cx="12" cy="12" rx="4" ry="9" stroke="#0EA0D0" strokeWidth="1.5"/><line x1="3" y1="12" x2="21" y2="12" stroke="#0EA0D0" strokeWidth="1.5"/></svg>; }
+function ChevronIcon() { return <svg className="sb-sec-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>; }
 function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><path d={collapsed ? 'm10 8 4 4-4 4' : 'm14 8-4 4 4 4'} /></svg>; }
 function NavIcon({ page }: { page: Page }) {
   const common = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
