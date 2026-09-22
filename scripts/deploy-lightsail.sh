@@ -70,7 +70,8 @@ wait_for_service() {
   local stable_checks=0
   while (( SECONDS < deadline )); do
     local container_id status health
-    container_id="$(compose ps -q "$service")"
+    # Stay non-fatal so a transient Compose hiccup is retried instead of aborting the release.
+    container_id="$(compose ps -q "$service" 2>/dev/null || true)"
     if [[ -n "$container_id" ]]; then
       status="$(docker_cmd inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
       health="$(docker_cmd inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || true)"
@@ -96,12 +97,26 @@ wait_for_service() {
   return 1
 }
 
+# Snapshotting the current image is a convenience for rollback_service, never a reason to stop a
+# release. A container keeps running after its image is pruned from the local cache, and in that
+# state `docker tag <image-id>` fails with "No such image", so every step here stays non-fatal.
 backup_service_image() {
   local service="$1" container_id image_id
-  container_id="$(compose ps -q "$service")"
+  container_id="$(compose ps -q "$service" 2>/dev/null || true)"
   [[ -n "$container_id" ]] || return 0
-  image_id="$(docker_cmd inspect --format '{{.Image}}' "$container_id")"
-  docker_cmd tag "$image_id" "$PROJECT_NAME-$service:rollback"
+  image_id="$(docker_cmd inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)"
+  if [[ -z "$image_id" ]]; then
+    log "could not read the current $service image; continuing without a rollback snapshot"
+    return 0
+  fi
+  if ! docker_cmd image inspect "$image_id" >/dev/null 2>&1; then
+    log "the current $service image is no longer in the local cache; continuing without a rollback snapshot"
+    return 0
+  fi
+  if ! docker_cmd tag "$image_id" "$PROJECT_NAME-$service:rollback"; then
+    log "could not tag the current $service image; continuing without a rollback snapshot"
+    return 0
+  fi
   log "saved the current $service image as $PROJECT_NAME-$service:rollback"
 }
 
@@ -239,9 +254,9 @@ deploy_built_service mcp
 deploy_built_service web
 
 for service in "${SERVICES[@]}"; do
-  container_id="$(compose ps -q "$service")"
+  container_id="$(compose ps -q "$service" 2>/dev/null || true)"
   [[ -n "$container_id" ]] || fail "$service has no container after deployment"
-  [[ "$(docker_cmd inspect --format '{{.State.Status}}' "$container_id")" == running ]] || fail "$service is not running after deployment"
+  [[ "$(docker_cmd inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)" == running ]] || fail "$service is not running after deployment"
 done
 
 ACTIVE_RELEASE_LINK="$DEPLOY_ROOT/active-release"
