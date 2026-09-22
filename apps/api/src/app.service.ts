@@ -17,7 +17,7 @@ import { PushService } from './push.service.js';
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const WorkflowEventType = { status_change: 'status_change', task_completed: 'task_completed', assignment_change: 'assignment_change', progress_activity: 'progress_activity' } as const;
-const NotificationType = { task_assignment: 'task_assignment', group_activity: 'group_activity' } as const;
+const NotificationType = { task_assignment: 'task_assignment', group_activity: 'group_activity', announcement: 'announcement' } as const;
 type Role = (typeof Role)[keyof typeof Role];
 type TaskStatus = 'pending' | 'ongoing' | 'for_review' | 'completed';
 type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva' | 'figma';
@@ -180,7 +180,7 @@ export class AppService {
   async addGroupMemberByEmail(caller: Caller, groupId: string, email: string) { const user = await this.prisma.user.findUnique({ where: { email } }); if (!user) fail('NOT_FOUND', 'No registered account uses that email address', 404); return this.addGroupMember(caller, groupId, user.id); }
   async removeGroupMember(caller: Caller, groupId: string, userId: string) { await this.member(groupId, caller.id, true); await this.prisma.groupMember.delete({ where: { groupId_userId: { groupId, userId } } }); return { ok: true }; }
   async createProject(caller: Caller, input: any) { await this.member(input.groupId, caller.id); const memberIds = [...new Set([caller.id, ...(input.memberIds ?? [])])]; for (const userId of memberIds) await this.member(input.groupId, userId); return this.prisma.project.create({ data: { ...input, createdBy: caller.id, members: { create: memberIds.map((userId) => ({ userId, role: userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } }, include: { members: true } }); }
-  async projects(caller: Caller) { return this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } } }, include: { group: true, members: { where: { userId: caller.id } }, tasks: true } }); }
+  async projects(caller: Caller) { return this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } } }, include: { group: true, members: { where: { userId: caller.id } }, tasks: true, _count: { select: { members: true } } } }); }
   async project(caller: Caller, id: string) { await this.projectMember(id, caller.id); return this.prisma.project.findUniqueOrThrow({ where: { id }, include: { group: { include: { members: { include: { user: { select: { id: true, fullName: true } } } } } }, members: { include: { user: { select: { id: true, fullName: true } } } }, tasks: { include: { assignments: { where: { active: true } } } } } }); }
   async updateProject(caller: Caller, id: string, input: any) { await this.projectMember(id, caller.id, true); const { memberIds, ...data } = input; return this.prisma.project.update({ where: { id }, data }); }
   async addProjectMember(caller: Caller, projectId: string, userId: string) { await this.projectMember(projectId, caller.id, true); const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } }); await this.member(project.groupId, userId); return this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: ProjectRole.Project_Member } }); }
@@ -349,6 +349,105 @@ export class AppService {
     return { ok: true, delivered: created.length };
   }
   async notifications(caller: Caller) { return this.prisma.notification.findMany({ where: { userId: caller.id }, orderBy: { createdAt: 'desc' } }); }
+  /**
+   * Teammates from every group the caller belongs to, flagged with live presence.
+   * Presence is read from the websocket gateway, so it only covers sockets on this instance.
+   */
+  async onlineTeammates(caller: Caller, take = 8) {
+    const memberships = await this.prisma.groupMember.findMany({
+      where: { group: { members: { some: { userId: caller.id } } }, userId: { not: caller.id } },
+      include: { user: { select: { id: true, fullName: true, avatarUrl: true, course: true } }, group: { select: { id: true, name: true } } },
+    });
+    const online = new Set(this.events.onlineUserIds());
+    const seen = new Set<string>();
+    return memberships
+      .filter((membership: any) => { if (seen.has(membership.userId)) return false; seen.add(membership.userId); return true; })
+      .map((membership: any) => ({
+        id: membership.user.id,
+        fullName: membership.user.fullName,
+        avatarUrl: membership.user.avatarUrl,
+        role: membership.role,
+        groupName: membership.group.name,
+        online: online.has(membership.userId),
+      }))
+      .sort((a: any, b: any) => Number(b.online) - Number(a.online) || a.fullName.localeCompare(b.fullName))
+      .slice(0, take);
+  }
+  /** Announcements from every group the caller belongs to, newest first, with the author's group role. */
+  async announcements(caller: Caller, take = 6) {
+    const records = await this.prisma.announcement.findMany({
+      where: { group: { members: { some: { userId: caller.id } } } },
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: { author: { select: { id: true, fullName: true } }, group: { select: { id: true, name: true } } },
+    });
+    const roles = await this.prisma.groupMember.findMany({
+      where: { OR: records.map((record: any) => ({ groupId: record.groupId, userId: record.authorId })) },
+      select: { groupId: true, userId: true, role: true },
+    });
+    return records.map((record: any) => ({
+      id: record.id,
+      title: record.title,
+      body: record.body,
+      priority: record.priority,
+      createdAt: record.createdAt,
+      groupId: record.groupId,
+      groupName: record.group.name,
+      authorName: record.author.fullName,
+      authorRole: roles.find((role: any) => role.groupId === record.groupId && role.userId === record.authorId)?.role ?? 'Project_Member',
+    }));
+  }
+  /** Only group leaders may post an announcement, matching how other group-wide writes are gated. */
+  async createAnnouncement(caller: Caller, groupId: string, input: { title: string; body: string; priority?: 'normal' | 'important' | 'urgent' }) {
+    await this.member(groupId, caller.id, true);
+    const announcement = await this.prisma.announcement.create({ data: { groupId, authorId: caller.id, title: input.title, body: input.body, priority: input.priority ?? 'normal' } });
+    const members = await this.prisma.groupMember.findMany({ where: { groupId, userId: { not: caller.id } }, select: { userId: true } });
+    if (members.length) await this.notify(members.map((member: any) => member.userId), NotificationType.announcement, `New announcement: “${input.title}”`, announcement.id, 'announcement');
+    return announcement;
+  }
+  /**
+   * Milestones are derived rather than stored: finished projects and approved ideas read as wins,
+   * while the nearest unfinished deadline surfaces as the next thing to chase.
+   */
+  async milestones(caller: Caller, take = 5) {
+    const [completedProjects, selectedIdeas, completedTasks, upcoming] = await Promise.all([
+      this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, status: 'completed' }, orderBy: { createdAt: 'desc' }, take, include: { group: { select: { name: true } } } }),
+      this.prisma.idea.findMany({ where: { group: { members: { some: { userId: caller.id } } }, status: 'selected' }, orderBy: { createdAt: 'desc' }, take, include: { group: { select: { name: true } } } }),
+      this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, status: 'completed', completedAt: { not: null } }, orderBy: { completedAt: 'desc' }, take, include: { project: { select: { title: true } } } }),
+      this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, status: { not: 'completed' }, deadline: { not: null } }, orderBy: { deadline: 'asc' }, take: 1, include: { project: { select: { title: true } } } }),
+    ]);
+    const items = [
+      ...completedProjects.map((project: any) => ({ id: `project-${project.id}`, kind: 'achievement' as const, icon: 'check' as const, title: `${project.title} completed`, detail: `${project.group.name} · Project delivered`, at: project.createdAt })),
+      ...completedTasks.map((task: any) => ({ id: `task-${task.id}`, kind: 'achievement' as const, icon: 'check' as const, title: `${task.title} approved`, detail: `${task.project.title} · Task completed`, at: task.completedAt })),
+      ...selectedIdeas.map((idea: any) => ({ id: `idea-${idea.id}`, kind: 'award' as const, icon: 'star' as const, title: `${idea.title} selected`, detail: `${idea.group.name} · Chosen from group ideas`, at: idea.createdAt })),
+    ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()).slice(0, take - 1);
+    const next = upcoming[0];
+    if (next) items.push({ id: `next-${next.id}`, kind: 'next' as const, icon: 'target' as const, title: `Next milestone: ${next.title}`, detail: `${next.project.title} · Target: ${new Date(next.deadline!).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })} · ${next.status === 'pending' ? 'Not started' : 'In progress'}`, at: next.deadline! });
+    return items;
+  }
+  /** Recent workflow events across every project the caller belongs to, shaped for the dashboard activity feed. */
+  async activityFeed(caller: Caller, take = 8) {
+    const events = await this.prisma.workflowEvent.findMany({
+      where: { project: { members: { some: { userId: caller.id } } } },
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: { task: { select: { id: true, title: true } }, project: { select: { id: true, title: true } } },
+    });
+    const actorIds = [...new Set(events.map((event: any) => event.actorId))];
+    const actors = actorIds.length ? await this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, fullName: true, avatarUrl: true } }) : [];
+    return events.map((event: any) => ({
+      id: event.id,
+      type: event.type,
+      fromValue: event.fromValue,
+      toValue: event.toValue,
+      createdAt: event.createdAt,
+      taskId: event.taskId,
+      taskTitle: event.task?.title ?? null,
+      projectId: event.projectId,
+      projectTitle: event.project.title,
+      actor: actors.find((actor: any) => actor.id === event.actorId) ?? null,
+    }));
+  }
   async markRead(caller: Caller, id: string) { return this.prisma.notification.updateMany({ where: { id, userId: caller.id }, data: { read: true } }); }
   async preferences(caller: Caller, data?: any) { if (data) return this.prisma.notificationPreference.upsert({ where: { userId: caller.id }, update: data, create: { userId: caller.id, ...data } }); return this.prisma.notificationPreference.upsert({ where: { userId: caller.id }, update: {}, create: { userId: caller.id } }); }
   async integrations(caller: Caller) { return this.prisma.connectedTool.findMany({ include: { connections: { where: { userId: caller.id }, select: { id: true, status: true, lastSyncedAt: true } } } }); }
