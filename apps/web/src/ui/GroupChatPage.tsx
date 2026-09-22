@@ -78,6 +78,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
   const [presenterSocketId, setPresenterSocketId] = useState<string | null>(null);
   const [presentationStream, setPresentationStream] = useState<MediaStream | null>(null);
   const [peopleOpen, setPeopleOpen] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   const [raisedHandSocketIds, setRaisedHandSocketIds] = useState<string[]>([]);
   const socketRef = useRef<Socket | null>(null);
   const callRef = useRef<ActiveCall | null>(null);
@@ -325,6 +326,22 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
     try { await request(`/polls/${hub.poll.pollId}/vote`, { method: 'POST', body: JSON.stringify({ optionId }) }); setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); } catch (error: any) { notify(error.message); }
   }
 
+  async function leaveGroup() {
+    if (!hub || !selectedGroupId) return;
+    if (!window.confirm(`Leave “${hub.group.name}”? You will lose access to its chat, projects and tasks.`)) return;
+    setLeaving(true);
+    try {
+      await request(`/groups/${selectedGroupId}/leave`, { method: 'POST' });
+      if (call) clearCall();
+      const remaining = await request<GroupSummary[]>('/groups');
+      setGroups(remaining);
+      setHub(null);
+      onSelectGroup(remaining[0]?.id ?? '');
+      notify('You left the group.');
+    } catch (error: any) { notify(error.message); }
+    finally { setLeaving(false); }
+  }
+
   async function startProject() {
     const winner = hub?.poll?.options.slice().sort((a, b) => b.votes - a.votes)[0];
     if (!winner) return notify('Open a vote in Idea Management first.');
@@ -351,7 +368,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
       <aside className="gc-left-panel"><div className="gc-left-head"><h3>Chats</h3><button title="New chat">＋</button></div><div className="gc-search"><span>⌕</span><input placeholder="Search chats..." /></div><div className="gc-chat-list">{groups.length ? groups.map((group) => <button className={`gc-chat-item ${group.id === selectedGroupId ? 'active' : ''}`} key={group.id} onClick={() => onSelectGroup(group.id)}><GroupAvatar name={group.name} className="gc-list-avatar" /><span><strong>{group.name}</strong><small>{group._count.projects} projects · {group._count.ideas} ideas</small></span></button>) : <div className="gc-panel-empty">Your groups will appear here.</div>}</div><div className="gc-mini-calendar"><strong>{new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</strong><span>Your scheduled events will appear here.</span></div></aside>
       {hub ? <>
         <main className="gc-main-chat">
-          <header className="gc-chat-header"><GroupAvatar name={hub.group.name} className="gc-list-avatar large" /><div><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => notify('Add members from My Groups → Group Hub.')}>Add Members</button><button>Search</button></div></header>
+          <header className="gc-chat-header"><GroupAvatar name={hub.group.name} className="gc-list-avatar large" /><div><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => notify('Add members from My Groups → Group Hub.')}>Add Members</button><button className="gc-leave-btn" disabled={leaving} onClick={() => void leaveGroup()}>{leaving ? 'Leaving…' : 'Leave'}</button></div></header>
           {callStage ?? <><div className="gchat-msgs">{hub.messages.length ? [...hub.messages].reverse().map((message) => { const member = hub.group.members.find((value) => value.userId === message.senderId); const sender = message.senderId === userId ? 'You' : member?.user.fullName ?? 'Group member'; return <div className={`gc-msg ${message.senderId === userId ? 'me' : ''}`} key={message.id}><MemberAvatar name={member?.user.fullName ?? sender} avatarUrl={member?.user.avatarUrl} className="gc-message-avatar" /><div className="gc-bub"><div className="gc-name">{sender}</div><div className="gc-txt">{message.body}</div><div className="gc-time">{new Date(message.createdAt).toLocaleString()}</div></div></div>; }) : <div className="legacy-empty">Choose or create a group to begin a conversation.</div>}</div><form className="gchat-ir" onSubmit={send}><input className="gchat-input" name="body" placeholder="Type a message to your group…" autoComplete="off" /><button className="gchat-send">Send</button></form></>}
         </main>
         <aside className="gc-right-panel">

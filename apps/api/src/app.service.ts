@@ -179,6 +179,22 @@ export class AppService {
   }
   async addGroupMemberByEmail(caller: Caller, groupId: string, email: string) { const user = await this.prisma.user.findUnique({ where: { email } }); if (!user) fail('NOT_FOUND', 'No registered account uses that email address', 404); return this.addGroupMember(caller, groupId, user.id); }
   async removeGroupMember(caller: Caller, groupId: string, userId: string) { await this.member(groupId, caller.id, true); await this.prisma.groupMember.delete({ where: { groupId_userId: { groupId, userId } } }); return { ok: true }; }
+  /**
+   * Self-service exit, unlike removeGroupMember which is leader-only.
+   * The last leader is held back so a group cannot be left without anyone able to administer it.
+   */
+  async leaveGroup(caller: Caller, groupId: string) {
+    const membership = await this.member(groupId, caller.id);
+    if (membership.role === ProjectRole.Project_Leader) {
+      const leaders = await this.prisma.groupMember.count({ where: { groupId, role: ProjectRole.Project_Leader } });
+      if (leaders <= 1) fail('VALIDATION_FAILED', 'Promote another member to leader before you leave this group', 400);
+    }
+    await this.prisma.$transaction([
+      this.prisma.projectMember.deleteMany({ where: { userId: caller.id, project: { groupId } } }),
+      this.prisma.groupMember.delete({ where: { groupId_userId: { groupId, userId: caller.id } } }),
+    ]);
+    return { ok: true };
+  }
   async createProject(caller: Caller, input: any) { await this.member(input.groupId, caller.id); const memberIds = [...new Set([caller.id, ...(input.memberIds ?? [])])]; for (const userId of memberIds) await this.member(input.groupId, userId); return this.prisma.project.create({ data: { ...input, createdBy: caller.id, members: { create: memberIds.map((userId) => ({ userId, role: userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } }, include: { members: true } }); }
   async projects(caller: Caller) { return this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } } }, include: { group: true, members: { where: { userId: caller.id } }, tasks: true, _count: { select: { members: true } } } }); }
   async project(caller: Caller, id: string) { await this.projectMember(id, caller.id); return this.prisma.project.findUniqueOrThrow({ where: { id }, include: { group: { include: { members: { include: { user: { select: { id: true, fullName: true } } } } } }, members: { include: { user: { select: { id: true, fullName: true } } } }, tasks: { include: { assignments: { where: { active: true } } } } } }); }
