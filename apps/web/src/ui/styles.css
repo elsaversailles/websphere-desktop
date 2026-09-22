@@ -247,3 +247,30 @@
 .sb-group.open>.sb-sub,.sb-group:hover>.sb-sub{grid-template-rows:1fr}
 .sb-sub-inner{display:grid;gap:2px;min-height:0;overflow:hidden;margin:0 0 0 9px;padding:2px 0 4px 7px;border-left:1px solid rgba(255,255,255,.16)}
 .sb-sub .sb-item{font-size:12.5px}
+/* burger toggle: sits flush on the sidebar blue with no chrome of its own */
+.sidebar-toggle,.sidebar-reopen{width:34px;height:34px;border:0;border-radius:9px;color:#fff;transition:background .15s ease}
+.sidebar-toggle{flex:0 0 34px;background:transparent;box-shadow:none}
+.sidebar-toggle:hover{background:rgba(255,255,255,.16)}
+.sidebar-toggle:active{background:rgba(255,255,255,.24)}
+.sidebar-toggle:focus-visible{outline:2px solid rgba(255,255,255,.75);outline-offset:2px}
+/* the reopen chip floats over light page content, so it keeps a solid accent fill to stay visible */
+.sidebar-reopen{background:var(--acc);box-shadow:0 4px 12px rgba(11,58,82,.22)}
+.sidebar-reopen:hover{background:var(--acc2)}
+.sidebar-reopen:focus-visible{outline:2px solid var(--acc2);outline-offset:2px}
+/* Leave reads as destructive, so it is tinted apart from the other header actions */
+.gc-header-actions button.gc-leave-btn{border-color:rgba(214,59,59,.45);color:var(--red)}
+.gc-header-actions button.gc-leave-btn:hover:not(:disabled){background:rgba(214,59,59,.1);border-color:var(--red)}
+/* members and idea voting were left too small by the earlier density pass: +3px across both panels */
+.gc-side-title h3{font-size:13px}
+.gc-side-title>span{font-size:12px}
+.gc-member-row{padding:7px 0}
+.gc-member-row strong{font-size:12px}
+.gc-member-row small{font-size:11px}
+.gc-voting .gc-side-title h3{font-size:13px}
+.gc-voting>p{font-size:12px}
+.gc-poll-option strong{font-size:12px}
+.gc-poll-option small{font-size:11px}
+.gc-poll-option-heading strong{font-size:13px}
+.gc-poll-option-heading span{font-size:12px}
+.gc-voter-list{min-height:15px;font-size:11px}
+.gc-poll-option button{font-size:12px}
