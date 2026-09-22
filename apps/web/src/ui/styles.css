@@ -274,3 +274,16 @@
 .gc-poll-option-heading span{font-size:12px}
 .gc-voter-list{min-height:15px;font-size:11px}
 .gc-poll-option button{font-size:12px}
+/* logout confirmation — same backdrop blur as the AI chatbox overlay */
+.logout-ov{position:fixed;inset:0;z-index:9700;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(11,58,82,.18);backdrop-filter:blur(30px)}
+.logout-box{width:min(420px,100%);padding:32px 34px 28px;border:1px solid var(--acc);border-radius:20px;background:linear-gradient(180deg,#f2fafe 0%,#e8f5fc 100%);box-shadow:0 26px 70px rgba(11,58,82,.24);text-align:center}
+.logout-mark{display:grid;place-items:center;width:64px;height:64px;margin:0 auto 18px;border-radius:50%;background:rgba(214,59,59,.12);color:var(--red)}
+.logout-box h2{font-size:17px;font-weight:800;line-height:1.35;color:var(--ink)}
+.logout-acts{display:flex;justify-content:center;gap:14px;margin-top:24px}
+.logout-acts button{min-width:118px;padding:12px 20px;border-radius:10px;font-size:14px;font-weight:800;transition:background .15s ease,border-color .15s ease}
+.logout-cancel{border:2px solid var(--acc);background:transparent;color:var(--acc)}
+.logout-cancel:hover:not(:disabled){background:rgba(0,56,168,.08)}
+.logout-confirm{border:2px solid rgba(214,59,59,.35);background:rgba(214,59,59,.1);color:var(--red)}
+.logout-confirm:hover:not(:disabled){background:rgba(214,59,59,.18);border-color:var(--red)}
+.logout-acts button:focus-visible{outline:2px solid var(--acc2);outline-offset:2px}
+@media(max-width:480px){.logout-box{padding:26px 22px 22px}.logout-acts{flex-direction:column-reverse}.logout-acts button{width:100%}}
