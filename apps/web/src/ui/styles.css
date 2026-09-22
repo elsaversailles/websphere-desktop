@@ -136,3 +136,56 @@
 
 /* Dashboard project creation uses the earlier 920px form width and stays inside any viewport. */
 .project-modal-overlay{padding:clamp(12px,2vw,24px);overflow-y:auto;background:rgba(11,58,82,.34);backdrop-filter:blur(16px)}.modal-box.project-modal{width:min(600px,calc(100vw - clamp(24px,4vw,48px)));max-width:600px;height:auto;max-height:calc(100dvh - clamp(24px,4vw,48px));padding:clamp(22px,3vw,34px) clamp(18px,3vw,28px);background:#d1ebf7;overflow-y:auto;scrollbar-width:none}.modal-box.project-modal::-webkit-scrollbar{display:none}@media(max-width:640px){.project-modal-overlay{padding:12px}.modal-box.project-modal{width:calc(100vw - 24px);max-height:calc(100dvh - 24px);padding:28px 22px}}
+/* dashboard semantic colour scale — green (coasting) → blue (steady) → amber (watch) → red (needs attention) */
+.pb.g{background:var(--grn)}.pb.ac{background:var(--acc)}.pb.y{background:var(--yel)}.pb.r{background:var(--red)}
+.pb-val{font-weight:800;font-size:11px}.pb-val.g{color:var(--grn)}.pb-val.ac{color:var(--acc)}.pb-val.y{color:var(--yel)}.pb-val.r{color:var(--red)}
+.tbl td.due-g{color:var(--grn);font-weight:700}.tbl td.due-ac{color:var(--acc);font-weight:700}.tbl td.due-y{color:var(--yel);font-weight:700}.tbl td.due-r{color:var(--red);font-weight:800}
+.cc-note{color:var(--sub);font-size:11px;font-weight:700}
+/* calendar: month nav, out-of-month days, and a deadline dot tinted by urgency */
+.calendar-arrows{display:inline-flex;gap:6px;letter-spacing:normal}
+.calendar-arrows button{display:grid;place-items:center;width:22px;height:22px;border:1px solid var(--bdr);border-radius:6px;background:rgba(234,246,252,.9);color:var(--acc);font-size:13px;font-weight:800;line-height:1}
+.calendar-arrows button:hover{background:var(--acc);border-color:var(--acc);color:#fff}
+.calendar-grid>span{position:relative}
+.calendar-grid>span.outside{color:var(--sub);opacity:.4}
+.calendar-grid>span.has-deadline{font-weight:800}
+.calendar-day-dot{display:block;width:4px;height:4px;border-radius:50%;background:var(--acc)}
+.calendar-grid .calendar-day-dot{position:absolute;left:50%;bottom:1px;transform:translateX(-50%)}
+.calendar-grid>span.today .calendar-day-dot{box-shadow:0 0 0 1px rgba(255,255,255,.95)}
+.calendar-day-dot.g{background:var(--grn)}.calendar-day-dot.ac{background:var(--acc)}.calendar-day-dot.y{background:var(--yel)}.calendar-day-dot.r{background:var(--red)}
+.calendar-legend{display:flex;justify-content:center;gap:10px;margin-top:11px}
+.calendar-legend span{display:inline-flex;align-items:center;gap:4px;color:var(--sub);font-size:9px;font-weight:700}
+/* upcoming deadlines: date chip, copy, and urgency badge all share one tone */
+.deadline-row{display:flex;align-items:center;gap:12px;padding:11px 12px;margin-bottom:9px;border:1px solid var(--bdr);border-left-width:3px;border-radius:10px;background:rgba(234,246,252,.6)}
+.deadline-row:last-child{margin-bottom:0}
+.deadline-row.tone-g{border-left-color:var(--grn);background:rgba(30,158,98,.06)}
+.deadline-row.tone-ac{border-left-color:var(--acc);background:rgba(0,56,168,.05)}
+.deadline-row.tone-y{border-left-color:var(--yel);background:rgba(201,125,16,.06)}
+.deadline-row.tone-r{border-left-color:var(--red);background:rgba(214,59,59,.06)}
+.deadline-date{display:grid;place-items:center;flex:0 0 auto;width:38px;padding:5px 0;border-radius:9px;line-height:1.1;background:rgba(0,56,168,.1);color:var(--acc)}
+.deadline-date strong{font-size:15px;font-weight:800}
+.deadline-date small{font-size:8px;font-weight:800;letter-spacing:.5px}
+.deadline-date.g{background:rgba(30,158,98,.14);color:var(--grn)}
+.deadline-date.ac{background:rgba(0,56,168,.12);color:var(--acc)}
+.deadline-date.y{background:rgba(201,125,16,.14);color:var(--yel)}
+.deadline-date.r{background:rgba(214,59,59,.14);color:var(--red)}
+.deadline-copy{flex:1;min-width:0}
+.deadline-copy strong,.deadline-copy small{display:block}
+.deadline-copy strong{font-size:12px;font-weight:800;line-height:1.3}
+.deadline-copy small{margin-top:3px;color:var(--sub);font-size:10px;font-weight:600}
+/* team activity feed */
+.activity-list{display:grid}
+.activity-row{display:flex;align-items:flex-start;gap:11px;padding:11px 0;border-bottom:1px solid rgba(168,216,240,.42)}
+.activity-row:last-child{border-bottom:0}
+.activity-avatar{width:28px;height:28px;font-size:10px;color:#fff}
+.ava.tone-ac{background:var(--acc)}.ava.tone-g{background:var(--grn)}.ava.tone-y{background:var(--yel)}.ava.tone-r{background:var(--red)}.ava.tone-v{background:#6B4FE0}.ava.tone-tl{background:#0E8FA8}
+.activity-copy{flex:1;min-width:0}
+.activity-copy strong,.activity-copy small{display:block}
+.activity-copy strong{font-size:12px;font-weight:700;line-height:1.4}
+.activity-verb{color:var(--sub);font-weight:600}
+.activity-copy small{margin-top:3px;color:var(--sub);font-size:10px;font-weight:600}
+/* project progress overview rows */
+.project-progress-row{display:grid;grid-template-columns:minmax(0,1fr) 110px 44px;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(168,216,240,.42)}
+.project-progress-row:last-child{border-bottom:0}
+.project-progress-row>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:600}
+.project-progress-row strong{text-align:right;font-size:12px}
+@media(max-width:560px){.project-progress-row{grid-template-columns:minmax(0,1fr) 70px 40px}.deadline-row{flex-wrap:wrap}}

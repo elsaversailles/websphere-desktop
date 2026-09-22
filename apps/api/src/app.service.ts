@@ -349,6 +349,29 @@ export class AppService {
     return { ok: true, delivered: created.length };
   }
   async notifications(caller: Caller) { return this.prisma.notification.findMany({ where: { userId: caller.id }, orderBy: { createdAt: 'desc' } }); }
+  /** Recent workflow events across every project the caller belongs to, shaped for the dashboard activity feed. */
+  async activityFeed(caller: Caller, take = 8) {
+    const events = await this.prisma.workflowEvent.findMany({
+      where: { project: { members: { some: { userId: caller.id } } } },
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: { task: { select: { id: true, title: true } }, project: { select: { id: true, title: true } } },
+    });
+    const actorIds = [...new Set(events.map((event: any) => event.actorId))];
+    const actors = actorIds.length ? await this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, fullName: true, avatarUrl: true } }) : [];
+    return events.map((event: any) => ({
+      id: event.id,
+      type: event.type,
+      fromValue: event.fromValue,
+      toValue: event.toValue,
+      createdAt: event.createdAt,
+      taskId: event.taskId,
+      taskTitle: event.task?.title ?? null,
+      projectId: event.projectId,
+      projectTitle: event.project.title,
+      actor: actors.find((actor: any) => actor.id === event.actorId) ?? null,
+    }));
+  }
   async markRead(caller: Caller, id: string) { return this.prisma.notification.updateMany({ where: { id, userId: caller.id }, data: { read: true } }); }
   async preferences(caller: Caller, data?: any) { if (data) return this.prisma.notificationPreference.upsert({ where: { userId: caller.id }, update: data, create: { userId: caller.id, ...data } }); return this.prisma.notificationPreference.upsert({ where: { userId: caller.id }, update: {}, create: { userId: caller.id } }); }
   async integrations(caller: Caller) { return this.prisma.connectedTool.findMany({ include: { connections: { where: { userId: caller.id }, select: { id: true, status: true, lastSyncedAt: true } } } }); }
