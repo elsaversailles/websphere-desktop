@@ -34,6 +34,8 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [incomingCall, setIncomingCall] = useState<{ groupId: string; kind: CallKind } | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [logoutOpen, setLogoutOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   const sections = administrator ? adminSections : userSections;
   /** Sidebar is two-level: only section headers show by default, and the section owning the current page stays open. */
   const [openSections, setOpenSections] = useState<string[]>(() => {
@@ -45,6 +47,13 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     const owner = sections.find((section) => section.links.some((link) => link.id === page));
     if (owner) setOpenSections((current) => current.includes(owner.title) ? current : [...current, owner.title]);
   }, [page, sections]);
+
+  useEffect(() => {
+    if (!logoutOpen) return;
+    function closeOnEscape(event: KeyboardEvent) { if (event.key === 'Escape' && !loggingOut) setLogoutOpen(false); }
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [logoutOpen, loggingOut]);
 
   function toggleSection(title: string) {
     setOpenSections((current) => current.includes(title) ? current.filter((entry) => entry !== title) : [...current, title]);
@@ -89,6 +98,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   }, [session.access, session.user.id, notify]);
 
   async function logout() {
+    setLoggingOut(true);
     try { await request('/auth/logout', { method: 'POST' }); } catch { /* local session is always cleared */ }
     clearSession(); onLogout();
   }
@@ -116,7 +126,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
           </div>
         </div>;
       })}</nav>
-      <div className="sb-bot"><div className="uchip">{session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className="ava">{initials(session.user.fullName)}</span>}<span className="user-detail"><strong className="u-name">{session.user.fullName}</strong><small className="u-role">{administrator ? 'Administrator' : 'Member'}</small></span></div><button className="logout-btn" onClick={() => void logout()} title={sidebarCollapsed ? 'Log out' : undefined}><span aria-hidden="true">↪</span><span className="logout-label">Logout</span></button></div>
+      <div className="sb-bot"><div className="uchip">{session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className="ava">{initials(session.user.fullName)}</span>}<span className="user-detail"><strong className="u-name">{session.user.fullName}</strong><small className="u-role">{administrator ? 'Administrator' : 'Member'}</small></span></div><button className="logout-btn" onClick={() => setLogoutOpen(true)} title={sidebarCollapsed ? 'Log out' : undefined}><span aria-hidden="true">↪</span><span className="logout-label">Logout</span></button></div>
     </aside>
     {sidebarCollapsed ? <button className="sidebar-reopen" type="button" onClick={() => setSidebarCollapsed(false)} aria-label="Show sidebar navigation" title="Show sidebar navigation"><BurgerIcon /></button> : null}
     <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><GlobeIcon />WebSphere</span><select value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}</select></div><div className="main">
@@ -139,6 +149,16 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     </div></div>
   </div>
   <AiAssistantModal open={assistantOpen} onClose={() => setAssistantOpen(false)} notify={notify} />
+  {logoutOpen ? <div className="logout-ov" onMouseDown={(event) => { if (event.target === event.currentTarget && !loggingOut) setLogoutOpen(false); }}>
+    <div className="logout-box" role="dialog" aria-modal="true" aria-labelledby="logout-confirm-title">
+      <span className="logout-mark" aria-hidden="true"><LogoutIcon /></span>
+      <h2 id="logout-confirm-title">Are you sure you want to Log out?</h2>
+      <div className="logout-acts">
+        <button type="button" className="logout-cancel" disabled={loggingOut} onClick={() => setLogoutOpen(false)}>Cancel</button>
+        <button type="button" className="logout-confirm" disabled={loggingOut} onClick={() => void logout()}>{loggingOut ? 'Logging out…' : 'Log out'}</button>
+      </div>
+    </div>
+  </div> : null}
   </main>;
 }
 
@@ -171,6 +191,7 @@ function AdminAccounts({ notify }: { notify: (message: string) => void }) {
 
 function GlobeIcon() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#0EA0D0" strokeWidth="2"/><ellipse cx="12" cy="12" rx="4" ry="9" stroke="#0EA0D0" strokeWidth="1.5"/><line x1="3" y1="12" x2="21" y2="12" stroke="#0EA0D0" strokeWidth="1.5"/></svg>; }
 function ChevronIcon() { return <svg className="sb-sec-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>; }
+function LogoutIcon() { return <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>; }
 function BurgerIcon() { return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>; }
 function NavIcon({ page }: { page: Page }) {
   const common = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
