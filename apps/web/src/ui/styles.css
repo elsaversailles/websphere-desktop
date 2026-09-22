@@ -298,5 +298,5 @@
 .notif-popover-item strong{font-size:13.5px;line-height:1.4}
 .notif-popover-item small{margin-top:4px;font-size:11.5px;font-weight:600}
 .notif-popover-empty{padding:22px 20px;font-size:12.5px}
-/* Create Project modal border, per mock: heavier accent rule and a softer corner. */
-.modal-box.project-modal{border:2px solid var(--acc);border-radius:20px}
+/* Create Project modal border: thin accent rule with a softer corner. */
+.modal-box.project-modal{border:1px solid var(--acc);border-radius:20px}
