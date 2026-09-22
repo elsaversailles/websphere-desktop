@@ -195,7 +195,10 @@ export class AppService {
     ]);
     return { ok: true };
   }
-  async createProject(caller: Caller, input: any) { await this.member(input.groupId, caller.id); const memberIds = [...new Set([caller.id, ...(input.memberIds ?? [])])]; for (const userId of memberIds) await this.member(input.groupId, userId); return this.prisma.project.create({ data: { ...input, createdBy: caller.id, members: { create: memberIds.map((userId) => ({ userId, role: userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } }, include: { members: true } }); }
+  // memberIds drives the members relation and is not a Project column, so it has to be peeled off
+  // before the rest of the payload is spread into create(). projectSchema defaults it to [], which
+  // means it is always present and would otherwise always be rejected by Prisma.
+  async createProject(caller: Caller, input: any) { await this.member(input.groupId, caller.id); const { memberIds: requested, ...data } = input; const memberIds = [...new Set([caller.id, ...(requested ?? [])])]; for (const userId of memberIds) await this.member(input.groupId, userId); return this.prisma.project.create({ data: { ...data, createdBy: caller.id, members: { create: memberIds.map((userId) => ({ userId, role: userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } }, include: { members: true } }); }
   async projects(caller: Caller) { return this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } } }, include: { group: true, members: { where: { userId: caller.id } }, tasks: true, _count: { select: { members: true } } } }); }
   async project(caller: Caller, id: string) { await this.projectMember(id, caller.id); return this.prisma.project.findUniqueOrThrow({ where: { id }, include: { group: { include: { members: { include: { user: { select: { id: true, fullName: true } } } } } }, members: { include: { user: { select: { id: true, fullName: true } } } }, tasks: { include: { assignments: { where: { active: true } } } } } }); }
   async updateProject(caller: Caller, id: string, input: any) { await this.projectMember(id, caller.id, true); const { memberIds, ...data } = input; return this.prisma.project.update({ where: { id }, data }); }
