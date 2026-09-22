@@ -287,3 +287,16 @@
 .logout-confirm:hover:not(:disabled){background:rgba(214,59,59,.18);border-color:var(--red)}
 .logout-acts button:focus-visible{outline:2px solid var(--acc2);outline-offset:2px}
 @media(max-width:480px){.logout-box{padding:26px 22px 22px}.logout-acts{flex-direction:column-reverse}.logout-acts button{width:100%}}
+/* Notification popover: fixed readable type. The earlier vw-scaled clamps capped item text at
+   10-12px on normal displays, which is what made the panel hard to read. */
+.notif-popover{width:min(342px,calc(100vw - 28px));border-radius:16px}
+.notif-popover-header{gap:12px;padding:16px 20px}
+.notif-popover-header h3{font-size:15px}
+.notif-popover-header button{font-size:13px}
+.notif-popover-item{gap:12px;padding:15px 20px}
+.notif-popover-dot{width:9px;height:9px;margin-top:6px}
+.notif-popover-item strong{font-size:13.5px;line-height:1.4}
+.notif-popover-item small{margin-top:4px;font-size:11.5px;font-weight:600}
+.notif-popover-empty{padding:22px 20px;font-size:12.5px}
+/* Create Project modal border, per mock: heavier accent rule and a softer corner. */
+.modal-box.project-modal{border:2px solid var(--acc);border-radius:20px}
