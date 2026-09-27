@@ -128,7 +128,7 @@
 .notification-target td{background:rgba(14,160,208,.13)!important;box-shadow:inset 3px 0 0 var(--acc)}
 
 /* The sidebar can condense to an icon rail without hiding workspace navigation. */
-.sidebar{transition:width .2s ease,padding .2s ease}.sb-head{display:flex;align-items:center;gap:7px;padding:0 0 16px;margin-bottom:6px}.sb-head .sb-brand{flex:1;min-width:0;margin:0;padding:0}.sb-logo{display:block;height:64px;width:auto;max-width:100%;object-fit:contain;border-radius:10px;background:#fff}.mobile-header .sb-logo{height:36px}.sidebar-toggle,.sidebar-reopen{display:grid;place-items:center;width:30px;height:30px;border:1px solid rgba(255,255,255,.28);border-radius:7px;background:rgba(0,56,168,.92);color:#fff;box-shadow:0 4px 12px rgba(11,58,82,.18)}.sidebar-toggle{flex:0 0 30px;background:rgba(255,255,255,.1);box-shadow:none}.sidebar-toggle:hover,.sidebar-reopen:hover{background:rgba(0,56,168,.75)}.sidebar.collapsed{width:0;padding:0;border-right:0;overflow:hidden}.sidebar.collapsed>*{opacity:0;pointer-events:none}.sidebar-reopen{position:fixed;z-index:30;top:14px;left:14px}
+.sidebar{transition:width .2s ease,padding .2s ease}.sb-head{display:flex;align-items:center;gap:7px;padding:0 0 16px;margin-bottom:6px}.sb-head .sb-brand{flex:1;min-width:0;margin:0;padding:0}.sb-logo{display:block;height:64px;width:auto;max-width:100%;object-fit:contain}.mobile-header .sb-logo{height:36px}.sidebar-toggle,.sidebar-reopen{display:grid;place-items:center;width:30px;height:30px;border:1px solid rgba(255,255,255,.28);border-radius:7px;background:rgba(0,56,168,.92);color:#fff;box-shadow:0 4px 12px rgba(11,58,82,.18)}.sidebar-toggle{flex:0 0 30px;background:rgba(255,255,255,.1);box-shadow:none}.sidebar-toggle:hover,.sidebar-reopen:hover{background:rgba(0,56,168,.75)}.sidebar.collapsed{width:0;padding:0;border-right:0;overflow:hidden}.sidebar.collapsed>*{opacity:0;pointer-events:none}.sidebar-reopen{position:fixed;z-index:30;top:14px;left:14px}
 
 /* Calls stay inside the active group chat, preserving the WebSphere shell and group context. */
 .gc-main-chat .call-stage{position:relative;z-index:1;inset:auto;flex:1;min-height:0;padding:14px 16px 18px;box-shadow:none}.gc-main-chat .call-media-grid{grid-template-columns:repeat(auto-fit,minmax(160px,1fr));grid-auto-rows:minmax(120px,1fr);padding:12px 0 16px}.gc-main-chat .call-media-grid.has-presentation{grid-template-columns:minmax(0,1fr) minmax(132px,.3fr)}.gc-main-chat .call-people-panel{right:14px;bottom:78px;width:min(310px,calc(100% - 28px));max-height:calc(100% - 112px)}
@@ -235,7 +235,7 @@
 .milestone-copy strong{font-size:12px;font-weight:800;line-height:1.3}
 .milestone-copy small{margin-top:3px;color:var(--sub);font-size:10px;font-weight:600}
 @media(max-width:560px){.deadline-row{flex-wrap:wrap}}
-/* two-level sidebar: section headers are the only always-visible controls, items reveal on click or hover */
+/* two-level sidebar: section headers are the only always-visible controls; click keeps a section open inline (keyboard/touch fallback), hover pops its items out in a brand-colored flyout */
 .sb-group{display:block}
 .sb-sec{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;margin-top:4px;padding:10px;border:1px solid transparent;border-radius:9px;background:transparent;font-size:10px;font-weight:700;color:rgba(255,255,255,.62);text-transform:uppercase;letter-spacing:1.2px;text-align:left;transition:background .15s ease,color .15s ease}
 .sb-sec:hover{background:rgba(255,255,255,.12);color:#fff}
@@ -244,9 +244,14 @@
 .sb-sec-chevron{flex:0 0 auto;opacity:.75;transition:transform .2s ease}
 .sb-group.open>.sb-sec .sb-sec-chevron,.sb-group:hover>.sb-sec .sb-sec-chevron{transform:rotate(90deg)}
 .sb-sub{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s ease}
-.sb-group.open>.sb-sub,.sb-group:hover>.sb-sub{grid-template-rows:1fr}
+.sb-group.open>.sb-sub{grid-template-rows:1fr}
 .sb-sub-inner{display:grid;gap:2px;min-height:0;overflow:hidden;margin:0 0 0 9px;padding:2px 0 4px 7px;border-left:1px solid rgba(255,255,255,.16)}
 .sb-sub .sb-item{font-size:12.5px}
+/* the flyout escapes the sidebar's own scroll clipping via position:fixed, positioned in JS from the hovered section's rect */
+.sb-flyout{position:fixed;z-index:45;min-width:220px;max-width:280px;padding:8px;border-radius:14px;background:linear-gradient(165deg,var(--acc) 0%,var(--acc2) 100%);box-shadow:0 18px 44px rgba(0,0,60,.38),0 2px 10px rgba(0,0,60,.22);animation:sb-flyout-in .16s ease}
+.sb-flyout-title{padding:6px 10px 8px;font-size:10px;font-weight:700;color:rgba(255,255,255,.65);text-transform:uppercase;letter-spacing:1.2px;border-bottom:1px solid rgba(255,255,255,.16);margin-bottom:4px}
+.sb-flyout-items{display:grid;gap:2px}
+@keyframes sb-flyout-in{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:translateX(0)}}
 /* burger toggle: sits flush on the sidebar blue with no chrome of its own */
 .sidebar-toggle,.sidebar-reopen{width:34px;height:34px;border:0;border-radius:9px;color:#fff;transition:background .15s ease}
 .sidebar-toggle{flex:0 0 34px;background:transparent;box-shadow:none}
