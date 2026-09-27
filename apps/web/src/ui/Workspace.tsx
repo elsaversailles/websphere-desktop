@@ -37,16 +37,6 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const sections = administrator ? adminSections : userSections;
-  /** Sidebar is two-level: only section headers show by default, and the section owning the current page stays open. */
-  const [openSections, setOpenSections] = useState<string[]>(() => {
-    const landing: Page = administrator ? 'admin' : 'dashboard';
-    const owner = (administrator ? adminSections : userSections).find((section) => section.links.some((link) => link.id === landing));
-    return owner ? [owner.title] : [];
-  });
-  useEffect(() => {
-    const owner = sections.find((section) => section.links.some((link) => link.id === page));
-    if (owner) setOpenSections((current) => current.includes(owner.title) ? current : [...current, owner.title]);
-  }, [page, sections]);
 
   useEffect(() => {
     if (!logoutOpen) return;
@@ -54,10 +44,6 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     document.addEventListener('keydown', closeOnEscape);
     return () => document.removeEventListener('keydown', closeOnEscape);
   }, [logoutOpen, loggingOut]);
-
-  function toggleSection(title: string) {
-    setOpenSections((current) => current.includes(title) ? current.filter((entry) => entry !== title) : [...current, title]);
-  }
 
   /** Hover flyout: mousing over a section header pops its links out beside the sidebar, in the brand gradient. */
   const [flyoutTitle, setFlyoutTitle] = useState<string | null>(null);
@@ -77,6 +63,11 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   }
   function cancelCloseFlyout() {
     if (flyoutHideTimer.current) { clearTimeout(flyoutHideTimer.current); flyoutHideTimer.current = null; }
+  }
+  /** Touch/click fallback for devices without hover: tapping a section toggles its flyout instead of leaving it stuck open. */
+  function toggleFlyout(title: string, target: HTMLElement) {
+    if (flyoutTitle === title) { setFlyoutTitle(null); return; }
+    openFlyout(title, target);
   }
   useEffect(() => {
     if (!flyoutTitle) return;
@@ -139,25 +130,25 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
 
   return <main className="page on">{incomingCall && (page !== 'chat' || incomingCall.groupId !== selectedGroupId) ? <div className="workspace-call-invite call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => { setSelectedGroupId(incomingCall.groupId); setPage('chat'); }}>Join call</button><button className="btn-o btn-sm" onClick={() => setIncomingCall(null)}>Dismiss</button></div> : null}<div className="layout">
     <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
-      <div className="sb-head"><button className="sb-brand" onClick={() => setPage(administrator ? 'admin' : 'dashboard')}><img className="sb-logo" src="/logo.png" alt="WebSphere" /></button><button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'} title={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'}><BurgerIcon /></button></div>
+      <div className="sb-head"><button className="sb-brand" onClick={() => setPage(administrator ? 'admin' : 'dashboard')}><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">WebSphere</span></button><button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'} title={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'}><BurgerIcon /></button></div>
       <nav aria-label="Main navigation">{sections.map((section) => {
-        const expanded = openSections.includes(section.title);
         const holdsActivePage = section.links.some((link) => link.id === page);
-        const submenuId = `sb-sub-${section.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`;
-        return <div
-          className={`sb-group ${expanded ? 'open' : ''}`}
+        const isFlyoutOpen = flyoutTitle === section.title;
+        return <button
+          type="button"
+          className={`sb-sec ${holdsActivePage ? 'has-active' : ''} ${isFlyoutOpen ? 'flyout-open' : ''}`}
           key={section.title}
+          aria-haspopup="menu"
+          aria-expanded={isFlyoutOpen}
           onMouseEnter={(event) => openFlyout(section.title, event.currentTarget)}
           onMouseLeave={scheduleCloseFlyout}
+          onFocus={(event) => openFlyout(section.title, event.currentTarget)}
+          onBlur={scheduleCloseFlyout}
+          onClick={(event) => toggleFlyout(section.title, event.currentTarget)}
         >
-          <button type="button" className={`sb-sec ${holdsActivePage ? 'has-active' : ''}`} aria-expanded={expanded} aria-controls={submenuId} onClick={() => toggleSection(section.title)}>
-            <span>{section.title}</span>
-            <ChevronIcon />
-          </button>
-          <div className="sb-sub" id={submenuId}>
-            <div className="sb-sub-inner">{section.links.map((link) => <button className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => setPage(link.id)} tabIndex={expanded ? undefined : -1} title={sidebarCollapsed ? link.label : undefined}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>
-          </div>
-        </div>;
+          <span>{section.title}</span>
+          <ChevronIcon />
+        </button>;
       })}</nav>
       {flyoutSection ? <div
         className="sb-flyout"
@@ -171,7 +162,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       <div className="sb-bot"><div className="uchip">{session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className="ava">{initials(session.user.fullName)}</span>}<span className="user-detail"><strong className="u-name">{session.user.fullName}</strong><small className="u-role">{administrator ? 'Administrator' : 'Member'}</small></span></div><button className="logout-btn" onClick={() => setLogoutOpen(true)} title={sidebarCollapsed ? 'Log out' : undefined}><span aria-hidden="true">↪</span><span className="logout-label">Logout</span></button></div>
     </aside>
     {sidebarCollapsed ? <button className="sidebar-reopen" type="button" onClick={() => setSidebarCollapsed(false)} aria-label="Show sidebar navigation" title="Show sidebar navigation"><BurgerIcon /></button> : null}
-    <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><img className="sb-logo" src="/logo.png" alt="WebSphere" /></span><select value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}</select></div><div className="main">
+    <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">WebSphere</span></span><select value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}</select></div><div className="main">
       {page === 'dashboard' ? <Dashboard name={session.user.fullName} notify={notify} onPage={navigate} onNotificationClick={openNotification} /> : null}
       {page === 'groups' ? <GroupsPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onIdeas={() => setPage('ideas')} onChat={() => setPage('chat')} notify={notify} /> : null}
       {page === 'ideas' ? <IdeasPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} /> : null}
