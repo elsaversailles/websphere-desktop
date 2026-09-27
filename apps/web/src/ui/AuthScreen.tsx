@@ -180,7 +180,19 @@ function AuthFeedback({ error, message }: { error: string; message: string }) {
   return <p className={`auth-feedback ${error ? 'error' : 'success'}`} role={error ? 'alert' : 'status'}>{error || message}</p>;
 }
 
+function EyeIcon({ open }: { open: boolean }) {
+  return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    {open ? <>
+      <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </> : <>
+      <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 7 11 7a13.16 13.16 0 0 1-1.67 2.68M6.61 6.61C3.06 8.93 1 12 1 12s4 7 11 7a9.26 9.26 0 0 0 5.39-1.61M9.88 9.88a3 3 0 1 0 4.24 4.24" />
+      <line x1="1" y1="1" x2="23" y2="23" />
+    </>}
+  </svg>;
+}
+
 function AuthField({ label, name, type = 'text', placeholder, list }: { label: string; name: string; type?: string; placeholder: string; list?: string }) {
   const [visible, setVisible] = useState(false);
-  return <label className="auth-field"><span className="lbl">{label}</span><span className={`auth-input-wrap ${list ? 'auth-combo' : ''}`}><input className="afield" required minLength={type === 'password' ? 8 : undefined} name={name} type={type === 'password' && visible ? 'text' : type} placeholder={placeholder} list={list} />{type === 'password' ? <button className="auth-eye" type="button" aria-label={visible ? 'Hide password' : 'Show password'} onClick={() => setVisible((value) => !value)}>{visible ? '◉' : '⊘'}</button> : list ? <span className="auth-arrow">⌄</span> : null}</span></label>;
+  return <label className="auth-field"><span className="lbl">{label}</span><span className="auth-input-wrap"><input className={`afield${type === 'password' ? ' afield-pw' : ''}`} required minLength={type === 'password' ? 8 : undefined} name={name} type={type === 'password' && visible ? 'text' : type} placeholder={placeholder} list={list} />{type === 'password' ? <button className="auth-eye" type="button" aria-label={visible ? 'Hide password' : 'Show password'} onClick={() => setVisible((value) => !value)}><EyeIcon open={visible} /></button> : null}</span></label>;
 }
