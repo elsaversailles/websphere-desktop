@@ -235,7 +235,7 @@
 .milestone-copy strong{font-size:12px;font-weight:800;line-height:1.3}
 .milestone-copy small{margin-top:3px;color:var(--sub);font-size:10px;font-weight:600}
 @media(max-width:560px){.deadline-row{flex-wrap:wrap}}
-/* two-level sidebar: section headers are the only always-visible controls, items reveal on click or hover */
+/* two-level sidebar: section headers are the only always-visible controls; click keeps a section open inline (keyboard/touch fallback), hover pops its items out in a brand-colored flyout */
 .sb-group{display:block}
 .sb-sec{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;margin-top:4px;padding:10px;border:1px solid transparent;border-radius:9px;background:transparent;font-size:10px;font-weight:700;color:rgba(255,255,255,.62);text-transform:uppercase;letter-spacing:1.2px;text-align:left;transition:background .15s ease,color .15s ease}
 .sb-sec:hover{background:rgba(255,255,255,.12);color:#fff}
@@ -244,9 +244,14 @@
 .sb-sec-chevron{flex:0 0 auto;opacity:.75;transition:transform .2s ease}
 .sb-group.open>.sb-sec .sb-sec-chevron,.sb-group:hover>.sb-sec .sb-sec-chevron{transform:rotate(90deg)}
 .sb-sub{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s ease}
-.sb-group.open>.sb-sub,.sb-group:hover>.sb-sub{grid-template-rows:1fr}
+.sb-group.open>.sb-sub{grid-template-rows:1fr}
 .sb-sub-inner{display:grid;gap:2px;min-height:0;overflow:hidden;margin:0 0 0 9px;padding:2px 0 4px 7px;border-left:1px solid rgba(255,255,255,.16)}
 .sb-sub .sb-item{font-size:12.5px}
+/* the flyout escapes the sidebar's own scroll clipping via position:fixed, positioned in JS from the hovered section's rect */
+.sb-flyout{position:fixed;z-index:45;min-width:220px;max-width:280px;padding:8px;border-radius:14px;background:linear-gradient(165deg,var(--acc) 0%,var(--acc2) 100%);box-shadow:0 18px 44px rgba(0,0,60,.38),0 2px 10px rgba(0,0,60,.22);animation:sb-flyout-in .16s ease}
+.sb-flyout-title{padding:6px 10px 8px;font-size:10px;font-weight:700;color:rgba(255,255,255,.65);text-transform:uppercase;letter-spacing:1.2px;border-bottom:1px solid rgba(255,255,255,.16);margin-bottom:4px}
+.sb-flyout-items{display:grid;gap:2px}
+@keyframes sb-flyout-in{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:translateX(0)}}
 /* burger toggle: sits flush on the sidebar blue with no chrome of its own */
 .sidebar-toggle,.sidebar-reopen{width:34px;height:34px;border:0;border-radius:9px;color:#fff;transition:background .15s ease}
 .sidebar-toggle{flex:0 0 34px;background:transparent;box-shadow:none}

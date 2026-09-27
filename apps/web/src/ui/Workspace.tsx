@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import type { CallKind } from '@websphere/shared';
 import { clearSession, getAccessToken, request, saveSession, socketBaseUrl, type Session, type User } from '../api';
@@ -59,6 +59,34 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     setOpenSections((current) => current.includes(title) ? current.filter((entry) => entry !== title) : [...current, title]);
   }
 
+  /** Hover flyout: mousing over a section header pops its links out beside the sidebar, in the brand gradient. */
+  const [flyoutTitle, setFlyoutTitle] = useState<string | null>(null);
+  const [flyoutPos, setFlyoutPos] = useState({ top: 0, left: 0 });
+  const flyoutHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flyoutSection = sections.find((section) => section.title === flyoutTitle) ?? null;
+
+  function openFlyout(title: string, target: HTMLElement) {
+    if (flyoutHideTimer.current) { clearTimeout(flyoutHideTimer.current); flyoutHideTimer.current = null; }
+    const rect = target.getBoundingClientRect();
+    setFlyoutPos({ top: rect.top, left: rect.right + 8 });
+    setFlyoutTitle(title);
+  }
+  function scheduleCloseFlyout() {
+    if (flyoutHideTimer.current) clearTimeout(flyoutHideTimer.current);
+    flyoutHideTimer.current = setTimeout(() => setFlyoutTitle(null), 120);
+  }
+  function cancelCloseFlyout() {
+    if (flyoutHideTimer.current) { clearTimeout(flyoutHideTimer.current); flyoutHideTimer.current = null; }
+  }
+  useEffect(() => {
+    if (!flyoutTitle) return;
+    function close() { setFlyoutTitle(null); }
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [flyoutTitle]);
+  useEffect(() => { if (sidebarCollapsed) setFlyoutTitle(null); }, [sidebarCollapsed]);
+
   function navigate(target: Page) {
     if (target === 'assistant') setAssistantOpen(true);
     else setPage(target);
@@ -116,7 +144,12 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
         const expanded = openSections.includes(section.title);
         const holdsActivePage = section.links.some((link) => link.id === page);
         const submenuId = `sb-sub-${section.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`;
-        return <div className={`sb-group ${expanded ? 'open' : ''}`} key={section.title}>
+        return <div
+          className={`sb-group ${expanded ? 'open' : ''}`}
+          key={section.title}
+          onMouseEnter={(event) => openFlyout(section.title, event.currentTarget)}
+          onMouseLeave={scheduleCloseFlyout}
+        >
           <button type="button" className={`sb-sec ${holdsActivePage ? 'has-active' : ''}`} aria-expanded={expanded} aria-controls={submenuId} onClick={() => toggleSection(section.title)}>
             <span>{section.title}</span>
             <ChevronIcon />
@@ -126,6 +159,15 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
           </div>
         </div>;
       })}</nav>
+      {flyoutSection ? <div
+        className="sb-flyout"
+        style={{ top: flyoutPos.top, left: flyoutPos.left }}
+        onMouseEnter={cancelCloseFlyout}
+        onMouseLeave={scheduleCloseFlyout}
+      >
+        <div className="sb-flyout-title">{flyoutSection.title}</div>
+        <div className="sb-flyout-items">{flyoutSection.links.map((link) => <button className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => { setPage(link.id); setFlyoutTitle(null); }}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>
+      </div> : null}
       <div className="sb-bot"><div className="uchip">{session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className="ava">{initials(session.user.fullName)}</span>}<span className="user-detail"><strong className="u-name">{session.user.fullName}</strong><small className="u-role">{administrator ? 'Administrator' : 'Member'}</small></span></div><button className="logout-btn" onClick={() => setLogoutOpen(true)} title={sidebarCollapsed ? 'Log out' : undefined}><span aria-hidden="true">↪</span><span className="logout-label">Logout</span></button></div>
     </aside>
     {sidebarCollapsed ? <button className="sidebar-reopen" type="button" onClick={() => setSidebarCollapsed(false)} aria-label="Show sidebar navigation" title="Show sidebar navigation"><BurgerIcon /></button> : null}
