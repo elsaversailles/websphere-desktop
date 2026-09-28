@@ -301,3 +301,13 @@
 .notif-popover-empty{padding:22px 20px;font-size:12.5px}
 /* Create Project modal border: thin accent rule with a softer corner. */
 .modal-box.project-modal{border:1px solid var(--acc);border-radius:20px}
+/* ticket status tracking: requester's reply block and the admin's status/reply controls */
+.support-ticket.focused{margin:0 -10px;padding-left:10px;padding-right:10px;border-radius:10px;background:rgba(0,56,168,.06)}
+.support-ticket-reply{margin:9px 0;padding:10px 12px;border-left:3px solid var(--acc);border-radius:0 8px 8px 0;background:rgba(0,56,168,.06)}
+.support-ticket-reply small{display:block;color:var(--acc);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.8px}
+.support-ticket-reply p{margin:4px 0 0}
+.support-ticket-controls{display:grid;grid-template-columns:180px minmax(0,1fr) auto;gap:12px;align-items:end;margin:10px 0}
+.support-ticket-controls label{display:grid;gap:5px;color:var(--sub);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px}
+.support-ticket-controls .ifield{margin:0;padding:9px 12px;resize:vertical}
+.support-ticket-controls .legacy-select{min-width:0;width:100%}
+@media(max-width:780px){.support-ticket-controls{grid-template-columns:1fr}}

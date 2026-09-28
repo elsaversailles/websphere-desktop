@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, Redirect, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { z } from 'zod';
-import { aiAskSchema, announcementSchema, calendarEventSchema, ideaSchema, loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
+import { aiAskSchema, announcementSchema, calendarEventSchema, ideaSchema, loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, ticketUpdateSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
 import { AppService } from './app.service.js';
 import { LocalStorageService } from './local-storage.service.js';
 import { RedisService } from './redis.service.js';
@@ -110,6 +110,8 @@ export class AppController {
   @Post('resources/:id/launch') async launchResource(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.launchResource(await this.caller(auth), id); }
   @Patch('resources/:id') async updateResource(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { const caller = await this.caller(auth); const updated = await this.app.updateLinkedResource(caller, id, parse(resourceUpdateSchema, body)); this.realtime.publishTaskUpdated(updated.projectId, await this.app.task(caller, updated.taskId)); return updated; }
   @Post('support/tickets') async ticket(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.ticket(await this.caller(auth), parse(supportTicketSchema, body)); }
+  @Get('support/tickets') async myTickets(@Headers('authorization') auth: string) { return this.app.myTickets(await this.caller(auth)); }
+  @Roles('Administrator') @Patch('admin/support/tickets/:id') async updateTicket(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.updateTicket(await this.caller(auth), id, parse(ticketUpdateSchema, body)); }
   @Roles('Administrator') @Get('admin/monitoring') async monitoring(@Headers('authorization') auth: string) { return this.app.monitoring(await this.caller(auth)); }
   @Roles('Administrator') @Get('admin/support/tickets') async supportTickets(@Headers('authorization') auth: string) { return this.app.adminSupportTickets(await this.caller(auth)); }
   @Roles('Administrator') @Get('admin/users') async users(@Headers('authorization') auth: string) { const caller = await this.caller(auth); await this.app.admin(caller); return this.app.prisma.user.findMany({ select: { id: true, email: true, fullName: true, role: true, status: true, createdAt: true } }); }

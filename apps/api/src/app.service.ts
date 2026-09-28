@@ -13,11 +13,12 @@ import { JobsService } from './jobs.service.js';
 import { DomainEventsService } from './domain-events.service.js';
 import { AuditLogService } from './audit-log.service.js';
 import { PushService } from './push.service.js';
+import { ticketStatusLabels, type TicketStatus } from '@websphere/shared';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const WorkflowEventType = { status_change: 'status_change', task_completed: 'task_completed', assignment_change: 'assignment_change', progress_activity: 'progress_activity' } as const;
-const NotificationType = { task_assignment: 'task_assignment', group_activity: 'group_activity', announcement: 'announcement' } as const;
+const NotificationType = { task_assignment: 'task_assignment', group_activity: 'group_activity', announcement: 'announcement', ticket_update: 'ticket_update' } as const;
 type Role = (typeof Role)[keyof typeof Role];
 type TaskStatus = 'pending' | 'ongoing' | 'for_review' | 'completed';
 type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva' | 'figma';
@@ -603,7 +604,31 @@ export class AppService {
     const summary = `This project has completed ${Math.round(stats.taskCompletionRate * 100)}% of its tasks with ${Math.round(stats.overallEfficiency * 100)}% on-time delivery. Current risk level is ${stats.riskLevel.replace('_', ' ')}${stats.bottlenecks.length ? ` with ${stats.bottlenecks.length} bottleneck${stats.bottlenecks.length === 1 ? '' : 's'} detected` : ''}.`;
     return { summary, recommendations: stats.recommendations, riskLevel: stats.riskLevel, taskCompletionRate: stats.taskCompletionRate, overallEfficiency: stats.overallEfficiency };
   }
-  async ticket(caller: Caller, input: any) { return this.prisma.supportTicket.create({ data: { ...input, userId: caller.id } }); }
+  async ticket(caller: Caller, input: any) {
+    const ticket = await this.prisma.supportTicket.create({ data: { ...input, userId: caller.id } });
+    const administrators = await this.prisma.user.findMany({ where: { role: Role.Administrator, status: 'active' }, select: { id: true } });
+    if (administrators.length) await this.notify(administrators.map((administrator: any) => administrator.id), NotificationType.ticket_update, `New support request: “${this.clip(ticket.subject, 120)}”`, ticket.id, 'ticket');
+    return ticket;
+  }
+  async myTickets(caller: Caller) { return this.prisma.supportTicket.findMany({ where: { userId: caller.id }, orderBy: { createdAt: 'desc' }, take: 50 }); }
+  /** Admin moves a ticket to a new status and/or leaves a reply; the requester is notified of either. */
+  async updateTicket(caller: Caller, id: string, input: { status: TicketStatus; response?: string }) {
+    await this.admin(caller);
+    const existing = await this.prisma.supportTicket.findUnique({ where: { id } });
+    if (!existing) fail('NOT_FOUND', 'Support request not found', 404);
+    const response = input.response === undefined ? undefined : input.response || null;
+    const statusChanged = input.status !== existing!.status;
+    const replied = response !== undefined && response !== existing!.response;
+    const updated = await this.prisma.supportTicket.update({ where: { id }, data: { status: input.status, ...(response !== undefined ? { response } : {}) }, include: { user: { select: { fullName: true, email: true } } } });
+    if (statusChanged || replied) {
+      const subject = this.clip(updated.subject, 90);
+      const message = statusChanged ? `Your request “${subject}” is now ${ticketStatusLabels[input.status]}` : `The administrator replied to your request “${subject}”`;
+      await this.notify([updated.userId], NotificationType.ticket_update, message, updated.id, 'ticket');
+      await this.audit.log('AdminModule', 'support_ticket_update', 'info', `Administrator set support request ${updated.id} to ${input.status}`, caller.id);
+    }
+    return updated;
+  }
+  private clip(text: string, max: number) { return text.length > max ? `${text.slice(0, max - 1)}…` : text; }
   async admin(caller: Caller) { if (caller.role !== Role.Administrator) fail('RBAC_FORBIDDEN', 'Administrator access is required', 403); }
   async adminSupportTickets(caller: Caller) { await this.admin(caller); return this.prisma.supportTicket.findMany({ include: { user: { select: { fullName: true, email: true } } }, orderBy: { createdAt: 'desc' }, take: 24 }); }
   async adminUpdateUser(caller: Caller, targetId: string, data: any) {
