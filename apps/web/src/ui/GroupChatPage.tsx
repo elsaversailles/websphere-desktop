@@ -1,8 +1,9 @@
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import type { CallHostAction, CallKind, CallParticipant, CallSignal } from '@websphere/shared';
 import { getAccessToken, request, socketBaseUrl } from '../api';
 import { GroupAvatar } from './GroupAvatar';
+import { PollStatus } from './PollStatus';
 import type { GroupHub, GroupSummary, Poll } from './types';
 
 type Props = { userId: string; selectedGroupId: string; onSelectGroup: (id: string) => void; notify: (message: string) => void; incomingCall: { groupId: string; kind: CallKind } | null; onIncomingCallHandled: () => void };
@@ -55,7 +56,7 @@ function avatarColor(name: string) {
   return palette[hash % palette.length];
 }
 
-function IdeaVoteCard({ option, totalVotes, viewerOptionId, viewerId, onVote }: { option: Poll['options'][number]; totalVotes: number; viewerOptionId: string | null; viewerId: string; onVote: (optionId: string) => void }) {
+function IdeaVoteCard({ option, totalVotes, viewerOptionId, viewerId, votingOpen, onVote }: { option: Poll['options'][number]; totalVotes: number; viewerOptionId: string | null; viewerId: string; votingOpen: boolean; onVote: (optionId: string) => void }) {
   const chosen = viewerOptionId === option.optionId;
   const percentage = totalVotes ? Math.round(option.votes / totalVotes * 100) : 0;
   const voters = option.voters.map((voter) => voter.userId === viewerId ? 'You' : voter.fullName);
@@ -63,7 +64,7 @@ function IdeaVoteCard({ option, totalVotes, viewerOptionId, viewerId, onVote }: 
     <div className="gc-poll-option-heading"><strong>{option.label}</strong><span>{option.votes} vote{option.votes === 1 ? '' : 's'}</span></div>
     <div className="gc-vote-meter" aria-label={`${option.votes} votes`}><span style={{ width: `${percentage}%` }} /></div>
     <p className="gc-voter-list">{voters.length ? voters.join(', ') : 'No votes yet'}</p>
-    <button type="button" aria-pressed={chosen} className={chosen ? 'voted' : ''} onClick={() => onVote(option.optionId)}>{chosen ? 'Voted' : 'Vote'}</button>
+    <button type="button" aria-pressed={chosen} className={chosen ? 'voted' : ''} disabled={!votingOpen} onClick={() => onVote(option.optionId)}>{chosen ? 'Voted' : votingOpen ? 'Vote' : 'Voting closed'}</button>
   </article>;
 }
 
@@ -79,6 +80,13 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
   const [presentationStream, setPresentationStream] = useState<MediaStream | null>(null);
   const [peopleOpen, setPeopleOpen] = useState(false);
   const [leaving, setLeaving] = useState(false);
+  const [closingPoll, setClosingPoll] = useState(false);
+  const refreshHub = useCallback(async () => {
+    if (!selectedGroupId) return;
+    try { setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); } catch { /* the next tally or refresh will retry */ }
+  }, [selectedGroupId]);
+  const poll = hub?.poll ?? null;
+  const viewerIsLeader = hub?.group.members.some((member) => member.userId === userId && member.role === 'Project_Leader') ?? false;
   const [raisedHandSocketIds, setRaisedHandSocketIds] = useState<string[]>([]);
   const socketRef = useRef<Socket | null>(null);
   const callRef = useRef<ActiveCall | null>(null);
@@ -301,6 +309,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
     const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
     socketRef.current = socket;
     socket.on('connect', () => socket.emit('group:join', selectedGroupId, () => undefined));
+    socket.on('poll:tally', (tally: { groupId?: string }) => { if (tally.groupId === selectedGroupId) void refreshHub(); });
     socket.on('chat:message', (message: GroupHub['messages'][number]) => setHub((current) => current ? { ...current, messages: [message, ...current.messages.filter((item) => item.id !== message.id)] } : current));
     socket.on('call:participant-joined', (event: { groupId: string; participant: CallParticipant; hostSocketId: string }) => { if (event.groupId === callRef.current?.groupId) { setHostSocketId(event.hostSocketId); void createPeer(event.participant, true); } });
     socket.on('call:participant-left', (event: { groupId: string; socketId: string }) => { if (event.groupId === callRef.current?.groupId) removePeer(event.socketId); });
@@ -323,7 +332,15 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
 
   async function vote(optionId: string) {
     if (!hub?.poll) return;
-    try { await request(`/polls/${hub.poll.pollId}/vote`, { method: 'POST', body: JSON.stringify({ optionId }) }); setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); } catch (error: any) { notify(error.message); }
+    try { await request(`/polls/${hub.poll.pollId}/vote`, { method: 'POST', body: JSON.stringify({ optionId }) }); setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); } catch (error: any) { notify(error.message); void refreshHub(); }
+  }
+
+  async function closeVoting() {
+    if (!hub?.poll || !window.confirm('Close voting now? Members will no longer be able to vote.')) return;
+    setClosingPoll(true);
+    try { await request(`/polls/${hub.poll.pollId}/close`, { method: 'POST' }); await refreshHub(); notify('Voting is closed.'); }
+    catch (error: any) { notify(error.message); }
+    finally { setClosingPoll(false); }
   }
 
   async function leaveGroup() {
@@ -373,7 +390,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
         </main>
         <aside className="gc-right-panel">
           <section><div className="gc-side-title"><h3>Members</h3><span>{hub.group.members.length}</span></div>{hub.group.members.map((member) => <div className="gc-member-row" key={member.userId}><MemberAvatar name={member.user.fullName} avatarUrl={member.user.avatarUrl} /><span><strong>{member.user.fullName}</strong><small>{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</small></span><i /></div>)}</section>
-          <section className="gc-voting"><div className="gc-side-title"><h3>Idea Voting</h3></div>{hub.poll ? <div className="gc-poll-options">{hub.poll.options.map((option) => <IdeaVoteCard key={option.optionId} option={option} totalVotes={hub.poll.options.reduce((total, value) => total + value.votes, 0)} viewerOptionId={hub.poll.viewerOptionId} viewerId={userId} onVote={(optionId) => void vote(optionId)} />)}</div> : <div className="gc-panel-empty">Your group vote starts in Idea Management.</div>}</section>
+          <section className="gc-voting"><div className="gc-side-title"><h3>Idea Voting</h3></div>{poll ? <><div className="gc-poll-status"><PollStatus poll={poll} onExpired={refreshHub} />{poll.open && viewerIsLeader ? <button type="button" className="gc-close-vote" disabled={closingPoll} onClick={() => void closeVoting()}>{closingPoll ? 'Closing…' : 'Close voting'}</button> : null}</div><div className="gc-poll-options">{poll.options.map((option) => <IdeaVoteCard key={option.optionId} option={option} totalVotes={poll.options.reduce((total, value) => total + value.votes, 0)} viewerOptionId={poll.viewerOptionId} viewerId={userId} votingOpen={poll.open} onVote={(optionId) => void vote(optionId)} />)}</div></> : <div className="gc-panel-empty">Your group vote starts in Idea Management.</div>}</section>
           <button className="gc-start-project" disabled={!hub.poll} onClick={() => void startProject()}>Start Project</button>
         </aside>
       </> : <div className="gc-no-selection"><strong>Your workspace is ready</strong><span>Choose or create a group to begin a conversation.</span></div>}

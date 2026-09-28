@@ -297,8 +297,13 @@ model IdeaPoll {
   createdBy String
   open Boolean @default(true)
   createdAt DateTime @default(now())
+  closesAt DateTime?
+  closedAt DateTime?
+  closedBy String?
   idea Idea? @relation(fields: [ideaId], references: [id])
   options PollOption[]
+  @@index([groupId, createdAt])
+  @@index([open, closesAt])
 }
 model PollOption {
   id String @id @default(cuid())

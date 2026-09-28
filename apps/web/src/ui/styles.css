@@ -301,3 +301,10 @@
 .notif-popover-empty{padding:22px 20px;font-size:12.5px}
 /* Create Project modal border: thin accent rule with a softer corner. */
 .modal-box.project-modal{border:1px solid var(--acc);border-radius:20px}
+/* timed group voting: duration picker beside "Start Live Vote", status chip + leader close button in the voting panel */
+.vote-duration{display:flex;align-items:center;gap:8px;color:var(--sub);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px}
+.vote-duration .legacy-select{min-width:0;padding:6px 10px}
+.gc-poll-status{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px}
+.gc-close-vote{padding:4px 9px;border:1px solid rgba(214,59,59,.45);border-radius:6px;background:transparent;color:var(--red);font-size:11px;font-weight:800}
+.gc-close-vote:hover:not(:disabled){background:rgba(214,59,59,.1);border-color:var(--red)}
+.gc-poll-option button:disabled:not(.voted){opacity:.55}
