@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { io } from 'socket.io-client';
 import { getAccessToken, request, socketBaseUrl } from '../api';
+import { PollStatus, votingDurations } from './PollStatus';
 import type { GroupHub, GroupSummary } from './types';
 
 type IdeasPageProps = { userId: string; selectedGroupId: string; onSelectGroup: (id: string) => void; notify: (message: string) => void };
@@ -12,6 +13,7 @@ export function IdeasPage({ userId, selectedGroupId, onSelectGroup, notify }: Id
   const [loading, setLoading] = useState(true);
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiAnswer, setAiAnswer] = useState('');
+  const [voteHours, setVoteHours] = useState<number | null>(12);
 
   const refreshGroups = useCallback(async () => {
     const next = await request<GroupSummary[]>('/groups');
@@ -35,7 +37,8 @@ export function IdeasPage({ userId, selectedGroupId, onSelectGroup, notify }: Id
 
   const membership = useMemo(() => hub?.group.members.find((member) => member.userId === userId), [hub, userId]);
   const leader = membership?.role === 'Project_Leader';
-  const poll = hub?.poll ?? null;
+  // `hub.poll` is the group's latest vote, even a finished one; only a running vote blocks starting the next.
+  const poll = hub?.poll?.open ? hub.poll : null;
 
   async function submitIdea(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -70,7 +73,12 @@ export function IdeasPage({ userId, selectedGroupId, onSelectGroup, notify }: Id
   }
   async function createPoll() {
     if (!selectedGroupId || selectedIdeas.length < 2) return notify('Choose at least two ideas for the poll.');
-    try { await request(`/groups/${selectedGroupId}/polls`, { method: 'POST', body: JSON.stringify({ ideaIds: selectedIdeas }) }); setSelectedIdeas([]); await refreshHub(); notify(`Live vote opened in ${hub?.group.name ?? 'the group'} chat.`); }
+    try { await request(`/groups/${selectedGroupId}/polls`, { method: 'POST', body: JSON.stringify({ ideaIds: selectedIdeas, durationHours: voteHours }) }); setSelectedIdeas([]); await refreshHub(); notify(`Live vote opened in ${hub?.group.name ?? 'the group'} chat${voteHours ? ` — voting closes in ${votingDurations.find((option) => option.hours === voteHours)?.label ?? `${voteHours} hours`}` : ''}.`); }
+    catch (error: any) { notify(error.message); }
+  }
+  async function closeVoting() {
+    if (!hub?.poll || !window.confirm('Close voting now? Members will no longer be able to vote.')) return;
+    try { await request(`/polls/${hub.poll.pollId}/close`, { method: 'POST' }); await refreshHub(); notify('Voting is closed.'); }
     catch (error: any) { notify(error.message); }
   }
   async function vote(optionId: string) {
@@ -100,8 +108,8 @@ export function IdeasPage({ userId, selectedGroupId, onSelectGroup, notify }: Id
     {loading ? <div className="cc"><div className="legacy-empty">Loading ideas…</div></div> : !hub ? <div className="cc"><div className="legacy-empty"><strong>Your workspace is ready</strong><span>Select a group to view or submit its ideas.</span></div></div> : <>
       <div className="idea-group-context"><span>Group Chat idea board</span><strong>{hub.group.name}</strong><small>{hub.group.members.length} member{hub.group.members.length === 1 ? '' : 's'} · Ideas and votes here belong only to this group.</small></div>
       <div className="cc"><div className="cc-head"><h3>AI Idea Generator · {hub.group.name}</h3></div><p className="idea-generator-copy">Search for academic project ideas for <strong>{hub.group.name}</strong>. Discuss these ideas in that group’s chat, then use its vote to choose a project.</p><div className="idea-generator-row"><textarea className="ifield idea-ai-input" value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)} placeholder="Describe your course, topic, or project problem…" rows={2} /><button className="btn" onClick={() => void generateIdeas()}>Generate Ideas</button></div>{aiAnswer ? <div className="ai-response">{aiAnswer}</div> : null}<div className="sdiv" /><form className="idea-submit-row" onSubmit={submitIdea}><input className="ifield" name="title" required minLength={2} maxLength={180} placeholder="Idea title" /><input className="ifield" name="body" required placeholder="Idea details" /><button className="btn">Submit to {hub.group.name}</button></form></div>
-      <div className="cc"><div className="cc-head"><h3>Ideas for {hub.group.name}</h3><div className="ph-acts">{!poll && selectedIdeas.length >= 2 ? <button className="btn-o btn-sm" onClick={() => void mergeSelected()}>Merge Selected</button> : null}{leader && !poll ? <button className="btn btn-sm" disabled={selectedIdeas.length < 2} onClick={() => void createPoll()}>Start Live Vote</button> : null}</div></div>{hub.ideas.length ? <div>{hub.ideas.slice(0, 10).map((idea, index) => <article className="legacy-idea-card" key={idea.id}><span className="idea-num">{index + 1}</span><div><strong className="idea-title">{idea.title}</strong><span className="idea-meta">{idea.body}</span></div>{!poll && idea.status !== 'selected' ? <label className="idea-select"><input type="checkbox" checked={selectedIdeas.includes(idea.id)} onChange={(event) => setSelectedIdeas((current) => event.target.checked ? [...current, idea.id] : current.filter((value) => value !== idea.id))} /> Select</label> : null}{idea.authorId === userId && idea.status !== 'selected' ? <button className="btn-o btn-sm" onClick={() => void reviseIdea(idea.id, idea.title, idea.body)}>Revise</button> : null}{idea.authorId === userId && idea.status !== 'selected' ? <button className="btn-o btn-sm" onClick={() => void rejectIdea(idea.id)}>Reject</button> : null}{leader && idea.status !== 'selected' ? <button className="btn-o btn-sm" onClick={() => void beginProject(idea.id)}>Make Project</button> : null}</article>)}</div> : <div className="legacy-empty">No ideas for {hub.group.name} yet.</div>}</div>
-      <div className="cc"><div className="cc-head"><h3>Submitted Ideas · {hub.group.name}</h3>{poll ? <span className="bdg g">Live vote open</span> : null}</div>{hub.ideas.length ? <table className="tbl"><thead><tr><th>Idea</th><th>Submitted By</th><th>Category</th><th>AI Score</th><th>Status</th></tr></thead><tbody>{hub.ideas.map((idea) => <tr key={idea.id}><td><strong>{idea.title}</strong></td><td>{idea.authorId === userId ? 'You' : 'Group member'}</td><td>Academic Project</td><td>—</td><td><span className="bdg ac">{idea.status}</span></td></tr>)}</tbody></table> : <div className="legacy-empty">Submitted ideas for {hub.group.name} will appear here.</div>}</div>
+      <div className="cc"><div className="cc-head"><h3>Ideas for {hub.group.name}</h3><div className="ph-acts">{!poll && selectedIdeas.length >= 2 ? <button className="btn-o btn-sm" onClick={() => void mergeSelected()}>Merge Selected</button> : null}{leader && !poll ? <label className="vote-duration"><span>Voting time</span><select className="legacy-select" value={voteHours ?? ''} onChange={(event) => setVoteHours(event.target.value ? Number(event.target.value) : null)}>{votingDurations.map((option) => <option key={option.label} value={option.hours ?? ''}>{option.label}</option>)}</select></label> : null}{leader && !poll ? <button className="btn btn-sm" disabled={selectedIdeas.length < 2} onClick={() => void createPoll()}>Start Live Vote</button> : null}</div></div>{hub.ideas.length ? <div>{hub.ideas.slice(0, 10).map((idea, index) => <article className="legacy-idea-card" key={idea.id}><span className="idea-num">{index + 1}</span><div><strong className="idea-title">{idea.title}</strong><span className="idea-meta">{idea.body}</span></div>{!poll && idea.status !== 'selected' ? <label className="idea-select"><input type="checkbox" checked={selectedIdeas.includes(idea.id)} onChange={(event) => setSelectedIdeas((current) => event.target.checked ? [...current, idea.id] : current.filter((value) => value !== idea.id))} /> Select</label> : null}{idea.authorId === userId && idea.status !== 'selected' ? <button className="btn-o btn-sm" onClick={() => void reviseIdea(idea.id, idea.title, idea.body)}>Revise</button> : null}{idea.authorId === userId && idea.status !== 'selected' ? <button className="btn-o btn-sm" onClick={() => void rejectIdea(idea.id)}>Reject</button> : null}{leader && idea.status !== 'selected' ? <button className="btn-o btn-sm" onClick={() => void beginProject(idea.id)}>Make Project</button> : null}</article>)}</div> : <div className="legacy-empty">No ideas for {hub.group.name} yet.</div>}</div>
+      <div className="cc"><div className="cc-head"><h3>Submitted Ideas · {hub.group.name}</h3>{hub.poll ? <div className="ph-acts"><PollStatus poll={hub.poll} onExpired={refreshHub} />{poll && leader ? <button className="btn-o btn-sm" onClick={() => void closeVoting()}>Close voting</button> : null}</div> : null}</div>{hub.ideas.length ? <table className="tbl"><thead><tr><th>Idea</th><th>Submitted By</th><th>Category</th><th>AI Score</th><th>Status</th></tr></thead><tbody>{hub.ideas.map((idea) => <tr key={idea.id}><td><strong>{idea.title}</strong></td><td>{idea.authorId === userId ? 'You' : 'Group member'}</td><td>Academic Project</td><td>—</td><td><span className="bdg ac">{idea.status}</span></td></tr>)}</tbody></table> : <div className="legacy-empty">Submitted ideas for {hub.group.name} will appear here.</div>}</div>
     </>}
   </section>;
 }

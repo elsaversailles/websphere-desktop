@@ -12,6 +12,10 @@ export type Poll = {
   pollId: string;
   groupId: string;
   open: boolean;
+  /** When voting ends on its own; null means no time limit, so only the leader can close it. */
+  closesAt: string | null;
+  closedAt: string | null;
+  closedReason: 'manual' | 'expired' | null;
   viewerOptionId: string | null;
   options: Array<{ optionId: string; ideaId: string; label: string; votes: number; voters: Array<{ userId: string; fullName: string }> }>;
 };

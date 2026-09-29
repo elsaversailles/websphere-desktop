@@ -6,7 +6,7 @@ const socket = (caller?: { id: string }) => ({
   id: 'socket-1', data: { caller }, handshake: { auth: {} }, join: vi.fn(), leave: vi.fn(), to: vi.fn(() => ({ emit: vi.fn() })), rooms: new Set<string>(['socket-1']), disconnect: vi.fn(),
 }) as any;
 
-const events = { onNotification: vi.fn(), registerPresenceProvider: vi.fn() } as any;
+const events = { onNotification: vi.fn(), onPollTally: vi.fn(), registerPresenceProvider: vi.fn() } as any;
 
 describe('RealtimeGateway room authorization', () => {
   it('installs the Redis adapter on the underlying Socket.IO server for a namespace gateway', async () => {
@@ -25,7 +25,7 @@ describe('RealtimeGateway room authorization', () => {
   });
 
   it('reports connected users through the presence provider and drops them on disconnect', async () => {
-    const presenceEvents = { onNotification: vi.fn(), registerPresenceProvider: vi.fn() } as any;
+    const presenceEvents = { onNotification: vi.fn(), onPollTally: vi.fn(), registerPresenceProvider: vi.fn() } as any;
     const app = { caller: vi.fn().mockResolvedValue({ id: 'user-1' }) };
     const gateway = new RealtimeGateway(app as any, {} as any, presenceEvents);
     const readPresence = presenceEvents.registerPresenceProvider.mock.calls[0][0] as () => string[];

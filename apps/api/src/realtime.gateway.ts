@@ -17,6 +17,7 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
   private adapterClients: Redis[] = [];
   constructor(private readonly app: AppService, private readonly redis: RedisService, private readonly events: DomainEventsService) {
     this.events.onNotification((userId, notification) => this.publishNotification(userId, notification));
+    this.events.onPollTally((groupId, tally) => this.publishPollTally(groupId, tally));
     this.events.registerPresenceProvider(() => [...this.presence.keys()]);
   }
   async afterInit(server: Server | Namespace) {
