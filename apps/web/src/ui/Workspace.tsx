@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import type { CallKind } from '@websphere/shared';
+import type { CallKind, TicketStatus } from '@websphere/shared';
 import { clearSession, getAccessToken, request, saveSession, socketBaseUrl, type Session, type User } from '../api';
 import { AiAssistantModal } from './AiAssistantModal';
 import { Dashboard } from './Dashboard';
@@ -8,9 +8,11 @@ import { GroupChatPage } from './GroupChatPage';
 import { GroupsPage } from './GroupsPage';
 import { IdeasPage } from './IdeasPage';
 import { ProjectsPage } from './ProjectsPage';
+import { SupportRequestsPage } from './SupportRequestsPage';
+import { categoryLabel, statusLabel, ticketStatusOptions, type SupportTicketRecord } from './ticketStatus';
 import { AdminSettingsPage, CalendarPage, IntegrationsPage, NotificationsPage, ProfilePage, ProjectsAnalyticsPage, TasksPage, TrackerPage } from './LegacyPages';
 
-type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tools' | 'tracker' | 'notifications' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'settings';
+type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tools' | 'tracker' | 'notifications' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'settings' | 'support';
 type WorkspaceProps = { session: Session; onSessionChange: (session: Session) => void; onLogout: () => void; notify: (message: string) => void };
 type Link = { id: Page; label: string; icon: string };
 type NotificationEntry = { id: string; read: boolean; relatedId?: string | null; relatedType?: string | null };
@@ -20,7 +22,7 @@ const userSections: Array<{ title: string; links: Link[] }> = [
   { title: 'Groups & Projects', links: [{ id: 'groups', label: 'My Groups', icon: '♧' }, { id: 'chat', label: 'Group Chat', icon: '□' }, { id: 'ideas', label: 'Idea Management', icon: '◇' }, { id: 'projects', label: 'My Projects', icon: '▱' }, { id: 'tasks', label: 'My Tasks', icon: '✓' }] },
   { title: 'Analytics', links: [{ id: 'workflow', label: 'Workflow Analytics', icon: '▥' }, { id: 'predictive', label: 'Predictive Monitoring', icon: '◉' }] },
   { title: 'Tools', links: [{ id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'tools', label: 'Apps/External Tools', icon: '▦' }, { id: 'tracker', label: 'Task Progress Tracker', icon: '▤' }] },
-  { title: 'Account', links: [{ id: 'profile', label: 'Profile & Settings', icon: '♙' }] },
+  { title: 'Account', links: [{ id: 'profile', label: 'Profile & Settings', icon: '♙' }, { id: 'support', label: 'My Support Requests', icon: '?' }] },
 ];
 const adminSections: Array<{ title: string; links: Link[] }> = [
   { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
@@ -31,6 +33,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const [page, setPage] = useState<Page>(administrator ? 'admin' : 'dashboard');
   const [selectedGroupId, setSelectedGroupId] = useState('');
   const [selectedTaskId, setSelectedTaskId] = useState('');
+  const [selectedTicketId, setSelectedTicketId] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [incomingCall, setIncomingCall] = useState<{ groupId: string; kind: CallKind } | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
@@ -98,6 +101,11 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
         setPage('tasks');
         break;
       case 'idea': setPage('ideas'); break;
+      case 'ticket':
+        if (administrator) { setPage('admin'); break; }
+        setSelectedTicketId(notification.relatedId ?? '');
+        setPage('support');
+        break;
       case 'calendar':
       case 'event': setPage('calendar'); break;
       default: setPage('notifications');
@@ -179,6 +187,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'notifications' ? <NotificationsPage notify={notify} onNotificationClick={openNotification} /> : null}
       {page === 'profile' ? <ProfilePage user={session.user} onUserUpdated={updateUser} onSessionInvalidated={() => { clearSession(); onLogout(); }} notify={notify} /> : null}
       {page === 'settings' ? <AdminSettingsPage notify={notify} /> : null}
+      {page === 'support' ? <SupportRequestsPage notify={notify} focusedTicketId={selectedTicketId} /> : null}
     </div></div>
   </div>
   <AiAssistantModal open={assistantOpen} onClose={() => setAssistantOpen(false)} notify={notify} />
@@ -197,7 +206,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
 
 function AdminPage({ notify }: { notify: (message: string) => void }) {
   type Monitoring = { users: { total: number; active: number; locked: number; suspended: number; newSignups7d: number }; projects: { active: number; completed: number }; activity: { tasksCompleted24h: number; openSupportTickets: number }; health: { database: string; redis: string; overall: string } };
-  type SupportTicket = { id: string; category: string; subject: string; body: string; status: string; createdAt: string; user: { fullName: string; email: string } };
+  type SupportTicket = SupportTicketRecord & { user: { fullName: string; email: string } };
   const [data, setData] = useState<Monitoring | null>(null);
   const [tickets, setTickets] = useState<SupportTicket[] | null>(null);
   async function refresh() {
@@ -212,8 +221,33 @@ function AdminPage({ notify }: { notify: (message: string) => void }) {
     <div className="ph"><div><h2>User Activity</h2></div></div>
     <div className="krow">{data ? <><Kpi label="Active Projects" value={data.projects.active} /><Kpi label="Active Users" value={data.users.active} /><Kpi label="Flagged Inactive" value={data.users.locked + data.users.suspended} tone="yel" /><Kpi label="System Status" value={data.health.overall === 'up' ? 'Online' : 'Degraded'} tone={data.health.overall === 'up' ? 'grn' : 'red'} /></> : <div className="cc">Loading system activity…</div>}</div>
     <div className="g2"><div className="cc"><div className="cc-head"><h3>System Health</h3></div><Health label="Database" detail="Connected to the WebSphere database" ok={data?.health.database === 'up'} /><Health label="Redis" detail="Session and job queue store" ok={data?.health.redis === 'up'} /><Health label="File Storage" detail="Linux instance storage" ok /></div><div className="cc"><div className="cc-head"><h3>Recent User Activity</h3></div>{data ? <><Health label="New signups (7 days)" detail={`${data.users.newSignups7d} accounts created`} ok /><Health label="Tasks completed (24h)" detail={`${data.activity.tasksCompleted24h} tasks marked complete`} ok /><Health label="Open support tickets" detail={`${data.activity.openSupportTickets} awaiting response`} ok={data.activity.openSupportTickets === 0} /><Health label="Completed projects" detail={`${data.projects.completed} projects completed`} ok /></> : <div className="empty-message">Live audit activity will appear here.</div>}</div></div>
-    <section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{tickets?.length ?? 0} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => void refresh()}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <div className="support-ticket-list">{tickets.map((ticket) => <article className="support-ticket" key={ticket.id}><div className="support-ticket-top"><div><strong>{ticket.subject}</strong><span>{ticket.user.fullName} · {ticket.user.email}</span></div><span className={`support-ticket-status ${ticket.status}`}>{ticket.status.replace('_', ' ')}</span></div><p>{ticket.body}</p><footer><span>{ticket.category.replaceAll('_', ' ')}</span><time dateTime={ticket.createdAt}>{new Date(ticket.createdAt).toLocaleString()}</time></footer></article>)}</div> : <div className="empty-message">New support requests will appear here.</div>}</section>
+    <section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{tickets?.length ?? 0} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => void refresh()}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <div className="support-ticket-list">{tickets.map((ticket) => <AdminTicketCard key={`${ticket.id}-${ticket.updatedAt}`} ticket={ticket} notify={notify} onSaved={() => void refresh()} />)}</div> : <div className="empty-message">New support requests will appear here.</div>}</section>
   </section>;
+}
+
+function AdminTicketCard({ ticket, notify, onSaved }: { ticket: SupportTicketRecord & { user: { fullName: string; email: string } }; notify: (message: string) => void; onSaved: () => void }) {
+  const [status, setStatus] = useState<TicketStatus>(ticket.status);
+  const [response, setResponse] = useState(ticket.response ?? '');
+  const [saving, setSaving] = useState(false);
+  const dirty = status !== ticket.status || response.trim() !== (ticket.response ?? '');
+  async function save() {
+    setSaving(true);
+    try {
+      await request(`/admin/support/tickets/${ticket.id}`, { method: 'PATCH', body: JSON.stringify({ status, response }) });
+      notify(`Request set to ${statusLabel(status)}. ${ticket.user.fullName} has been notified.`);
+      onSaved();
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not update the support request.'); } finally { setSaving(false); }
+  }
+  return <article className="support-ticket">
+    <div className="support-ticket-top"><div><strong>{ticket.subject}</strong><span>{ticket.user.fullName} · {ticket.user.email}</span></div><span className={`support-ticket-status ${ticket.status}`}>{statusLabel(ticket.status)}</span></div>
+    <p>{ticket.body}</p>
+    <div className="support-ticket-controls">
+      <label>Status<select className="legacy-select" value={status} onChange={(event) => setStatus(event.target.value as TicketStatus)} disabled={saving}>{ticketStatusOptions.map((option) => <option key={option} value={option}>{statusLabel(option)}</option>)}</select></label>
+      <label className="support-ticket-reply-field">Reply to user<textarea className="ifield" rows={2} maxLength={2000} value={response} onChange={(event) => setResponse(event.target.value)} placeholder="Optional message shown with the status update" disabled={saving} /></label>
+      <button type="button" className="btn btn-sm" disabled={!dirty || saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save & Notify'}</button>
+    </div>
+    <footer><span>{categoryLabel(ticket.category)}</span><time dateTime={ticket.createdAt}>{new Date(ticket.createdAt).toLocaleString()}</time></footer>
+  </article>;
 }
 
 function AdminAccounts({ notify }: { notify: (message: string) => void }) {
@@ -240,6 +274,7 @@ function NavIcon({ page }: { page: Page }) {
   if (page === 'notifications') return <svg {...common}><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></svg>;
   if (page === 'profile') return <svg {...common}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>;
   if (page === 'admin') return <svg {...common}><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>;
+  if (page === 'support') return <svg {...common}><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><path d="m4.93 4.93 4.24 4.24M14.83 9.17l4.24-4.24M14.83 14.83l4.24 4.24M9.17 14.83l-4.24 4.24"/></svg>;
   if (page === 'ideas') return <svg {...common}><path d="M9 18h6M10 22h4M8.5 14.5A6 6 0 1 1 15.5 14.5C14.5 15.3 14 16 14 18h-4c0-2-.5-2.7-1.5-3.5z"/></svg>;
   return <svg {...common}><circle cx="12" cy="12" r="9"/></svg>;
 }

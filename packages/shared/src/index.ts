@@ -69,6 +69,11 @@ export const calendarEventSchema = z.object({ title: z.string().trim().min(2), t
 /** `durationHours` is how long members may vote; null/omitted means no time limit (the leader closes it by hand). Up to 30 days. */
 export const pollCreateSchema = z.object({ ideaIds: z.array(z.string().min(1)).min(2), durationHours: z.number().positive().max(720).nullable().optional() });
 export const supportTicketSchema = z.object({ category: z.enum(['account_reactivation','account_deletion','password_concern','bug_report','other']), subject: z.string().trim().min(2), body: z.string().trim().min(1) });
+export const ticketStatuses = ['pending', 'in_progress', 'resolved', 'rejected'] as const;
+export type TicketStatus = (typeof ticketStatuses)[number];
+/** What people see for each stored ticket status. */
+export const ticketStatusLabels: Record<TicketStatus, string> = { pending: 'Ongoing', in_progress: 'In Progress', resolved: 'Completed', rejected: 'Declined' };
+export const ticketUpdateSchema = z.object({ status: z.enum(ticketStatuses), response: z.string().trim().max(2000).optional() });
 export const aiAskSchema = z.object({ prompt: z.string().trim().min(1).max(12000), scopeType: z.enum(['project','group','idea']).optional(), scopeId: z.string().cuid().optional(), parts: z.array(z.object({ type: z.string() })).optional() });
 export const announcementSchema = z.object({ title: z.string().trim().min(2).max(180), body: z.string().trim().min(1), priority: z.enum(['normal','important','urgent']).default('normal') });
 
