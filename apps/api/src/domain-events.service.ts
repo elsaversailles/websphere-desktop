@@ -16,6 +16,13 @@ export class DomainEventsService extends EventEmitter {
   onNotification(listener: (userId: string, notification: unknown) => void) {
     this.on('notification', listener);
   }
+  /** Raised when a poll changes without an HTTP vote behind it (opened, closed by the leader, or timed out). */
+  emitPollTally(groupId: string, tally: unknown) {
+    this.emit('poll-tally', groupId, tally);
+  }
+  onPollTally(listener: (groupId: string, tally: unknown) => void) {
+    this.on('poll-tally', listener);
+  }
   registerPresenceProvider(provider: () => string[]) {
     this.presenceProvider = provider;
   }

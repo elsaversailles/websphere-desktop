@@ -1,4 +1,4 @@
-import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { hash, verify } from 'argon2';
 import { SignJWT, jwtVerify } from 'jose';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
@@ -28,8 +28,9 @@ type Caller = { id: string; role: Role; tv: number };
 const taskProgress = (status: string) => status === 'completed' ? 100 : status === 'for_review' ? 75 : status === 'ongoing' ? 50 : 0;
 
 @Injectable()
-export class AppService {
+export class AppService implements OnModuleInit, OnApplicationShutdown {
   readonly prisma: any;
+  private pollSweep?: ReturnType<typeof setInterval>;
 
   private readonly accessSecret: Uint8Array;
   private readonly refreshSecret: Uint8Array;
@@ -344,10 +345,70 @@ export class AppService {
     const [firstLine, ...rest] = result.response.split('\n').filter((line: string) => line.trim().length);
     return { title: (firstLine ?? ideas[0].title).replace(/^title:\s*/i, '').trim(), body: rest.join('\n').trim() || result.response, refused: result.refused, sourceIdeaIds: ideas.map((idea: any) => idea.id) };
   }
-  async openPoll(caller: Caller, groupId: string, ideaIds: string[]) { await this.member(groupId, caller.id); const ideas = await this.prisma.idea.findMany({ where: { id: { in: ideaIds }, groupId } }); if (ideas.length !== ideaIds.length) fail('VALIDATION_FAILED', 'Every poll option must be a group idea'); return this.prisma.ideaPoll.create({ data: { groupId, createdBy: caller.id, options: { create: ideas.map((idea) => ({ ideaId: idea.id, label: idea.title })) } }, include: { options: true } }); }
-  async vote(caller: Caller, pollId: string, optionId: string) { const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: true } }); await this.member(poll.groupId, caller.id); if (!poll.open || !poll.options.some((option) => option.id === optionId)) fail('VALIDATION_FAILED', 'Poll is closed or option is invalid'); await this.prisma.vote.upsert({ where: { pollId_voterId: { pollId, voterId: caller.id } }, update: { optionId }, create: { pollId, optionId, voterId: caller.id } }); return this.tally(pollId); }
-  async tally(pollId: string, viewerId?: string) { const [poll, viewerVote] = await Promise.all([this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: { include: { votes: { include: { voter: { select: { id: true, fullName: true } } } } } } } }), viewerId ? this.prisma.vote.findUnique({ where: { pollId_voterId: { pollId, voterId: viewerId } }, select: { optionId: true } }) : Promise.resolve(null)]); return { pollId, groupId: poll.groupId, open: poll.open, viewerOptionId: viewerVote?.optionId ?? null, options: poll.options.map((option) => ({ optionId: option.id, ideaId: option.ideaId, label: option.label, votes: option.votes.length, voters: option.votes.map((vote: any) => ({ userId: vote.voter.id, fullName: vote.voter.fullName })) })) }; }
-  async pollResults(caller: Caller, pollId: string) { const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, select: { groupId: true } }); await this.member(poll.groupId, caller.id); return this.tally(pollId, caller.id); }
+  /** A poll is open until the leader closes it or its `closesAt` passes, whichever comes first. */
+  private pollIsOpen(poll: { open: boolean; closesAt: Date | null }, now = new Date()) { return poll.open && !(poll.closesAt && poll.closesAt <= now); }
+  private noticeText(text: string, max: number) { return text.length > max ? `${text.slice(0, max - 1)}…` : text; }
+  private describeHours(hours: number) { if (hours < 1) return `${Math.round(hours * 60)} minutes`; const shown = Number.isInteger(hours) ? hours : Math.round(hours * 10) / 10; return `${shown} hour${shown === 1 ? '' : 's'}`; }
+  /**
+   * Closes a poll exactly once. The `open: true` guard makes this safe when the leader, a late vote and the timer sweep
+   * race, or when several API instances sweep at once: only the caller that actually flips it announces it to the group.
+   */
+  async closePollRecord(pollId: string, closedBy: string | null, closedAt = new Date()) {
+    const { count } = await this.prisma.ideaPoll.updateMany({ where: { id: pollId, open: true }, data: { open: false, closedAt, closedBy } });
+    if (!count) return false;
+    const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, select: { groupId: true } });
+    const [group, members, tally] = await Promise.all([this.prisma.group.findUnique({ where: { id: poll.groupId }, select: { name: true } }), this.prisma.groupMember.findMany({ where: { groupId: poll.groupId }, select: { userId: true } }), this.tally(pollId)]);
+    const name = this.noticeText(group?.name ?? 'your group', 60);
+    await this.notify(members.map((member: any) => member.userId), NotificationType.group_activity, closedBy ? `Voting in “${name}” was closed by the group leader` : `Voting time is up in “${name}” — see the results`, poll.groupId, 'group');
+    this.events.emitPollTally(poll.groupId, tally);
+    return true;
+  }
+  private async settleExpired(poll: { id: string; open: boolean; closesAt: Date | null }) { if (poll.open && poll.closesAt && poll.closesAt <= new Date()) await this.closePollRecord(poll.id, null, poll.closesAt); }
+  /** Timer sweep: closes (and announces) every poll whose voting window has ended. */
+  async closeExpiredPolls() {
+    const due = await this.prisma.ideaPoll.findMany({ where: { open: true, closesAt: { lte: new Date() } }, select: { id: true, open: true, closesAt: true }, take: 50 });
+    for (const poll of due) await this.settleExpired(poll);
+    return due.length;
+  }
+  onModuleInit() {
+    this.pollSweep = setInterval(() => { void this.closeExpiredPolls().catch(() => undefined); }, 30_000);
+    this.pollSweep.unref?.();
+  }
+  onApplicationShutdown() { if (this.pollSweep) clearInterval(this.pollSweep); }
+  async openPoll(caller: Caller, groupId: string, input: { ideaIds: string[]; durationHours?: number | null }) {
+    await this.member(groupId, caller.id);
+    const { ideaIds, durationHours } = input;
+    const ideas = await this.prisma.idea.findMany({ where: { id: { in: ideaIds }, groupId } });
+    if (ideas.length !== ideaIds.length) fail('VALIDATION_FAILED', 'Every poll option must be a group idea');
+    const running = await this.prisma.ideaPoll.findMany({ where: { groupId, open: true }, select: { id: true, open: true, closesAt: true } });
+    for (const existing of running) await this.settleExpired(existing);
+    if (running.some((existing: any) => this.pollIsOpen(existing))) fail('POLL_ALREADY_OPEN', 'This group already has a vote in progress. Close it before starting another.', 409);
+    const closesAt = durationHours ? new Date(Date.now() + durationHours * 3_600_000) : null;
+    const poll = await this.prisma.ideaPoll.create({ data: { groupId, createdBy: caller.id, closesAt, options: { create: ideas.map((idea) => ({ ideaId: idea.id, label: idea.title })) } }, include: { options: true } });
+    const [group, members, tally] = await Promise.all([this.prisma.group.findUnique({ where: { id: groupId }, select: { name: true } }), this.prisma.groupMember.findMany({ where: { groupId, userId: { not: caller.id } }, select: { userId: true } }), this.tally(poll.id)]);
+    if (members.length) await this.notify(members.map((member: any) => member.userId), NotificationType.group_activity, `A vote opened in “${this.noticeText(group?.name ?? 'your group', 60)}”${durationHours ? ` — voting closes in ${this.describeHours(durationHours)}` : ''}`, groupId, 'group');
+    this.events.emitPollTally(groupId, tally);
+    return poll;
+  }
+  /** Leader-only early close. Idempotent: closing an already-closed poll just returns its results. */
+  async closePoll(caller: Caller, pollId: string) {
+    const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, select: { id: true, groupId: true, open: true, closesAt: true } });
+    await this.member(poll.groupId, caller.id, true);
+    await this.settleExpired(poll);
+    await this.closePollRecord(pollId, caller.id);
+    return this.tally(pollId, caller.id);
+  }
+  async vote(caller: Caller, pollId: string, optionId: string) {
+    const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: true } });
+    await this.member(poll.groupId, caller.id);
+    await this.settleExpired(poll);
+    if (!this.pollIsOpen(poll)) fail('POLL_CLOSED', 'Voting has closed for this poll', 409);
+    if (!poll.options.some((option) => option.id === optionId)) fail('VALIDATION_FAILED', 'Poll option is invalid');
+    await this.prisma.vote.upsert({ where: { pollId_voterId: { pollId, voterId: caller.id } }, update: { optionId }, create: { pollId, optionId, voterId: caller.id } });
+    return this.tally(pollId);
+  }
+  async tally(pollId: string, viewerId?: string) { const [poll, viewerVote] = await Promise.all([this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: { include: { votes: { include: { voter: { select: { id: true, fullName: true } } } } } } } }), viewerId ? this.prisma.vote.findUnique({ where: { pollId_voterId: { pollId, voterId: viewerId } }, select: { optionId: true } }) : Promise.resolve(null)]); const open = this.pollIsOpen(poll); return { pollId, groupId: poll.groupId, open, closesAt: poll.closesAt, closedAt: open ? null : poll.closedAt ?? poll.closesAt, closedReason: open ? null : poll.closedBy ? 'manual' : 'expired', viewerOptionId: viewerVote?.optionId ?? null, options: poll.options.map((option) => ({ optionId: option.id, ideaId: option.ideaId, label: option.label, votes: option.votes.length, voters: option.votes.map((vote: any) => ({ userId: vote.voter.id, fullName: vote.voter.fullName })) })) }; }
+  async pollResults(caller: Caller, pollId: string) { const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, select: { id: true, groupId: true, open: true, closesAt: true } }); await this.member(poll.groupId, caller.id); await this.settleExpired(poll); return this.tally(pollId, caller.id); }
   async begin(caller: Caller, groupId: string, ideaId: string) { await this.member(groupId, caller.id, true); const idea = await this.prisma.idea.findFirst({ where: { id: ideaId, groupId } }); if (!idea) fail('NOT_FOUND', 'Idea does not belong to group', 404); if (idea.status === 'selected') fail('VALIDATION_FAILED', 'Idea has already been selected'); const members = await this.prisma.groupMember.findMany({ where: { groupId }, select: { userId: true } }); const project = await this.prisma.project.create({ data: { groupId, ideaId, title: idea.title, description: idea.body, createdBy: caller.id, members: { create: members.map((member) => ({ userId: member.userId, role: member.userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } } }); await this.prisma.idea.update({ where: { id: ideaId }, data: { status: 'selected' } }); return project; }
   async calendar(caller: Caller, from?: string, to?: string) { const events = await this.prisma.calendarEvent.findMany({ where: { ownerId: caller.id, ...(from || to ? { startAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}) } }); const projects = await this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, deadline: { not: null } }, select: { id: true, title: true, deadline: true } }); const tasks = await this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, deadline: { not: null }, status: { not: 'completed' } }, select: { id: true, title: true, deadline: true } }); return { events, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))] }; }
   async createCalendarEvent(caller: Caller, input: any) { if (input.projectId) await this.projectMember(input.projectId, caller.id); return this.prisma.calendarEvent.create({ data: { ...input, ownerId: caller.id } }); }
