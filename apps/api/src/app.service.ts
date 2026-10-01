@@ -5,6 +5,7 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto
 import { completionRate, projectAnalytics, recommendations } from './analytics.js';
 import { CryptoService, validatePassword } from './security.js';
 import { connectors, type OAuthTokens } from './connectors.js';
+import { listCanvaTools, openCanvaSession, runToolTurn } from './canva-mcp.js';
 import { PrismaService } from './prisma.service.js';
 import { ConfigService } from './config.service.js';
 import { RedisService } from './redis.service.js';
@@ -552,7 +553,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const codeChallenge = codeVerifier ? createHash('sha256').update(codeVerifier).digest('base64url') : undefined;
     await this.redis.set(this.oauthStateKey(state), JSON.stringify({ userId: caller.id, provider, redirectUri, codeVerifier }), 600);
     let authorizeUrl: string;
-    try { authorizeUrl = connectors[provider].authorizeUrl(state, redirectUri, codeChallenge); }
+    try { authorizeUrl = await connectors[provider].authorizeUrl(state, redirectUri, codeChallenge); }
     catch (error) {
       if (error instanceof Error && error.message === 'OAUTH_NOT_CONFIGURED') fail('OAUTH_NOT_CONFIGURED', 'This integration is not configured yet. Ask an administrator to add its OAuth credentials.', 503);
       if (error instanceof Error && error.message === 'INTEGRATION_NOT_IMPLEMENTED') fail('INTEGRATION_NOT_IMPLEMENTED', 'This integration is not available yet.', 501);
@@ -595,6 +596,26 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   private static readonly NON_ACADEMIC_PATTERNS = [/\bhack(ing)?\b.*\b(bank|account|password|network)\b/i, /\bmake\b.*\b(bomb|explosive|weapon)\b/i, /\bcheat(ing)?\b.*\b(exam|test|spouse|partner)\b/i, /\b(illegal drugs?|buy drugs)\b/i, /\bself[- ]harm\b/i];
   private looksNonAcademic(prompt: string) { return AppService.NON_ACADEMIC_PATTERNS.some((pattern) => pattern.test(prompt)); }
+  private static readonly CANVA_INTENT_PATTERN = /\bcanva\b|\bposter\b|\bflyer\b|\bbanner\b|\bslide deck\b|\bgraphic design\b|\bdesign (a|an|me|us)\b/i;
+  /** Only called when the prompt sounds design-related; returns null (never throws) so the caller falls back to the plain chat path — no Canva connection, a connection that needs reconnecting, or an MCP/tool-call failure should ever break the assistant. */
+  private async tryCanvaAssistantTurn(caller: Caller, apiKey: string, prompt: string): Promise<{ text: string } | null> {
+    const connection = await this.prisma.toolConnection.findUnique({ where: { userId_provider: { userId: caller.id, provider: 'canva' } } });
+    if (!connection || connection.status !== 'connected') return null;
+    const tokens = await this.connectionTokens({ ...connection, tool: { name: 'Canva' } });
+    const session = await openCanvaSession(tokens.accessToken);
+    try {
+      const tools = await listCanvaTools(session);
+      if (!tools.length) return null;
+      const { text, toolCalls } = await runToolTurn({
+        apiKey, model: this.config.get('OPENAI_MODEL'), session, tools,
+        instructions: 'You are WebSphere AI, an assistant for college projects, research, coursework, and team planning. This student has a connected Canva account — when they ask for help with a design, poster, slide, flyer, banner, or similar, use the Canva tools provided to actually create, search, or edit a real design for them rather than only describing what they could do. For anything else, answer as a concise academic/project assistant. Do not invent project data or claim actions were completed that the tools did not confirm. Only help with academic, project, and coursework-related requests; politely decline anything else.',
+        userInput: prompt,
+      });
+      // No tool was actually called: nothing design-specific happened, so let the plain chat path answer instead.
+      if (!text || !toolCalls) return null;
+      return { text };
+    } finally { await session.close().catch(() => undefined); }
+  }
   private async moderate(prompt: string, apiKey: string): Promise<boolean> {
     try {
       const response = await fetch('https://api.openai.com/v1/moderations', { method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ input: prompt }) });
@@ -613,6 +634,13 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       const response = 'I can only help with academic, project, and coursework-related requests. Please rephrase your question to focus on your studies, project work, or team planning.';
       await this.prisma.aiInteraction.create({ data: { userId: caller.id, scopeType: input.scopeType, scopeId: input.scopeId, prompt, response, moderated: true } });
       return { response, refused: true, grounded: false };
+    }
+    // Only paid for when both the prompt sounds design-related and the caller has Canva connected;
+    // everything else keeps the plain chat path below exactly as it was, same cost and latency.
+    const canvaTurn = AppService.CANVA_INTENT_PATTERN.test(prompt) ? await this.tryCanvaAssistantTurn(caller, apiKey!, prompt).catch(() => null) : null;
+    if (canvaTurn) {
+      await this.prisma.aiInteraction.create({ data: { userId: caller.id, scopeType: input.scopeType, scopeId: input.scopeId, prompt, response: canvaTurn.text, moderated: false } });
+      return { response: canvaTurn.text, refused: false, grounded: true };
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 45_000);
