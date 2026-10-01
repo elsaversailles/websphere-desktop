@@ -37,8 +37,14 @@ const CLIENT_SETTING_KEY = 'integration.canva.oauthClient';
 // the plain-class Connector registry.
 const prisma = new PrismaClient();
 
-type DiscoveredServer = { authorizationEndpoint: string; tokenEndpoint: string; registrationEndpoint?: string; scopes: string[]; rawMetadata: AuthorizationServerMetadata };
+type DiscoveredServer = { authorizationEndpoint: string; tokenEndpoint: string; registrationEndpoint?: string; resource: string; rawMetadata: AuthorizationServerMetadata };
 type CachedClient = { client_id: string; client_secret?: string; redirect_uris: string[] };
+
+// WebSphere only ever needs to read a student's designs (for Sync) and create/edit one on their
+// behalf (the AI assistant's design capability) — not comments, brand templates, help answers, or
+// folder/asset writes. Canva's discovery document advertises every scope IT supports, not what a
+// given client should request; asking for all of it would hand out far more than we use.
+const REQUESTED_SCOPES = ['profile:read', 'design:meta:read', 'design:content:read', 'design:content:write', 'asset:read'];
 
 let discoveryCache: DiscoveredServer | null = null;
 
@@ -53,7 +59,11 @@ async function discoverServer(): Promise<DiscoveredServer> {
     authorizationEndpoint: metadata.authorization_endpoint,
     tokenEndpoint: metadata.token_endpoint,
     registrationEndpoint: metadata.registration_endpoint,
-    scopes: resource?.scopes_supported ?? metadata.scopes_supported ?? [],
+    // The MCP Authorization spec (RFC 8707 Resource Indicators) requires every authorize/token
+    // request to name the specific resource the token is for — Canva's `/authorize` rejects
+    // requests missing it (and, in its current beta, reports that as a confusing "Invalid redirect
+    // URI" rather than a resource error). Use the server's own canonical value, not a guess.
+    resource: resource?.resource ?? MCP_SERVER_URL,
     rawMetadata: metadata,
   };
   return discoveryCache;
@@ -104,7 +114,7 @@ async function authorizeUrl(state: string, redirectUri: string, codeChallenge?: 
   return `${server.authorizationEndpoint}?${new URLSearchParams({
     client_id: client.client_id, redirect_uri: redirectUri, response_type: 'code', state,
     code_challenge: codeChallenge, code_challenge_method: 'S256',
-    ...(server.scopes.length ? { scope: server.scopes.join(' ') } : {}),
+    resource: server.resource, scope: REQUESTED_SCOPES.join(' '),
   }).toString()}`;
 }
 
@@ -112,7 +122,7 @@ async function exchangeCode(code: string, redirectUri: string, codeVerifier?: st
   if (!code || !redirectUri || !codeVerifier) throw new Error('OAUTH_EXCHANGE_FAILED');
   const server = await discoverServer();
   const client = await clientInformation(redirectUri);
-  return tokenRequest(server, client, new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: codeVerifier, redirect_uri: redirectUri }));
+  return tokenRequest(server, client, new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: codeVerifier, redirect_uri: redirectUri, resource: server.resource }));
 }
 
 async function refresh(tokens: OAuthTokens): Promise<OAuthTokens> {
@@ -120,7 +130,7 @@ async function refresh(tokens: OAuthTokens): Promise<OAuthTokens> {
   const server = await discoverServer();
   const client = await cachedClient();
   if (!client) throw new Error('OAUTH_RECONNECT_REQUIRED');
-  return tokenRequest(server, client, new URLSearchParams({ grant_type: 'refresh_token', refresh_token: tokens.refreshToken }));
+  return tokenRequest(server, client, new URLSearchParams({ grant_type: 'refresh_token', refresh_token: tokens.refreshToken, resource: server.resource }));
 }
 
 // ---- MCP session + a small, bounded tool-calling loop, shared by sync() and the AI assistant ----
