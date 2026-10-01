@@ -3,7 +3,7 @@ import { hash, verify } from 'argon2';
 import { SignJWT, jwtVerify } from 'jose';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { completionRate, projectAnalytics, recommendations } from './analytics.js';
-import { CryptoService, validatePassword } from './security.js';
+import { CryptoService } from './security.js';
 import { connectors, type OAuthTokens } from './connectors.js';
 import { PrismaService } from './prisma.service.js';
 import { ConfigService } from './config.service.js';
@@ -13,7 +13,7 @@ import { JobsService } from './jobs.service.js';
 import { DomainEventsService } from './domain-events.service.js';
 import { AuditLogService } from './audit-log.service.js';
 import { PushService } from './push.service.js';
-import { ticketStatusLabels, type TicketStatus } from '@websphere/shared';
+import { passwordRequirements, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
@@ -24,6 +24,8 @@ type TaskStatus = 'pending' | 'ongoing' | 'for_review' | 'completed';
 type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva' | 'figma';
 type NotificationType = (typeof NotificationType)[keyof typeof NotificationType];
 const fail = (code: string, message: string, status: number = HttpStatus.BAD_REQUEST, fields?: Record<string, string>): never => { throw new HttpException({ code, message, ...(fields ? { fields } : {}) }, status); };
+const PASSWORD_REASON_LABEL = Object.fromEntries(passwordRequirements('').map((requirement) => [requirement.id, requirement.label]));
+const passwordPolicyFailed = (reason: PasswordRequirementId) => fail('VALIDATION_FAILED', `Password does not meet the required policy: ${PASSWORD_REASON_LABEL[reason]}`, 400, { password: reason });
 type Caller = { id: string; role: Role; tv: number };
 const taskProgress = (status: string) => status === 'completed' ? 100 : status === 'for_review' ? 75 : status === 'ongoing' ? 50 : 0;
 
@@ -93,7 +95,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async register(input: any) {
     const { verificationId, verificationCode, ...registration } = input;
     const policy = validatePassword(registration.password);
-    if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`, 400, { password: policy.reason });
+    if (!policy.ok) passwordPolicyFailed(policy.reason);
     const stored = await this.redis.get(this.registrationOtpKey(verificationId));
     if (!stored) fail('OTP_EXPIRED', 'This verification code has expired. Request a new code and try again.', 400, { verificationCode: 'expired' });
     const verification = (() => {
@@ -124,7 +126,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async refreshToken(token: string) { try { const verified = await jwtVerify(token, this.refreshSecret); const subject = verified.payload.sub; if (!subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const jti = String(verified.payload.jti); const stored = await this.redis.take(this.refreshKey(jti)); if (!stored) { if (await this.redis.get(this.usedRefreshKey(jti))) await this.prisma.user.update({ where: { id: subject }, data: { tokenVersion: { increment: 1 } } }); fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } const record = JSON.parse(stored!) as { userId: string }; if (record.userId !== subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const user = await this.prisma.user.findUnique({ where: { id: record.userId } }); if (!user || user.status !== 'active' || user.tokenVersion !== Number(verified.payload.tv)) { await this.redis.removeFromSet(this.userRefreshKey(record.userId), jti); fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } const ttl = this.refreshTtlSeconds(); await Promise.all([this.redis.set(this.usedRefreshKey(jti), '1', ttl), this.redis.removeFromSet(this.userRefreshKey(record.userId), jti)]); return this.issue(user); } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } }
   private async removeRefreshSessions(userId: string) { const key = this.userRefreshKey(userId); const jtis = await this.redis.setMembers(key); await this.redis.delete(...jtis.map((jti) => this.refreshKey(jti)), key); }
   async logout(user: Caller) { await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'logout', 'info', 'User signed out and invalidated all sessions', user.id); return { ok: true }; }
-  async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`, 400, { password: policy.reason }); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); return { ok: true }; }
+  async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) passwordPolicyFailed(policy.reason); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); return { ok: true }; }
   async forgot(email: string) {
     const user = await this.prisma.user.findUnique({ where: { email } });
     if (user?.status !== 'locked') return { ok: true };
@@ -147,7 +149,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async resetPassword(token: string, password: string, confirm: string) {
     if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' });
     const policy = validatePassword(password);
-    if (!policy.ok) fail('VALIDATION_FAILED', `Password policy failed: ${policy.reason}`, 400, { password: policy.reason });
+    if (!policy.ok) passwordPolicyFailed(policy.reason);
     const userId = await this.redis.take(this.resetKey(token));
     if (!userId) fail('AUTH_UNAUTHENTICATED', 'Reset token is invalid or expired', 401);
     const lockedUserId = userId!;

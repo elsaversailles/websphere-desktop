@@ -361,3 +361,20 @@
 @media(max-width:560px){.lp-features,.lp-steps ol{grid-template-columns:1fr}.lp-hero-actions .lp-btn-lg{width:100%}}
 .auth-back{position:absolute;z-index:11;top:clamp(14px,2.4vw,26px);left:clamp(14px,2.4vw,26px);padding:9px 15px;border:1px solid rgba(0,56,168,.24);border-radius:9px;background:rgba(234,246,252,.82);color:var(--acc);font-size:12.5px;font-weight:700}
 .auth-back:hover{background:#fff;border-color:var(--acc)}
+/* Required-field markers across auth forms. */
+.required-mark{color:var(--red);font-weight:800;margin-left:2px}
+/* Live password-requirements checklist under the password field on register/reset. */
+.password-checklist{display:grid;gap:4px;margin:-9px 0 16px;padding:10px 12px;border:1px solid var(--bdr);border-radius:var(--rs);background:rgba(234,246,252,.6);list-style:none}
+.password-checklist li{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--red);font-weight:600}
+.password-checklist li.met{color:var(--grn)}
+.password-checklist li span{flex:0 0 auto;font-size:12px;line-height:1}
+/* Privacy-policy consent row and the inline link that opens the modal. */
+.auth-consent{display:flex;align-items:flex-start;gap:8px;margin:-6px 0 16px;font-size:12.5px;color:#0B3A52;line-height:1.5}
+.auth-consent input{margin-top:3px;flex:0 0 auto;accent-color:var(--acc)}
+.auth-inline-link{display:inline;padding:0;border:0;background:transparent;color:var(--acc);font-weight:700;text-decoration:underline;font-size:inherit}
+/* Privacy policy modal body, reusing the shared .modal-ov/.modal-box shell. */
+.privacy-modal{max-width:560px;max-height:min(640px,86vh);display:flex;flex-direction:column}
+.privacy-body{overflow-y:auto;padding-right:4px;margin-bottom:16px}
+.privacy-body h3{font-size:13px;font-weight:800;margin:14px 0 6px;color:var(--ink)}
+.privacy-body h3:first-child{margin-top:0}
+.privacy-body p{font-size:12.5px;line-height:1.6;color:var(--sub)}

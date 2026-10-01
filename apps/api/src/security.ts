@@ -1,14 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { ConfigService } from './config.service.js';
-export function validatePassword(password: string) {
-  if (password.length < 8) return { ok: false, reason: 'length' as const };
-  if (!/[^A-Za-z0-9\s]/.test(password)) return { ok: false, reason: 'missing_symbol' as const };
-  if (!/\d/.test(password)) return { ok: false, reason: 'missing_number' as const };
-  const lower = password.toLowerCase();
-  for (let i = 0; i < lower.length - 3; i++) { const chars = lower.slice(i, i + 4); const deltas = [...chars].slice(1).map((c, n) => c.charCodeAt(0) - chars.charCodeAt(n)); if (deltas.every((d) => d === 1) || deltas.every((d) => d === -1)) return { ok: false, reason: 'sequence' as const }; }
-  return { ok: true as const };
-}
+// validatePassword lives in @websphere/shared now, so the web client's registration form can
+// render the exact same rule-by-rule checklist the server enforces, instead of duplicating it.
 @Injectable()
 export class CryptoService {
   private readonly key: Buffer;

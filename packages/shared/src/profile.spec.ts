@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, profileUpdateSchema, registerSchema, registrationOtpRequestSchema } from './index.js';
+import { loginSchema, passwordChangeSchema, passwordForgotSchema, passwordRequirements, passwordResetSchema, profileUpdateSchema, registerSchema, registrationOtpRequestSchema, validatePassword } from './index.js';
 
 describe('profile and password contracts', () => {
   it('accepts a complete valid profile update and trims values', () => {
@@ -78,5 +78,45 @@ describe('disposable email guardrail', () => {
     const result = profileUpdateSchema.safeParse({ email: 'student@mailinator.com' });
     expect(result.success).toBe(false);
     if (!result.success) expect(result.error.issues[0]?.message).toContain('Disposable or temporary email');
+  });
+});
+
+describe('password policy', () => {
+  it('accepts a password that satisfies every rule', () => {
+    expect(validatePassword('Valid!Pass9')).toEqual({ ok: true });
+  });
+
+  it('reports every rule’s pass/fail state, not just the first failure', () => {
+    const requirements = passwordRequirements('abcd');
+    expect(requirements.find((r) => r.id === 'length')?.met).toBe(false);
+    expect(requirements.find((r) => r.id === 'symbol')?.met).toBe(false);
+    expect(requirements.find((r) => r.id === 'number')?.met).toBe(false);
+    expect(requirements.find((r) => r.id === 'sequence')?.met).toBe(false);
+  });
+
+  it('rejects a password shorter than 8 characters', () => {
+    expect(validatePassword('Ab1!')).toEqual({ ok: false, reason: 'length' });
+  });
+
+  it('rejects a password longer than 64 characters', () => {
+    expect(validatePassword(`Aa1!${'a'.repeat(61)}`).ok).toBe(false);
+    expect(validatePassword(`Aa1!${'a'.repeat(61)}`)).toMatchObject({ reason: 'length' });
+  });
+
+  it('accepts a password at exactly the 64-character boundary', () => {
+    expect(validatePassword(`Aa1!${'a'.repeat(60)}`)).toEqual({ ok: true });
+  });
+
+  it('rejects a password with no symbol', () => {
+    expect(validatePassword('Password9')).toEqual({ ok: false, reason: 'symbol' });
+  });
+
+  it('rejects a password with no number', () => {
+    expect(validatePassword('Password!')).toEqual({ ok: false, reason: 'number' });
+  });
+
+  it('rejects an obvious ascending or descending sequence, even once length/symbol/number all pass', () => {
+    expect(validatePassword('ab1!cdef')).toEqual({ ok: false, reason: 'sequence' }); // ...cdef ascends
+    expect(validatePassword('ab1!fedc')).toEqual({ ok: false, reason: 'sequence' }); // ...fedc descends
   });
 });
