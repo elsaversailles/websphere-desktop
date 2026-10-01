@@ -1,31 +1,16 @@
+import { requestForm, requestJson, requestTokenJson, tokensFrom } from './oauth-http.js';
+import { canvaMcpConnector } from './canva-mcp.js';
+
 export type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva' | 'figma';
 export type OAuthTokens = { accessToken: string; refreshToken?: string; expiresAt?: Date };
 export type LinkTarget = { projectId?: string; taskId?: string; externalId: string; title: string; externalUrl: string };
 export type SyncTarget = Pick<LinkTarget, 'externalId' | 'title' | 'externalUrl'>;
 export type SyncResult = { summary: string };
-export interface Connector { readonly provider: ProviderId; authorizeUrl(state: string, redirectUri: string, codeChallenge?: string): string; exchangeCode(code: string, redirectUri: string, codeVerifier?: string): Promise<OAuthTokens>; refresh(tokens: OAuthTokens): Promise<OAuthTokens>; sync(tokens: OAuthTokens, targets?: SyncTarget[]): Promise<SyncResult>; launchUrl(target: LinkTarget): Promise<string>; }
+// `authorizeUrl` may be async: the Canva connector has to discover an auth server and
+// dynamically register a client (see canva-mcp.ts) before it can build the URL.
+export interface Connector { readonly provider: ProviderId; authorizeUrl(state: string, redirectUri: string, codeChallenge?: string): string | Promise<string>; exchangeCode(code: string, redirectUri: string, codeVerifier?: string): Promise<OAuthTokens>; refresh(tokens: OAuthTokens): Promise<OAuthTokens>; sync(tokens: OAuthTokens, targets?: SyncTarget[]): Promise<SyncResult>; launchUrl(target: LinkTarget): Promise<string>; }
 
-type OAuthPayload = { access_token?: string; refresh_token?: string; expires_in?: number };
 const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error('OAUTH_NOT_CONFIGURED'); return value; };
-const tokensFrom = (payload: OAuthPayload, refreshToken?: string): OAuthTokens => {
-  if (!payload.access_token) throw new Error('OAUTH_EXCHANGE_FAILED');
-  return { accessToken: payload.access_token, refreshToken: payload.refresh_token ?? refreshToken, expiresAt: payload.expires_in ? new Date(Date.now() + payload.expires_in * 1000) : undefined };
-};
-const requestForm = async (url: string, body: URLSearchParams, headers: Record<string, string> = {}) => {
-  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers }, body: body.toString() });
-  if (!response.ok) throw new Error('OAUTH_EXCHANGE_FAILED');
-  return response.json() as Promise<OAuthPayload>;
-};
-const requestTokenJson = async (url: string, body: Record<string, string>) => {
-  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  if (!response.ok) throw new Error('OAUTH_EXCHANGE_FAILED');
-  return response.json() as Promise<OAuthPayload>;
-};
-const requestJson = async (url: string, accessToken: string) => {
-  const response = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
-  if (!response.ok) throw new Error('INTEGRATION_SYNC_FAILED');
-  return response.json() as Promise<any>;
-};
 
 abstract class DirectOAuthConnector implements Connector {
   abstract readonly provider: ProviderId;
@@ -180,43 +165,8 @@ class AsanaConnector implements Connector {
   }
   async launchUrl(target: LinkTarget) { return target.externalUrl; }
 }
-class CanvaConnector implements Connector {
-  readonly provider = 'canva' as const;
-  private readonly authorizationEndpoint = 'https://www.canva.com/api/oauth/authorize';
-  private readonly tokenEndpoint = 'https://api.canva.com/rest/v1/oauth/token';
-  private credentials() { return { clientId: required('CANVA_CLIENT_ID'), clientSecret: required('CANVA_CLIENT_SECRET') }; }
-  authorizeUrl(state: string, redirectUri: string, codeChallenge?: string) {
-    if (!codeChallenge) throw new Error('OAUTH_EXCHANGE_FAILED');
-    const { clientId } = this.credentials();
-    return `${this.authorizationEndpoint}?${new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', state, scope: 'design:meta:read', code_challenge: codeChallenge, code_challenge_method: 'S256' }).toString()}`;
-  }
-  async exchangeCode(code: string, redirectUri: string, codeVerifier?: string) {
-    if (!code || !redirectUri || !codeVerifier) throw new Error('OAUTH_EXCHANGE_FAILED');
-    const { clientId, clientSecret } = this.credentials();
-    const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-    return tokensFrom(await requestForm(this.tokenEndpoint, new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: codeVerifier, redirect_uri: redirectUri }), { authorization: `Basic ${basic}` }));
-  }
-  async refresh(tokens: OAuthTokens) {
-    if (!tokens.refreshToken) throw new Error('OAUTH_RECONNECT_REQUIRED');
-    const { clientId, clientSecret } = this.credentials();
-    const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-    return tokensFrom(await requestForm(this.tokenEndpoint, new URLSearchParams({ grant_type: 'refresh_token', refresh_token: tokens.refreshToken }), { authorization: `Basic ${basic}` }), tokens.refreshToken);
-  }
-  async sync(tokens: OAuthTokens, targets: SyncTarget[] = []): Promise<SyncResult> {
-    if (!targets.length) {
-      const data = await requestJson('https://api.canva.com/rest/v1/designs?page_size=100', tokens.accessToken);
-      const count = Array.isArray(data.items) ? data.items.length : 0;
-      return { summary: `Synced ${count} Canva design${count === 1 ? '' : 's'}` };
-    }
-    const results = await Promise.all(targets.map(async (target) => {
-      try { await requestJson(`https://api.canva.com/rest/v1/designs/${encodeURIComponent(target.externalId)}`, tokens.accessToken); return true; }
-      catch { return false; }
-    }));
-    const available = results.filter(Boolean).length;
-    return { summary: `Synced ${available} of ${targets.length} linked Canva design${targets.length === 1 ? '' : 's'}` };
-  }
-  async launchUrl(target: LinkTarget) { return target.externalUrl; }
-}
+// Canva denies Connect API review to small/unverified apps, so Canva is not a DirectOAuthConnector
+// like the other five — it goes through Canva's own hosted MCP server instead. See canva-mcp.ts.
 class UnavailableConnector implements Connector {
   constructor(readonly provider: ProviderId) {}
   authorizeUrl(_state: string, _redirectUri: string): string { throw new Error('INTEGRATION_NOT_IMPLEMENTED'); }
@@ -227,5 +177,5 @@ class UnavailableConnector implements Connector {
 }
 export const connectors: Record<ProviderId, Connector> = {
   google: new GoogleConnector(), microsoft: new MicrosoftConnector(), figma: new FigmaConnector(),
-  trello: new TrelloConnector(), asana: new AsanaConnector(), canva: new CanvaConnector(),
+  trello: new TrelloConnector(), asana: new AsanaConnector(), canva: canvaMcpConnector,
 };
