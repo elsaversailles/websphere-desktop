@@ -10,14 +10,69 @@ export type CallSignal = { type: 'offer' | 'answer' | 'ice-candidate'; sdp?: str
 export type CallHostAction = 'mute-all' | 'remove-participant' | 'end-call';
 export type IceServerConfig = { urls: string | string[]; username?: string; credential?: string };
 
+export const PASSWORD_MIN_LENGTH = 8;
+export const PASSWORD_MAX_LENGTH = 64;
+export type PasswordRequirementId = 'length' | 'symbol' | 'number' | 'sequence';
+export type PasswordRequirement = { id: PasswordRequirementId; label: string; met: boolean };
+function hasMonotonicRun(password: string) {
+  const lower = password.toLowerCase();
+  for (let i = 0; i < lower.length - 3; i++) {
+    const chars = lower.slice(i, i + 4);
+    const deltas = [...chars].slice(1).map((c, n) => c.charCodeAt(0) - chars.charCodeAt(n));
+    if (deltas.every((d) => d === 1) || deltas.every((d) => d === -1)) return true;
+  }
+  return false;
+}
+/** One entry per rule, so a UI can show live pass/fail per rule as the user types — not just the first failure. */
+export function passwordRequirements(password: string): PasswordRequirement[] {
+  return [
+    { id: 'length', label: `${PASSWORD_MIN_LENGTH}–${PASSWORD_MAX_LENGTH} characters`, met: password.length >= PASSWORD_MIN_LENGTH && password.length <= PASSWORD_MAX_LENGTH },
+    { id: 'symbol', label: 'At least one symbol', met: /[^A-Za-z0-9\s]/.test(password) },
+    { id: 'number', label: 'At least one number', met: /\d/.test(password) },
+    { id: 'sequence', label: 'No obvious sequences (e.g. abcd, 1234)', met: password.length === 0 || !hasMonotonicRun(password) },
+  ];
+}
+/** Server-side gate: the first failing rule's id, matching the field error shape the rest of the API uses. */
+export function validatePassword(password: string): { ok: true } | { ok: false; reason: PasswordRequirementId } {
+  const failed = passwordRequirements(password).find((requirement) => !requirement.met);
+  return failed ? { ok: false, reason: failed.id } : { ok: true };
+}
+
+/**
+ * Best-effort list of well-known disposable/temporary-inbox providers. Services like these spin
+ * up new domains constantly, so this will never be exhaustive — it stops the common, easily
+ * guessed ones (the point is raising the bar on throwaway-account abuse, not perfect coverage).
+ */
+export const disposableEmailDomains = new Set([
+  '10minutemail.com', '10minutemail.net', '20minutemail.com', '33mail.com', 'burnermail.io',
+  'dispostable.com', 'emailondeck.com', 'fakeinbox.com', 'fakemail.net', 'getairmail.com',
+  'getnada.com', 'guerrillamail.com', 'guerrillamail.net', 'guerrillamail.org', 'guerrillamailblock.com',
+  'inboxkitten.com', 'maildrop.cc', 'mailcatch.com', 'mailinator.com', 'mailinator.net',
+  'mailnesia.com', 'mailnull.com', 'mintemail.com', 'mohmal.com', 'moakt.com',
+  'mytemp.email', 'pokemail.net', 'sharklasers.com', 'spam4.me', 'spamgourmet.com',
+  'temp-mail.org', 'tempail.com', 'tempemail.co', 'tempinbox.com', 'tempmail.com',
+  'tempmailo.com', 'temporary-mail.net', 'throwawaymail.com', 'trashmail.com', 'trashmail.net',
+  'yopmail.com', 'yopmail.fr', 'yopmail.net',
+]);
+function isDisposableEmail(email: string): boolean {
+  const domain = email.split('@')[1]?.toLowerCase();
+  return domain ? disposableEmailDomains.has(domain) : false;
+}
+/** Trim + require + validate the format, with a distinct message for "blank" vs "malformed". */
+const requiredEmail = z.string().trim().min(1, 'Email is required').email('Enter a valid email address');
+/** For flows that mint a new email on the account (registration, changing your email) — also
+ * refuses known disposable-inbox domains. Not used at login/reset: existing accounts predating
+ * this guardrail must still be able to sign in and recover access. */
+const newAccountEmail = requiredEmail.refine((email) => !isDisposableEmail(email), { message: 'Disposable or temporary email addresses are not allowed. Please use a permanent email address.' });
+
 export const registerSchema = z.object({
   fullName: z.string().trim().min(2).max(120),
-  email: z.string().trim().email(),
-  password: z.string().min(8).max(128),
+  email: newAccountEmail,
+  password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
   institution: z.string().trim().min(2).max(160),
   course: z.string().trim().min(2).max(160),
 });
-export const registrationOtpRequestSchema = z.object({ email: z.string().trim().email() });
+export const registrationOtpRequestSchema = z.object({ email: newAccountEmail });
 export const verifiedRegisterSchema = registerSchema.extend({
   verificationId: z.string().regex(/^[a-f0-9]{64}$/i),
   verificationCode: z.string().regex(/^\d{6}$/),
@@ -27,21 +82,21 @@ export const pushSubscriptionSchema = z.object({
   keys: z.object({ p256dh: z.string().min(1).max(512), auth: z.string().min(1).max(512) }),
 });
 export const pushUnsubscribeSchema = z.object({ endpoint: z.string().url().max(4000) });
-export const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
+export const loginSchema = z.object({ email: requiredEmail, password: z.string().min(1, 'Password is required') });
 export const passwordChangeSchema = z.object({
   oldPassword: z.string().min(1),
-  password: z.string().min(8).max(128),
+  password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
   confirm: z.string().min(1),
 });
-export const passwordForgotSchema = z.object({ email: z.string().trim().email() });
+export const passwordForgotSchema = z.object({ email: requiredEmail });
 export const passwordResetSchema = z.object({
   token: z.string().min(32).max(256),
-  password: z.string().min(8).max(128),
+  password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
   confirm: z.string().min(1),
 });
 export const profileUpdateSchema = z.object({
   fullName: z.string().trim().min(2).max(120).optional(),
-  email: z.string().trim().email().optional(),
+  email: newAccountEmail.optional(),
   institution: z.string().trim().min(2).max(160).optional(),
   course: z.string().trim().min(2).max(160).optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one profile field' });

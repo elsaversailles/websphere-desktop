@@ -9,7 +9,10 @@ import { GroupScope, ProjectScope, Public, Roles } from './auth.decorators.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { TurnService } from './turn.service.js';
 
-const parse = <T>(schema: z.ZodType<T>, value: unknown) => { const result = schema.safeParse(value); if (!result.success) { const fields = Object.fromEntries(result.error.issues.map((issue) => [String(issue.path[0] ?? 'body'), issue.message])); throw new HttpException({ code: 'VALIDATION_FAILED', message: 'One or more fields are invalid', fields }, 400); } return result.data; };
+// A single failing field (the common case — e.g. a blank or disposable email) surfaces its own
+// message directly, so "Email is required" reaches the user instead of a generic banner; multiple
+// failures fall back to the generic summary since picking just one would be misleading.
+const parse = <T>(schema: z.ZodType<T>, value: unknown) => { const result = schema.safeParse(value); if (!result.success) { const fields = Object.fromEntries(result.error.issues.map((issue) => [String(issue.path[0] ?? 'body'), issue.message])); const message = result.error.issues.length === 1 ? result.error.issues[0].message : 'One or more fields are invalid'; throw new HttpException({ code: 'VALIDATION_FAILED', message, fields }, 400); } return result.data; };
 
 @Controller()
 export class AppController {
