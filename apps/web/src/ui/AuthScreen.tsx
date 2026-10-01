@@ -1,7 +1,7 @@
 import { FormEvent, useState } from 'react';
 import { authenticate, request, saveSession, type Session } from '../api';
 
-type AuthScreenProps = { onAuthenticated: (session: Session) => void; notify: (message: string) => void };
+type AuthScreenProps = { onAuthenticated: (session: Session) => void; notify: (message: string) => void; initialMode?: 'login' | 'register'; onBack?: () => void };
 type AuthMode = 'login' | 'register' | 'verify' | 'admin' | 'forgot' | 'reset';
 type RegistrationData = { fullName: string; email: string; password: string; institution: string; course: string };
 
@@ -17,9 +17,9 @@ const schools = [
   'La Concepcion College', 'Siena College of San Jose',
 ];
 
-export function AuthScreen({ onAuthenticated, notify }: AuthScreenProps) {
+export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', onBack }: AuthScreenProps) {
   const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get('resetToken') ?? '');
-  const [mode, setMode] = useState<AuthMode>(() => resetToken ? 'reset' : 'register');
+  const [mode, setMode] = useState<AuthMode>(() => resetToken ? 'reset' : initialMode);
   const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [message, setMessage] = useState('');
@@ -117,6 +117,7 @@ export function AuthScreen({ onAuthenticated, notify }: AuthScreenProps) {
 
   return <main className="auth-wrap">
     <div className="swirl s1" /><div className="swirl s2" />
+    {onBack ? <button type="button" className="auth-back" onClick={onBack}>&larr; Back to home</button> : null}
     {mode === 'login' ? <form className="abox" onSubmit={(event) => void submitLogin(event, false)}>
       <h1 className="atitle">Welcome Back</h1><p className="asub">Sign in to your account to continue</p>
       <AuthFeedback error={errorMessage} message={message} />
