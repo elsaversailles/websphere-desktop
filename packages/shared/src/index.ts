@@ -10,14 +10,41 @@ export type CallSignal = { type: 'offer' | 'answer' | 'ice-candidate'; sdp?: str
 export type CallHostAction = 'mute-all' | 'remove-participant' | 'end-call';
 export type IceServerConfig = { urls: string | string[]; username?: string; credential?: string };
 
+/**
+ * Best-effort list of well-known disposable/temporary-inbox providers. Services like these spin
+ * up new domains constantly, so this will never be exhaustive — it stops the common, easily
+ * guessed ones (the point is raising the bar on throwaway-account abuse, not perfect coverage).
+ */
+export const disposableEmailDomains = new Set([
+  '10minutemail.com', '10minutemail.net', '20minutemail.com', '33mail.com', 'burnermail.io',
+  'dispostable.com', 'emailondeck.com', 'fakeinbox.com', 'fakemail.net', 'getairmail.com',
+  'getnada.com', 'guerrillamail.com', 'guerrillamail.net', 'guerrillamail.org', 'guerrillamailblock.com',
+  'inboxkitten.com', 'maildrop.cc', 'mailcatch.com', 'mailinator.com', 'mailinator.net',
+  'mailnesia.com', 'mailnull.com', 'mintemail.com', 'mohmal.com', 'moakt.com',
+  'mytemp.email', 'pokemail.net', 'sharklasers.com', 'spam4.me', 'spamgourmet.com',
+  'temp-mail.org', 'tempail.com', 'tempemail.co', 'tempinbox.com', 'tempmail.com',
+  'tempmailo.com', 'temporary-mail.net', 'throwawaymail.com', 'trashmail.com', 'trashmail.net',
+  'yopmail.com', 'yopmail.fr', 'yopmail.net',
+]);
+function isDisposableEmail(email: string): boolean {
+  const domain = email.split('@')[1]?.toLowerCase();
+  return domain ? disposableEmailDomains.has(domain) : false;
+}
+/** Trim + require + validate the format, with a distinct message for "blank" vs "malformed". */
+const requiredEmail = z.string().trim().min(1, 'Email is required').email('Enter a valid email address');
+/** For flows that mint a new email on the account (registration, changing your email) — also
+ * refuses known disposable-inbox domains. Not used at login/reset: existing accounts predating
+ * this guardrail must still be able to sign in and recover access. */
+const newAccountEmail = requiredEmail.refine((email) => !isDisposableEmail(email), { message: 'Disposable or temporary email addresses are not allowed. Please use a permanent email address.' });
+
 export const registerSchema = z.object({
   fullName: z.string().trim().min(2).max(120),
-  email: z.string().trim().email(),
+  email: newAccountEmail,
   password: z.string().min(8).max(128),
   institution: z.string().trim().min(2).max(160),
   course: z.string().trim().min(2).max(160),
 });
-export const registrationOtpRequestSchema = z.object({ email: z.string().trim().email() });
+export const registrationOtpRequestSchema = z.object({ email: newAccountEmail });
 export const verifiedRegisterSchema = registerSchema.extend({
   verificationId: z.string().regex(/^[a-f0-9]{64}$/i),
   verificationCode: z.string().regex(/^\d{6}$/),
@@ -27,13 +54,13 @@ export const pushSubscriptionSchema = z.object({
   keys: z.object({ p256dh: z.string().min(1).max(512), auth: z.string().min(1).max(512) }),
 });
 export const pushUnsubscribeSchema = z.object({ endpoint: z.string().url().max(4000) });
-export const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
+export const loginSchema = z.object({ email: requiredEmail, password: z.string().min(1, 'Password is required') });
 export const passwordChangeSchema = z.object({
   oldPassword: z.string().min(1),
   password: z.string().min(8).max(128),
   confirm: z.string().min(1),
 });
-export const passwordForgotSchema = z.object({ email: z.string().trim().email() });
+export const passwordForgotSchema = z.object({ email: requiredEmail });
 export const passwordResetSchema = z.object({
   token: z.string().min(32).max(256),
   password: z.string().min(8).max(128),
@@ -41,7 +68,7 @@ export const passwordResetSchema = z.object({
 });
 export const profileUpdateSchema = z.object({
   fullName: z.string().trim().min(2).max(120).optional(),
-  email: z.string().trim().email().optional(),
+  email: newAccountEmail.optional(),
   institution: z.string().trim().min(2).max(160).optional(),
   course: z.string().trim().min(2).max(160).optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one profile field' });
