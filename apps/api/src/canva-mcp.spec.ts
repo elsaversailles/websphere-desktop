@@ -60,7 +60,10 @@ describe('Canva MCP OAuth (authorize/exchange/refresh)', () => {
     expect(parsed.searchParams.get('client_id')).toBe('dcr-client');
     expect(parsed.searchParams.get('code_challenge')).toBe('challenge-1');
     expect(parsed.searchParams.get('code_challenge_method')).toBe('S256');
-    expect(parsed.searchParams.get('scope')).toBe('design:read');
+    // RFC 8707 resource indicator — Canva's /authorize rejects requests missing this (see
+    // the module doc comment); must be the server's own canonical resource value.
+    expect(parsed.searchParams.get('resource')).toBe('https://mcp.canva.com/mcp');
+    expect(parsed.searchParams.get('scope')).toBe('profile:read design:meta:read design:content:read design:content:write asset:read');
   });
 
   it('reuses the cached DCR client instead of registering again for the same redirect URI', async () => {
@@ -102,6 +105,7 @@ describe('Canva MCP OAuth (authorize/exchange/refresh)', () => {
     expect(body.get('code')).toBe('auth-code');
     expect(body.get('code_verifier')).toBe('verifier-1');
     expect(body.get('client_id')).toBe('dcr-client');
+    expect(body.get('resource')).toBe('https://mcp.canva.com/mcp');
   });
 
   it('sends Basic auth when Canva’s DCR response did include a client secret', async () => {
