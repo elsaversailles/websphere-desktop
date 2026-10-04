@@ -11,8 +11,6 @@ export function IdeasPage({ userId, selectedGroupId, onSelectGroup, notify }: Id
   const [hub, setHub] = useState<GroupHub | null>(null);
   const [selectedIdeas, setSelectedIdeas] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
-  const [aiPrompt, setAiPrompt] = useState('');
-  const [aiAnswer, setAiAnswer] = useState('');
   const [voteHours, setVoteHours] = useState<number | null>(12);
 
   const refreshGroups = useCallback(async () => {
@@ -91,23 +89,17 @@ export function IdeasPage({ userId, selectedGroupId, onSelectGroup, notify }: Id
     try { await request(`/groups/${selectedGroupId}/ideas/${ideaId}/begin`, { method: 'POST' }); await refreshHub(); notify(`Project created for ${hub?.group.name ?? 'the group'}.`); }
     catch (error: any) { notify(error.message); }
   }
-  async function generateIdeas() {
-    if (!aiPrompt.trim()) return;
-    try { const result = await request<{ response: string }>('/ai/ideas/generate', { method: 'POST', body: JSON.stringify({ prompt: aiPrompt }) }); setAiAnswer(result.response); }
-    catch (error: any) { notify(error.message); }
-  }
 
   return <section className="sp on">
     <div className="ph">
       <div><h2>Idea Management</h2><div className="ph-sub">Ideas belong to a specific group and its Group Chat.</div></div>
       <div className="ph-acts">
         <label className="idea-group-picker"><span>Idea board for</span><select className="legacy-select" value={selectedGroupId} onChange={(event) => onSelectGroup(event.target.value)}><option value="">Select a group</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
-        <button className="btn-o btn-sm" onClick={() => document.querySelector<HTMLTextAreaElement>('.idea-ai-input')?.focus()}>Open AI Assistant</button>
       </div>
     </div>
     {loading ? <div className="cc"><div className="legacy-empty">Loading ideas…</div></div> : !hub ? <div className="cc"><div className="legacy-empty"><strong>Your workspace is ready</strong><span>Select a group to view or submit its ideas.</span></div></div> : <>
       <div className="idea-group-context"><span>Group Chat idea board</span><strong>{hub.group.name}</strong><small>{hub.group.members.length} member{hub.group.members.length === 1 ? '' : 's'} · Ideas and votes here belong only to this group.</small></div>
-      <div className="cc"><div className="cc-head"><h3>AI Idea Generator · {hub.group.name}</h3></div><p className="idea-generator-copy">Search for academic project ideas for <strong>{hub.group.name}</strong>. Discuss these ideas in that group’s chat, then use its vote to choose a project.</p><div className="idea-generator-row"><textarea className="ifield idea-ai-input" value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)} placeholder="Describe your course, topic, or project problem…" rows={2} /><button className="btn" onClick={() => void generateIdeas()}>Generate Ideas</button></div>{aiAnswer ? <div className="ai-response">{aiAnswer}</div> : null}<div className="sdiv" /><form className="idea-submit-row" onSubmit={submitIdea}><input className="ifield" name="title" required minLength={2} maxLength={180} placeholder="Idea title" /><input className="ifield" name="body" required placeholder="Idea details" /><button className="btn">Submit to {hub.group.name}</button></form></div>
+      <div className="cc"><div className="cc-head"><h3>Submit an idea · {hub.group.name}</h3></div><p className="idea-generator-copy">Add an academic project idea for <strong>{hub.group.name}</strong>. Discuss these ideas in that group’s chat, then use its vote to choose a project.</p><form className="idea-submit-row" onSubmit={submitIdea}><input className="ifield" name="title" required minLength={2} maxLength={180} placeholder="Idea title" /><input className="ifield" name="body" required placeholder="Idea details" /><button className="btn">Submit to {hub.group.name}</button></form></div>
       <div className="cc"><div className="cc-head"><h3>Ideas for {hub.group.name}</h3><div className="ph-acts">{!poll && selectedIdeas.length >= 2 ? <button className="btn-o btn-sm" onClick={() => void mergeSelected()}>Merge Selected</button> : null}{leader && !poll ? <label className="vote-duration"><span>Voting time</span><select className="legacy-select" value={voteHours ?? ''} onChange={(event) => setVoteHours(event.target.value ? Number(event.target.value) : null)}>{votingDurations.map((option) => <option key={option.label} value={option.hours ?? ''}>{option.label}</option>)}</select></label> : null}{leader && !poll ? <button className="btn btn-sm" disabled={selectedIdeas.length < 2} onClick={() => void createPoll()}>Start Live Vote</button> : null}</div></div>{hub.ideas.length ? <div>{hub.ideas.slice(0, 10).map((idea, index) => <article className="legacy-idea-card" key={idea.id}><span className="idea-num">{index + 1}</span><div><strong className="idea-title">{idea.title}</strong><span className="idea-meta">{idea.body}</span></div>{!poll && idea.status !== 'selected' ? <label className="idea-select"><input type="checkbox" checked={selectedIdeas.includes(idea.id)} onChange={(event) => setSelectedIdeas((current) => event.target.checked ? [...current, idea.id] : current.filter((value) => value !== idea.id))} /> Select</label> : null}{idea.authorId === userId && idea.status !== 'selected' ? <button className="btn-o btn-sm" onClick={() => void reviseIdea(idea.id, idea.title, idea.body)}>Revise</button> : null}{idea.authorId === userId && idea.status !== 'selected' ? <button className="btn-o btn-sm" onClick={() => void rejectIdea(idea.id)}>Reject</button> : null}{leader && idea.status !== 'selected' ? <button className="btn-o btn-sm" onClick={() => void beginProject(idea.id)}>Make Project</button> : null}</article>)}</div> : <div className="legacy-empty">No ideas for {hub.group.name} yet.</div>}</div>
       <div className="cc"><div className="cc-head"><h3>Submitted Ideas · {hub.group.name}</h3>{hub.poll ? <div className="ph-acts"><PollStatus poll={hub.poll} onExpired={refreshHub} />{poll && leader ? <button className="btn-o btn-sm" onClick={() => void closeVoting()}>Close voting</button> : null}</div> : null}</div>{hub.ideas.length ? <table className="tbl"><thead><tr><th>Idea</th><th>Submitted By</th><th>Category</th><th>AI Score</th><th>Status</th></tr></thead><tbody>{hub.ideas.map((idea) => <tr key={idea.id}><td><strong>{idea.title}</strong></td><td>{idea.authorId === userId ? 'You' : 'Group member'}</td><td>Academic Project</td><td>—</td><td><span className="bdg ac">{idea.status}</span></td></tr>)}</tbody></table> : <div className="legacy-empty">Submitted ideas for {hub.group.name} will appear here.</div>}</div>
     </>}
