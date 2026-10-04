@@ -56,4 +56,20 @@ export class EmailService {
     }, 'Verification email could not be delivered. Verify the SES sender and sandbox recipient, then try again.');
     return true;
   }
+
+  // Routed to the support inbox rather than the requester: a signed-out user is asking the team to
+  // close their account, so the support staff needs the details and a reply-to that reaches them.
+  async sendDeactivationRequest(requesterEmail: string, reason: string) {
+    const safeReason = reason.trim() || '(no reason provided)';
+    const escapedReason = safeReason.replace(/[<>&]/g, (char) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[char] ?? char));
+    await this.send({
+      from: this.config.get('SES_FROM'),
+      to: 'support@websphere.fun',
+      replyTo: requesterEmail,
+      subject: `Account deactivation request — ${requesterEmail}`,
+      text: `A WebSphere account deactivation request was submitted.\n\nAccount email: ${requesterEmail}\nReason: ${safeReason}\n\nReply to this email to reach the requester.`,
+      html: `<p>A WebSphere account deactivation request was submitted.</p><p><strong>Account email:</strong> ${requesterEmail}</p><p><strong>Reason:</strong> ${escapedReason}</p><p>Reply to this email to reach the requester.</p>`,
+    }, 'Deactivation request could not be delivered. Please try again later.');
+    return true;
+  }
 }

@@ -78,6 +78,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   private registrationOtpKey(verificationId: string) { return `auth:registration-otp:${verificationId}`; }
   private registrationOtpAttemptKey(verificationId: string) { return `auth:registration-otp-attempts:${verificationId}`; }
   private registrationOtpRateKey(email: string) { return `auth:registration-otp-rate:${createHash('sha256').update(email).digest('hex')}`; }
+  private deactivationRequestRateKey(email: string) { return `auth:deactivation-request-rate:${createHash('sha256').update(email).digest('hex')}`; }
   private otpHash(verificationId: string, code: string) { return createHash('sha256').update(`${verificationId}:${code}`).digest('hex'); }
   private refreshTtlSeconds() {
     const match = this.config.get('JWT_REFRESH_TTL').match(/^(\d+)(s|m|h|d)$/);
@@ -101,6 +102,23 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.email.sendRegistrationVerification(email, code);
     await this.redis.set(this.registrationOtpKey(verificationId), JSON.stringify({ email, codeHash: this.otpHash(verificationId, code) }), this.config.get('REGISTRATION_OTP_TTL_SECONDS'));
     return { ok: true, verificationId };
+  }
+
+  /**
+   * Public, unauthenticated: a signed-out user asks support to close their account. We always return
+   * ok so the response can't be used to probe which emails are registered, but only forward the
+   * request to support when an account actually exists. Rate-limited per email to curb abuse.
+   */
+  async requestAccountDeactivation(rawEmail: string, reason: string = '') {
+    const email = rawEmail.trim().toLowerCase();
+    const requests = await this.redis.incrementWithExpiry(this.deactivationRequestRateKey(email), 3600);
+    if (requests > 3) fail('RATE_LIMITED', 'Too many requests. Please try again later.', 429);
+    const user = await this.prisma.user.findUnique({ where: { email }, select: { id: true } });
+    if (user) {
+      await this.email.sendDeactivationRequest(email, reason);
+      await this.audit.log('AuthModule', 'account_deactivation_requested', 'info', `Deactivation request submitted for ${email}`, user.id);
+    }
+    return { ok: true };
   }
 
   async register(input: any) {

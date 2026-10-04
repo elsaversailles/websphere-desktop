@@ -106,6 +106,7 @@ export const passwordChangeSchema = z.object({
   confirm: z.string().min(1),
 });
 export const passwordForgotSchema = z.object({ email: requiredEmail });
+export const deactivationRequestSchema = z.object({ email: requiredEmail, reason: z.string().trim().max(1000).default('') });
 export const passwordResetSchema = z.object({
   token: z.string().min(32).max(256),
   password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),

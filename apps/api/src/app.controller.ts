@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, Redirect, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { z } from 'zod';
-import { aiAskSchema, announcementSchema, calendarEventSchema, ideaSchema, loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, pollCreateSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, ticketUpdateSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
+import { aiAskSchema, announcementSchema, calendarEventSchema, deactivationRequestSchema, ideaSchema, loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, pollCreateSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, ticketUpdateSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
 import { AppService } from './app.service.js';
 import { LocalStorageService } from './local-storage.service.js';
 import { RedisService } from './redis.service.js';
@@ -27,6 +27,7 @@ export class AppController {
   @Post('auth/logout') async logout(@Headers('authorization') auth?: string) { return this.app.logout(await this.caller(auth)); }
   @Public() @Post('auth/password/change') async change(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(passwordChangeSchema, body); return this.app.changePassword(await this.app.caller(auth, { allowLocked: true }), input.oldPassword, input.password, input.confirm); }
   @Public() @Post('auth/password/forgot') forgot(@Body() body: unknown) { return this.app.forgot(parse(passwordForgotSchema, body).email); }
+  @Public() @Post('auth/deactivation-request') deactivationRequest(@Body() body: unknown) { const input = parse(deactivationRequestSchema, body); return this.app.requestAccountDeactivation(input.email, input.reason); }
   @Public() @Post('auth/password/reset') reset(@Body() body: unknown) { const input = parse(passwordResetSchema, body); return this.app.resetPassword(input.token, input.password, input.confirm); }
   @Get('users/me') async me(@Headers('authorization') auth: string) { return this.app.me(await this.caller(auth)); }
   @Patch('users/me') async updateMe(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.updateMe(await this.caller(auth), parse(profileUpdateSchema, body)); }

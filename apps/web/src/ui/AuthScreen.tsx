@@ -3,7 +3,7 @@ import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, passwordRequirements } from '
 import { authenticate, request, saveSession, type Session } from '../api';
 
 type AuthScreenProps = { onAuthenticated: (session: Session) => void; notify: (message: string) => void; initialMode?: 'login' | 'register'; onBack?: () => void };
-type AuthMode = 'login' | 'register' | 'verify' | 'admin' | 'forgot' | 'reset';
+type AuthMode = 'login' | 'register' | 'verify' | 'admin' | 'forgot' | 'reset' | 'deactivate';
 type RegistrationData = { fullName: string; email: string; password: string; institution: string; course: string };
 
 /** Sentinel option value for "Others" on the course/institution selects — never submitted as-is, see SelectWithOther. */
@@ -112,6 +112,20 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     } catch (error: unknown) { showError(error); } finally { setBusy(false); }
   }
 
+  async function submitDeactivation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const email = String(data.get('email') ?? '').trim();
+    const reason = String(data.get('reason') ?? '').trim();
+    setErrorMessage('');
+    setBusy(true);
+    try {
+      await request('/auth/deactivation-request', { method: 'POST', body: JSON.stringify({ email, reason }) });
+      setMessage('Your deactivation request has been sent to our support team. They will reach out to the email you provided.');
+      setMode('login');
+    } catch (error: unknown) { showError(error); } finally { setBusy(false); }
+  }
+
   async function submitReset(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -139,7 +153,7 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <button className="aforgot" type="button" onClick={() => changeMode('forgot')}>Forgot password?</button>
       <button className="abtn" disabled={busy}>{busy ? 'Signing In…' : 'Sign In'}</button>
       <p className="alink">Don&apos;t have an account? <button type="button" onClick={() => changeMode('register')}>Register here</button></p>
-      <p className="alink admin-link"><button type="button" onClick={() => changeMode('admin')}>Admin login</button></p>
+      <p className="alink admin-link"><button type="button" onClick={() => changeMode('admin')}>Admin login</button> · <button type="button" onClick={() => changeMode('deactivate')}>Deactivate account</button></p>
     </form> : null}
     {mode === 'admin' ? <form className="abox" onSubmit={(event) => void submitLogin(event, true)}>
       <h1 className="atitle admin-title">Administrator Login</h1>
@@ -177,6 +191,14 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <AuthFeedback error={errorMessage} message={message} />
       <AuthField label="Email Address" name="email" type="email" placeholder="your@email.com" />
       <button className="abtn" disabled={busy}>{busy ? 'Sending…' : 'Send Reset Link'}</button>
+      <p className="alink"><button type="button" onClick={() => changeMode('login')}>Back to sign in</button></p>
+    </form> : null}
+    {mode === 'deactivate' ? <form className="abox" onSubmit={(event) => void submitDeactivation(event)}>
+      <h1 className="atitle">Deactivate Account</h1><p className="asub">Send a request to our support team to deactivate your account. We&apos;ll follow up at the email you provide.</p>
+      <AuthFeedback error={errorMessage} message={message} />
+      <AuthField label="Email Address" name="email" type="email" placeholder="your@email.com" />
+      <label className="auth-field"><span className="lbl">Reason (optional)</span><textarea className="afield" name="reason" rows={3} maxLength={1000} placeholder="Let us know why you'd like to deactivate your account" /></label>
+      <button className="abtn" disabled={busy}>{busy ? 'Sending…' : 'Send Deactivation Request'}</button>
       <p className="alink"><button type="button" onClick={() => changeMode('login')}>Back to sign in</button></p>
     </form> : null}
     {mode === 'reset' ? <form className="abox" onSubmit={(event) => void submitReset(event)}>
