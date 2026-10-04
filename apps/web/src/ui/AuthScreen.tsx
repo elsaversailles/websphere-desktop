@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useState } from 'react';
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, passwordRequirements } from '@websphere/shared';
 import { authenticate, request, saveSession, type Session } from '../api';
 
@@ -8,6 +8,11 @@ type RegistrationData = { fullName: string; email: string; password: string; ins
 
 /** Sentinel option value for "Others" on the course/institution selects — never submitted as-is, see SelectWithOther. */
 const OTHER_OPTION = '__other__';
+
+// Verification code lifetime, matched to the server's REGISTRATION_OTP_TTL_SECONDS (300s), plus the
+// cooldown before a fresh code can be requested.
+const OTP_TTL_MS = 5 * 60 * 1000;
+const OTP_RESEND_COOLDOWN_MS = 30 * 1000;
 
 const courses = [
   'Bachelor of Science in Information Technology', 'Bachelor of Science in Computer Science',
@@ -33,6 +38,22 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
   const [resetPassword, setResetPasswordValue] = useState('');
   const [agreedToPrivacy, setAgreedToPrivacy] = useState(false);
   const [privacyOpen, setPrivacyOpen] = useState(false);
+  // When the most recent code was issued; drives the 5-minute expiry countdown and the 30s resend cooldown.
+  const [otpSentAt, setOtpSentAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  // Tick once a second only while the verify screen has a live code, so the countdown stays current
+  // without a timer running the rest of the time.
+  useEffect(() => {
+    if (mode !== 'verify' || otpSentAt === null) return;
+    const handle = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(handle);
+  }, [mode, otpSentAt]);
+
+  const otpExpiresInMs = otpSentAt === null ? 0 : Math.max(0, otpSentAt + OTP_TTL_MS - now);
+  const otpExpired = otpSentAt !== null && otpExpiresInMs === 0;
+  const otpResendInMs = otpSentAt === null ? 0 : Math.max(0, otpSentAt + OTP_RESEND_COOLDOWN_MS - now);
+  const otpCountdownLabel = formatCountdown(otpExpiresInMs);
 
   function changeMode(next: AuthMode) { setErrorMessage(''); setMessage(''); setMode(next); }
   function showError(error: unknown) { setErrorMessage(error instanceof Error ? error.message : 'Something went wrong. Please try again.'); }
@@ -68,18 +89,22 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       const result = await request<{ ok: true; verificationId: string }>('/auth/registration/otp', { method: 'POST', body: JSON.stringify({ email: pending.email }) });
       setRegistration(pending);
       setVerificationId(result.verificationId);
+      setOtpSentAt(Date.now());
+      setNow(Date.now());
       setMessage(`We sent a six-digit code to ${pending.email}.`);
       setMode('verify');
     } catch (error: unknown) { showError(error); } finally { setBusy(false); }
   }
 
   async function resendVerification() {
-    if (!registration) return;
+    if (!registration || otpResendInMs > 0) return;
     setErrorMessage('');
     setBusy(true);
     try {
       const result = await request<{ ok: true; verificationId: string }>('/auth/registration/otp', { method: 'POST', body: JSON.stringify({ email: registration.email }) });
       setVerificationId(result.verificationId);
+      setOtpSentAt(Date.now());
+      setNow(Date.now());
       setMessage(`A new code was sent to ${registration.email}.`);
     } catch (error: unknown) { showError(error); } finally { setBusy(false); }
   }
@@ -87,6 +112,7 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
   async function submitVerification(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!registration || !verificationId) return setErrorMessage('Your registration details are unavailable. Please start again.');
+    if (otpExpired) return setErrorMessage('That code has expired. Request a new one to continue.');
     const verificationCode = String(new FormData(event.currentTarget).get('verificationCode') ?? '').trim();
     setErrorMessage('');
     setBusy(true);
@@ -94,6 +120,7 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       await request('/auth/register', { method: 'POST', body: JSON.stringify({ ...registration, verificationId, verificationCode }) });
       setRegistration(null);
       setVerificationId('');
+      setOtpSentAt(null);
       setMessage('Email verified. Your account is ready—please sign in.');
       setMode('login');
     } catch (error: unknown) { showError(error); } finally { setBusy(false); }
@@ -182,9 +209,10 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     {mode === 'verify' ? <form className="abox" onSubmit={(event) => void submitVerification(event)}>
       <h1 className="atitle">Verify Your Email</h1><p className="asub">Enter the six-digit code sent to {registration?.email ?? 'your email address'}.</p>
       <AuthFeedback error={errorMessage} message={message} />
-      <label className="auth-field"><span className="lbl">Verification Code<span className="required-mark" aria-hidden="true"> *</span></span><input className="afield otp-field" required name="verificationCode" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} placeholder="123456" /></label>
-      <button className="abtn" disabled={busy}>{busy ? 'Verifying…' : 'Verify & Create Account'}</button>
-      <p className="alink"><button type="button" disabled={busy} onClick={() => void resendVerification()}>Resend code</button> · <button type="button" disabled={busy} onClick={() => changeMode('register')}>Edit details</button></p>
+      <label className="auth-field"><span className="lbl">Verification Code<span className="required-mark" aria-hidden="true"> *</span></span><input className="afield otp-field" required name="verificationCode" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} placeholder="123456" disabled={otpExpired} /></label>
+      <p className={`otp-timer ${otpExpired ? 'expired' : ''}`} role="status">{otpExpired ? 'Your code has expired. Request a new one to continue.' : <>Code expires in <strong>{otpCountdownLabel}</strong></>}</p>
+      <button className="abtn" disabled={busy || otpExpired}>{busy ? 'Verifying…' : 'Verify & Create Account'}</button>
+      <p className="alink"><button type="button" disabled={busy || otpResendInMs > 0} onClick={() => void resendVerification()}>{otpResendInMs > 0 ? `Resend code in ${Math.ceil(otpResendInMs / 1000)}s` : 'Resend code'}</button> · <button type="button" disabled={busy} onClick={() => changeMode('register')}>Edit details</button></p>
     </form> : null}
     {mode === 'forgot' ? <form className="abox" onSubmit={(event) => void submitForgot(event)}>
       <h1 className="atitle">Reset Password</h1><p className="asub">Locked accounts receive a one-time reset link by email.</p>
@@ -211,6 +239,14 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <p className="alink"><button type="button" onClick={() => changeMode('login')}>Back to sign in</button></p>
     </form> : null}
   </main>;
+}
+
+/** Milliseconds remaining as m:ss, clamped at zero. */
+function formatCountdown(ms: number) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
 function AuthFeedback({ error, message }: { error: string; message: string }) {

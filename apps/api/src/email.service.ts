@@ -51,8 +51,8 @@ export class EmailService {
       from: this.config.get('SES_FROM'),
       to: email,
       subject: 'Your WebSphere verification code',
-      text: `Your WebSphere verification code is ${code}. It expires in 10 minutes. If you did not request this code, you can ignore this email.`,
-      html: `<p>Your WebSphere verification code is:</p><p style="font-size:24px;font-weight:700;letter-spacing:4px">${code}</p><p>It expires in 10 minutes. If you did not request this code, you can ignore this email.</p>`,
+      text: `Your WebSphere verification code is ${code}. It expires in 5 minutes. If you did not request this code, you can ignore this email.`,
+      html: `<p>Your WebSphere verification code is:</p><p style="font-size:24px;font-weight:700;letter-spacing:4px">${code}</p><p>It expires in 5 minutes. If you did not request this code, you can ignore this email.</p>`,
     }, 'Verification email could not be delivered. Verify the SES sender and sandbox recipient, then try again.');
     return true;
   }
