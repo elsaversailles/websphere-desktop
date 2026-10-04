@@ -112,6 +112,7 @@ export class AppController {
   @Get('integrations/connections') async connections(@Headers('authorization') auth: string) { return this.app.integrationConnections(await this.caller(auth)); }
   @Get('integrations/connections/:id/google-picker-token') async googlePickerToken(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.googlePickerToken(await this.caller(auth), id); }
   @Post('integrations/connections/:id/sync') async sync(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.syncIntegration(await this.caller(auth), id); }
+  @Delete('integrations/connections/:id') async disconnect(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.disconnectIntegration(await this.caller(auth), id); }
   @Post('resources/:id/launch') async launchResource(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.launchResource(await this.caller(auth), id); }
   @Patch('resources/:id') async updateResource(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { const caller = await this.caller(auth); const updated = await this.app.updateLinkedResource(caller, id, parse(resourceUpdateSchema, body)); this.realtime.publishTaskUpdated(updated.projectId, await this.app.task(caller, updated.taskId)); return updated; }
   @Post('support/tickets') async ticket(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.ticket(await this.caller(auth), parse(supportTicketSchema, body)); }

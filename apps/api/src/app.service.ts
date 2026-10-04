@@ -337,6 +337,23 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.prisma.toolUsage.create({ data: { connectionId: resource.connectionId, action: `Opened “${resource.title}”` } });
     return { externalUrl, platform: resource.connection.tool.name };
   }
+  /**
+   * Fully removes a user's integration so they can connect it again from scratch. Deletes the
+   * connection's dependent rows (linked resources, usage) first — they have no cascade — then the
+   * connection itself. For Microsoft, the mirrored owner-private Outlook calendar events are also
+   * cleared so a fresh connect does not leave stale events behind. Scoped to the caller's own rows.
+   */
+  async disconnectIntegration(caller: Caller, connectionId: string) {
+    const connection = await this.prisma.toolConnection.findFirst({ where: { id: connectionId, userId: caller.id }, include: { tool: true } });
+    if (!connection) fail('NOT_FOUND', 'This integration connection does not exist', 404);
+    await this.prisma.$transaction([
+      this.prisma.toolUsage.deleteMany({ where: { connectionId: connection.id } }),
+      this.prisma.linkedResource.deleteMany({ where: { connectionId: connection.id } }),
+      this.prisma.toolConnection.delete({ where: { id: connection.id } }),
+      ...(connection.provider === 'microsoft' ? [this.prisma.calendarEvent.deleteMany({ where: { ownerId: caller.id, source: 'outlook' } })] : []),
+    ]);
+    return { ok: true, platform: connection.tool.name };
+  }
   async syncIntegration(caller: Caller, connectionId: string) {
     const connection = await this.prisma.toolConnection.findFirst({ where: { id: connectionId, userId: caller.id }, include: { tool: true } });
     if (!connection || connection.status !== 'connected') fail('INTEGRATION_UNAVAILABLE', 'This integration is not connected', 400);
@@ -675,7 +692,8 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const encrypted = this.encryptedTokens(tokens!);
     return this.prisma.toolConnection.upsert({
       where: { userId_provider: { userId: record.userId, provider } },
-      update: { ...encrypted, status: 'connected', syncState: null },
+      // Reset the Outlook delta cursor on reconnect so a re-add always does a clean full reseed.
+      update: { ...encrypted, status: 'connected', syncState: null, deltaLink: null },
       create: { userId: record.userId, provider, ...encrypted, status: 'connected' },
     });
   }
