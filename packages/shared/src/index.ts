@@ -23,13 +23,30 @@ function hasMonotonicRun(password: string) {
   }
   return false;
 }
+// Each QWERTY row, so a run of adjacent keys (qwerty, asdf, zxcv, 12345) can be caught regardless
+// of direction. Rows are matched independently; a sequence does not wrap from one row to the next.
+const KEYBOARD_ROWS = ['`1234567890-=', 'qwertyuiop[]\\', "asdfghjkl;'", 'zxcvbnm,./'];
+function hasKeyboardRun(password: string, run = 4) {
+  const lower = password.toLowerCase();
+  for (const row of KEYBOARD_ROWS) {
+    for (let start = 0; start <= row.length - run; start++) {
+      const forward = row.slice(start, start + run);
+      const backward = [...forward].reverse().join('');
+      if (lower.includes(forward) || lower.includes(backward)) return true;
+    }
+  }
+  return false;
+}
+function hasSequence(password: string) {
+  return hasMonotonicRun(password) || hasKeyboardRun(password);
+}
 /** One entry per rule, so a UI can show live pass/fail per rule as the user types — not just the first failure. */
 export function passwordRequirements(password: string): PasswordRequirement[] {
   return [
     { id: 'length', label: `${PASSWORD_MIN_LENGTH}–${PASSWORD_MAX_LENGTH} characters`, met: password.length >= PASSWORD_MIN_LENGTH && password.length <= PASSWORD_MAX_LENGTH },
     { id: 'symbol', label: 'At least one symbol', met: /[^A-Za-z0-9\s]/.test(password) },
     { id: 'number', label: 'At least one number', met: /\d/.test(password) },
-    { id: 'sequence', label: 'No obvious sequences (e.g. abcd, 1234)', met: password.length === 0 || !hasMonotonicRun(password) },
+    { id: 'sequence', label: 'No obvious sequences (e.g. abcd, 1234, qwerty)', met: password.length === 0 || !hasSequence(password) },
   ];
 }
 /** Server-side gate: the first failing rule's id, matching the field error shape the rest of the API uses. */

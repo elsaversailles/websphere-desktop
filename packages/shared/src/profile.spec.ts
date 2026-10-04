@@ -119,4 +119,18 @@ describe('password policy', () => {
     expect(validatePassword('ab1!cdef')).toEqual({ ok: false, reason: 'sequence' }); // ...cdef ascends
     expect(validatePassword('ab1!fedc')).toEqual({ ok: false, reason: 'sequence' }); // ...fedc descends
   });
+
+  it('rejects keyboard-row runs regardless of direction, even once other rules pass', () => {
+    expect(validatePassword('qwerty1!')).toEqual({ ok: false, reason: 'sequence' }); // top row
+    expect(validatePassword('Qwertyuiop1!')).toEqual({ ok: false, reason: 'sequence' }); // longer top row
+    expect(validatePassword('1!asdfgh')).toEqual({ ok: false, reason: 'sequence' }); // home row
+    expect(validatePassword('zxcv1!ab')).toEqual({ ok: false, reason: 'sequence' }); // bottom row
+    expect(validatePassword('1!ytrewq')).toEqual({ ok: false, reason: 'sequence' }); // reversed top row
+    expect(validatePassword('12345!ab')).toEqual({ ok: false, reason: 'sequence' }); // number row run
+  });
+
+  it('does not flag short keyboard overlaps below the run length', () => {
+    // "qw" / "as" are only two adjacent keys, not a 4-key run, so a compliant password still passes.
+    expect(validatePassword('qw9!bnm2')).toEqual({ ok: true });
+  });
 });
