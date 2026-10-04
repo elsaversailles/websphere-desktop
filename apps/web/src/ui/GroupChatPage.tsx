@@ -3,10 +3,11 @@ import { io, type Socket } from 'socket.io-client';
 import type { CallHostAction, CallKind, CallParticipant, CallSignal } from '@websphere/shared';
 import { getAccessToken, request, socketBaseUrl } from '../api';
 import { GroupAvatar } from './GroupAvatar';
+import { GroupHub as GroupHubPanel } from './GroupHub';
 import { PollStatus } from './PollStatus';
 import type { GroupHub, GroupSummary, Poll } from './types';
 
-type Props = { userId: string; selectedGroupId: string; onSelectGroup: (id: string) => void; notify: (message: string) => void; incomingCall: { groupId: string; kind: CallKind } | null; onIncomingCallHandled: () => void };
+type Props = { userId: string; selectedGroupId: string; onSelectGroup: (id: string) => void; onIdeas: () => void; notify: (message: string) => void; incomingCall: { groupId: string; kind: CallKind } | null; onIncomingCallHandled: () => void };
 type ActiveCall = { groupId: string; kind: CallKind };
 type RemoteStream = { socketId: string; userId: string; stream: MediaStream };
 
@@ -68,7 +69,7 @@ function IdeaVoteCard({ option, totalVotes, viewerOptionId, viewerId, votingOpen
   </article>;
 }
 
-export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, incomingCall, onIncomingCallHandled }: Props) {
+export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas, notify, incomingCall, onIncomingCallHandled }: Props) {
   const [groups, setGroups] = useState<GroupSummary[]>([]);
   const [hub, setHub] = useState<GroupHub | null>(null);
   const [call, setCall] = useState<ActiveCall | null>(null);
@@ -81,6 +82,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
   const [peopleOpen, setPeopleOpen] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [closingPoll, setClosingPoll] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
   const refreshHub = useCallback(async () => {
     if (!selectedGroupId) return;
     try { setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); } catch { /* the next tally or refresh will retry */ }
@@ -98,7 +100,13 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
   const iceServersRef = useRef<RTCIceServer[]>([]);
 
   useEffect(() => { void request<GroupSummary[]>('/groups').then((next) => { setGroups(next); if (!selectedGroupId && next[0]) onSelectGroup(next[0].id); }).catch((error: Error) => notify(error.message)); }, [selectedGroupId, onSelectGroup, notify]);
-  useEffect(() => { if (!selectedGroupId) { setHub(null); return; } void request<GroupHub>(`/groups/${selectedGroupId}/hub`).then(setHub).catch((error: Error) => notify(error.message)); }, [selectedGroupId, notify]);
+  useEffect(() => { setManageOpen(false); if (!selectedGroupId) { setHub(null); return; } void request<GroupHub>(`/groups/${selectedGroupId}/hub`).then(setHub).catch((error: Error) => notify(error.message)); }, [selectedGroupId, notify]);
+  useEffect(() => {
+    if (!manageOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setManageOpen(false); };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [manageOpen]);
 
   function removePeer(socketId: string) {
     peersRef.current.get(socketId)?.close();
@@ -359,6 +367,27 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
     finally { setLeaving(false); }
   }
 
+  // Any member may add people; only the leader may remove them. The API enforces both rules, the UI only mirrors them.
+  async function addMember(email: string) {
+    if (!selectedGroupId) return;
+    try {
+      await request(`/groups/${selectedGroupId}/members`, { method: 'POST', body: JSON.stringify({ email }) });
+      await refreshHub();
+      notify('Member added.');
+    } catch (error: any) { notify(error.message); }
+  }
+
+  async function removeMember(memberUserId: string) {
+    if (!hub || !selectedGroupId || !viewerIsLeader) return;
+    const name = hub.group.members.find((member) => member.userId === memberUserId)?.user.fullName ?? 'this member';
+    if (!window.confirm(`Remove ${name} from “${hub.group.name}”? They will lose access to its chat, projects and tasks.`)) return;
+    try {
+      await request(`/groups/${selectedGroupId}/members/${memberUserId}`, { method: 'DELETE' });
+      await refreshHub();
+      notify(`${name} was removed from the group.`);
+    } catch (error: any) { notify(error.message); }
+  }
+
   async function startProject() {
     const winner = hub?.poll?.options.slice().sort((a, b) => b.votes - a.votes)[0];
     if (!winner) return notify('Open a vote in Idea Management first.');
@@ -385,15 +414,21 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, notify, 
       <aside className="gc-left-panel"><div className="gc-left-head"><h3>Chats</h3><button title="New chat">＋</button></div><div className="gc-search"><span>⌕</span><input placeholder="Search chats..." /></div><div className="gc-chat-list">{groups.length ? groups.map((group) => <button className={`gc-chat-item ${group.id === selectedGroupId ? 'active' : ''}`} key={group.id} onClick={() => onSelectGroup(group.id)}><GroupAvatar name={group.name} className="gc-list-avatar" /><span><strong>{group.name}</strong><small>{group._count.projects} projects · {group._count.ideas} ideas</small></span></button>) : <div className="gc-panel-empty">Your groups will appear here.</div>}</div><div className="gc-mini-calendar"><strong>{new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</strong><span>Your scheduled events will appear here.</span></div></aside>
       {hub ? <>
         <main className="gc-main-chat">
-          <header className="gc-chat-header"><GroupAvatar name={hub.group.name} className="gc-list-avatar large" /><div><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => notify('Add members from My Groups → Group Hub.')}>Add Members</button><button className="gc-leave-btn" disabled={leaving} onClick={() => void leaveGroup()}>{leaving ? 'Leaving…' : 'Leave'}</button></div></header>
+          <header className="gc-chat-header"><GroupAvatar name={hub.group.name} className="gc-list-avatar large" /><div><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => setManageOpen(true)}>Add Members</button><button className="gc-leave-btn" disabled={leaving} onClick={() => void leaveGroup()}>{leaving ? 'Leaving…' : 'Leave'}</button></div></header>
           {callStage ?? <><div className="gchat-msgs">{hub.messages.length ? [...hub.messages].reverse().map((message) => { const member = hub.group.members.find((value) => value.userId === message.senderId); const sender = message.senderId === userId ? 'You' : member?.user.fullName ?? 'Group member'; return <div className={`gc-msg ${message.senderId === userId ? 'me' : ''}`} key={message.id}><MemberAvatar name={member?.user.fullName ?? sender} avatarUrl={member?.user.avatarUrl} className="gc-message-avatar" /><div className="gc-bub"><div className="gc-name">{sender}</div><div className="gc-txt">{message.body}</div><div className="gc-time">{new Date(message.createdAt).toLocaleString()}</div></div></div>; }) : <div className="legacy-empty">Choose or create a group to begin a conversation.</div>}</div><form className="gchat-ir" onSubmit={send}><input className="gchat-input" name="body" placeholder="Type a message to your group…" autoComplete="off" /><button className="gchat-send">Send</button></form></>}
         </main>
         <aside className="gc-right-panel">
-          <section><div className="gc-side-title"><h3>Members</h3><span>{hub.group.members.length}</span></div>{hub.group.members.map((member) => <div className="gc-member-row" key={member.userId}><MemberAvatar name={member.user.fullName} avatarUrl={member.user.avatarUrl} /><span><strong>{member.user.fullName}</strong><small>{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</small></span><i /></div>)}</section>
+          <section><div className="gc-side-title"><h3>Members</h3><span>{hub.group.members.length}</span></div>{hub.group.members.map((member) => <div className="gc-member-row" key={member.userId}><MemberAvatar name={member.user.fullName} avatarUrl={member.user.avatarUrl} /><span><strong>{member.user.fullName}</strong><small>{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</small></span>{viewerIsLeader && member.userId !== userId ? <button type="button" className="gc-member-remove" aria-label={`Remove ${member.user.fullName} from the group`} title={`Remove ${member.user.fullName}`} onClick={() => void removeMember(member.userId)}>Remove</button> : <i />}</div>)}<button type="button" className="gc-manage-members" onClick={() => setManageOpen(true)}>{viewerIsLeader ? 'Manage members' : 'Add members'}</button></section>
           <section className="gc-voting"><div className="gc-side-title"><h3>Idea Voting</h3></div>{poll ? <><div className="gc-poll-status"><PollStatus poll={poll} onExpired={refreshHub} />{poll.open && viewerIsLeader ? <button type="button" className="gc-close-vote" disabled={closingPoll} onClick={() => void closeVoting()}>{closingPoll ? 'Closing…' : 'Close voting'}</button> : null}</div><div className="gc-poll-options">{poll.options.map((option) => <IdeaVoteCard key={option.optionId} option={option} totalVotes={poll.options.reduce((total, value) => total + value.votes, 0)} viewerOptionId={poll.viewerOptionId} viewerId={userId} votingOpen={poll.open} onVote={(optionId) => void vote(optionId)} />)}</div></> : <div className="gc-panel-empty">Your group vote starts in Idea Management.</div>}</section>
           <button className="gc-start-project" disabled={!hub.poll} onClick={() => void startProject()}>Start Project</button>
         </aside>
       </> : <div className="gc-no-selection"><strong>Your workspace is ready</strong><span>Choose or create a group to begin a conversation.</span></div>}
     </div>
+    {manageOpen && hub ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setManageOpen(false); }}>
+      <div className="modal-box hub-modal" role="dialog" aria-modal="true" aria-label={`Group Hub for ${hub.group.name}`}>
+        <div className="modal-ttl"><span>Group Hub · {hub.group.name}</span><button type="button" className="modal-close" aria-label="Close Group Hub" onClick={() => setManageOpen(false)}>×</button></div>
+        <GroupHubPanel hub={hub} userId={userId} notify={notify} onAdd={addMember} onRemove={removeMember} onIdeas={onIdeas} />
+      </div>
+    </div> : null}
   </section>;
 }

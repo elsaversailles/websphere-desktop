@@ -662,6 +662,41 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const improving = weeks.length > 1 && weeks[weeks.length - 1].tasksCompleted >= weeks[0].tasksCompleted;
     return { periods: weeks, trend: improving ? 'improving' : 'declining' };
   }
+  async teamPerformance(caller: Caller, projectId: string) {
+    const project = await this.project(caller, projectId);
+    const now = new Date();
+    const windowStart = new Date(now.getTime() - 6 * 7 * 86400000);
+    const events = await this.prisma.workflowEvent.findMany({
+      where: { projectId, createdAt: { gte: windowStart } },
+      select: { actorId: true, type: true, createdAt: true },
+    });
+    // Six most recent whole weeks, oldest first, each as a half-open [start, end) range.
+    const weekRanges = Array.from({ length: 6 }, (_, index) => 5 - index).map((weeksAgo) => ({
+      start: new Date(now.getTime() - (weeksAgo + 1) * 7 * 86400000),
+      end: new Date(now.getTime() - weeksAgo * 7 * 86400000),
+    }));
+    const members = project.members.map((membership: any) => ({ id: membership.user.id, fullName: membership.user.fullName, role: membership.role }));
+    const weeks = weekRanges.map((range) => {
+      const label = range.start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const memberStats = members.map((member: any) => {
+        const memberEvents = events.filter((event: any) => event.actorId === member.id && event.createdAt >= range.start && event.createdAt < range.end);
+        const tasksCompleted = memberEvents.filter((event: any) => event.type === WorkflowEventType.task_completed).length;
+        const contributions = memberEvents.length;
+        return { id: member.id, fullName: member.fullName, role: member.role, contributions, tasksCompleted, active: contributions > 0 };
+      });
+      const activeMembers = memberStats.filter((member: any) => member.active);
+      return { periodStart: range.start, periodEnd: range.end, label, members: memberStats, activeCount: activeMembers.length, inactiveCount: memberStats.length - activeMembers.length };
+    });
+    // A member counts as "active" overall when they contributed in any of the six weeks.
+    const memberSummary = members.map((member: any) => {
+      const perWeek = weeks.map((week: any) => week.members.find((entry: any) => entry.id === member.id)!);
+      const totalContributions = perWeek.reduce((sum: number, entry: any) => sum + entry.contributions, 0);
+      const totalCompleted = perWeek.reduce((sum: number, entry: any) => sum + entry.tasksCompleted, 0);
+      const activeWeeks = perWeek.filter((entry: any) => entry.active).length;
+      return { id: member.id, fullName: member.fullName, role: member.role, totalContributions, totalCompleted, activeWeeks, active: activeWeeks > 0 };
+    });
+    return { weeks, members: memberSummary, activeMembers: memberSummary.filter((member: any) => member.active).length, inactiveMembers: memberSummary.filter((member: any) => !member.active).length };
+  }
   async analyticsSummary(caller: Caller, projectId: string) {
     const stats = await this.analytics(caller, projectId);
     const summary = `This project has completed ${Math.round(stats.taskCompletionRate * 100)}% of its tasks with ${Math.round(stats.overallEfficiency * 100)}% on-time delivery. Current risk level is ${stats.riskLevel.replace('_', ' ')}${stats.bottlenecks.length ? ` with ${stats.bottlenecks.length} bottleneck${stats.bottlenecks.length === 1 ? '' : 's'} detected` : ''}.`;

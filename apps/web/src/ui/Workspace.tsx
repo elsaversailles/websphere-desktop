@@ -177,7 +177,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'projects' ? <ProjectsPage notify={notify} /> : null}
       {page === 'admin' ? <AdminPage notify={notify} /> : null}
       {page === 'accounts' ? <AdminAccounts notify={notify} /> : null}
-      {page === 'chat' ? <GroupChatPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} incomingCall={incomingCall?.groupId === selectedGroupId ? incomingCall : null} onIncomingCallHandled={() => setIncomingCall(null)} /> : null}
+      {page === 'chat' ? <GroupChatPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onIdeas={() => setPage('ideas')} notify={notify} incomingCall={incomingCall?.groupId === selectedGroupId ? incomingCall : null} onIncomingCallHandled={() => setIncomingCall(null)} /> : null}
       {page === 'tasks' ? <TasksPage notify={notify} focusedTaskId={selectedTaskId} /> : null}
       {page === 'workflow' ? <ProjectsAnalyticsPage kind="workflow" notify={notify} /> : null}
       {page === 'predictive' ? <ProjectsAnalyticsPage kind="predictive" notify={notify} /> : null}
@@ -250,10 +250,37 @@ function AdminTicketCard({ ticket, notify, onSaved }: { ticket: SupportTicketRec
   </article>;
 }
 
+type AuditLogEntry = { id: string; actorId: string | null; module: string; activity: string; severity: string; description: string; createdAt: string };
+
 function AdminAccounts({ notify }: { notify: (message: string) => void }) {
   const [users, setUsers] = useState<Array<{ id: string; fullName: string; email: string; role: string; status: string }> | null>(null);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [logs, setLogs] = useState<AuditLogEntry[] | null>(null);
+  const [logsLoading, setLogsLoading] = useState(false);
   useEffect(() => { void request<Array<{ id: string; fullName: string; email: string; role: string; status: string }>>('/admin/users').then(setUsers).catch((error: Error) => notify(error.message)); }, [notify]);
-  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div><button className="btn-o btn-sm" onClick={() => notify('System logs are available from the admin activity log endpoint.')}>View System Logs</button></div><div className="cc requests-card"><div className="cc-head"><h3>⟳ Requests</h3><button className="btn-o btn-sm" onClick={() => notify('Resolved requests cleared.')}>Clear Resolved</button></div><div className="empty-message">No help requests yet. Requests submitted by users will appear here automatically.</div></div><div className="cc"><div className="cc-head"><h3>All Users</h3></div>{users?.length ? users.map((user) => <div className="urow" key={user.id}><span className="ava">{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}</small></span><span className={`bdg ${user.status === 'active' ? 'g' : 'y'}`}>{user.status}</span></div>) : <div className="empty-message">{users ? 'Registered users will appear here.' : 'Loading accounts…'}</div>}</div></section>;
+  async function openLogs() {
+    setLogsOpen(true);
+    setLogsLoading(true);
+    try {
+      setLogs(await request<AuditLogEntry[]>('/admin/logs'));
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not load system logs.');
+      setLogs([]);
+    } finally {
+      setLogsLoading(false);
+    }
+  }
+  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div><button className="btn-o btn-sm" onClick={() => void openLogs()}>View System Logs</button></div><div className="cc requests-card"><div className="cc-head"><h3>⟳ Requests</h3><button className="btn-o btn-sm" onClick={() => notify('Resolved requests cleared.')}>Clear Resolved</button></div><div className="empty-message">No help requests yet. Requests submitted by users will appear here automatically.</div></div><div className="cc"><div className="cc-head"><h3>All Users</h3></div>{users?.length ? users.map((user) => <div className="urow" key={user.id}><span className="ava">{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}</small></span><span className={`bdg ${user.status === 'active' ? 'g' : 'y'}`}>{user.status}</span></div>) : <div className="empty-message">{users ? 'Registered users will appear here.' : 'Loading accounts…'}</div>}</div>
+    {logsOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLogsOpen(false); }}>
+      <div className="modal-box logs-modal" role="dialog" aria-modal="true" aria-labelledby="system-logs-title">
+        <div className="modal-ttl"><span id="system-logs-title">System Logs</span><button type="button" className="modal-close" aria-label="Close system logs" onClick={() => setLogsOpen(false)}>×</button></div>
+        <div className="logs-list">
+          {logsLoading ? <div className="empty-message">Loading system logs…</div> : logs?.length ? logs.map((entry) => <div className="log-row" key={entry.id}><span className={`log-sev ${entry.severity}`}>{entry.severity.toUpperCase()}</span><span className="log-time">{new Date(entry.createdAt).toLocaleString()}</span><span className="log-desc">{entry.module} — {entry.description}</span></div>) : <div className="empty-message">No system logs yet.</div>}
+        </div>
+        <div className="modal-acts"><button type="button" className="btn" onClick={() => setLogsOpen(false)}>Close</button></div>
+      </div>
+    </div> : null}
+  </section>;
 }
 
 function ChevronIcon() { return <svg className="sb-sec-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>; }

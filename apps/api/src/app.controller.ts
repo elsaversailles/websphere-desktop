@@ -101,6 +101,7 @@ export class AppController {
   @Get('projects/:id/analytics') async analytics(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.analytics(await this.caller(auth), id); }
   @Get('projects/:id/analytics/trends') async analyticsTrends(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.analyticsTrends(await this.caller(auth), id); }
   @Get('projects/:id/analytics/summary') async analyticsSummary(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.analyticsSummary(await this.caller(auth), id); }
+  @Get('projects/:id/analytics/team') async analyticsTeam(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.teamPerformance(await this.caller(auth), id); }
   @Get('projects/:id/risk') async risk(@Headers('authorization') auth: string, @Param('id') id: string) { const data = await this.app.analytics(await this.caller(auth), id); return { riskScore: data.riskScore, riskLevel: data.riskLevel }; }
   @Get('projects/:id/prediction') async prediction(@Headers('authorization') auth: string, @Param('id') id: string) { const data = await this.app.analytics(await this.caller(auth), id); return { predictedCompletion: data.predictedCompletion, deltaDays: data.deltaDays, factors: data.bottlenecks }; }
   @Get('projects/:id/recommendations') async recommendations(@Headers('authorization') auth: string, @Param('id') id: string) { return (await this.app.analytics(await this.caller(auth), id)).recommendations; }

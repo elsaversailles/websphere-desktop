@@ -7,32 +7,61 @@ export type Role = 'Administrator' | 'Project_Leader' | 'Project_Member';
 export type User = { id: string; fullName: string; email: string; institution?: string | null; course?: string | null; avatarUrl?: string | null; role: Role };
 export type Session = { access: string; refresh: string; role: Role; user: User };
 
-let access = sessionStorage.getItem('ws_access') ?? '';
-
 const sessionKeys = ['ws_access', 'ws_refresh', 'ws_role', 'ws_user'] as const;
+
+/**
+ * Sessions live in localStorage, not sessionStorage, so they survive a page reload and are shared
+ * across tabs of the same origin. sessionStorage is scoped to a single tab and cleared when that tab
+ * closes, which meant opening WebSphere in a new tab (or restoring one) always landed on the sign-in
+ * screen. Logout still fully invalidates the session server-side (token version bump) and here.
+ */
+const sessionStore: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> = (() => {
+  try {
+    const probe = '__ws_probe__';
+    window.localStorage.setItem(probe, '1');
+    window.localStorage.removeItem(probe);
+    return window.localStorage;
+  } catch {
+    // Private-mode or disabled storage: fall back to sessionStorage so the current tab still works.
+    return window.sessionStorage;
+  }
+})();
+
+// One-time migration so anyone with a session already open in sessionStorage is not signed out by this change.
+(() => {
+  try {
+    for (const key of sessionKeys) {
+      const legacy = window.sessionStorage.getItem(key);
+      if (legacy !== null && sessionStore.getItem(key) === null) sessionStore.setItem(key, legacy);
+      window.sessionStorage.removeItem(key);
+    }
+  } catch { /* ignore storage access failures */ }
+})();
+
+let access = sessionStore.getItem('ws_access') ?? '';
 
 export function getAccessToken() { return access; }
 export function socketBaseUrl() { return apiBase.startsWith('http') ? apiBase.replace(/\/api\/?$/, '') : window.location.origin; }
 
 export function loadSession(): Session | null {
-  const refresh = sessionStorage.getItem('ws_refresh');
-  const role = sessionStorage.getItem('ws_role') as Role | null;
-  const userText = sessionStorage.getItem('ws_user');
+  const refresh = sessionStore.getItem('ws_refresh');
+  const role = sessionStore.getItem('ws_role') as Role | null;
+  const userText = sessionStore.getItem('ws_user');
   if (!access || !refresh || !role || !userText) return null;
   try { return { access, refresh, role, user: JSON.parse(userText) as User }; } catch { return null; }
 }
 
 export function saveSession(value: Session) {
   access = value.access;
-  sessionStorage.setItem('ws_access', value.access);
-  sessionStorage.setItem('ws_refresh', value.refresh);
-  sessionStorage.setItem('ws_role', value.role);
-  sessionStorage.setItem('ws_user', JSON.stringify(value.user));
+  sessionStore.setItem('ws_access', value.access);
+  sessionStore.setItem('ws_refresh', value.refresh);
+  sessionStore.setItem('ws_role', value.role);
+  sessionStore.setItem('ws_user', JSON.stringify(value.user));
 }
 
 export function clearSession() {
   access = '';
-  sessionKeys.forEach((key) => sessionStorage.removeItem(key));
+  sessionKeys.forEach((key) => sessionStore.removeItem(key));
 }
 
 type ApiRequestInit = RequestInit & { skipSessionInvalidation?: boolean; skipAuthRetry?: boolean };
@@ -50,7 +79,7 @@ function invalidateSession() {
 let refreshInFlight: Promise<boolean> | null = null;
 
 async function exchangeRefreshToken(): Promise<boolean> {
-  const refresh = sessionStorage.getItem('ws_refresh');
+  const refresh = sessionStore.getItem('ws_refresh');
   if (!refresh) return false;
   try {
     const next = await request<{ access: string; refresh: string; role: Role }>('/auth/refresh', {
@@ -60,9 +89,9 @@ async function exchangeRefreshToken(): Promise<boolean> {
       skipAuthRetry: true,
     });
     access = next.access;
-    sessionStorage.setItem('ws_access', next.access);
-    sessionStorage.setItem('ws_refresh', next.refresh);
-    sessionStorage.setItem('ws_role', next.role);
+    sessionStore.setItem('ws_access', next.access);
+    sessionStore.setItem('ws_refresh', next.refresh);
+    sessionStore.setItem('ws_role', next.role);
     return true;
   } catch {
     return false;
@@ -116,7 +145,16 @@ export async function authenticate(email: string, password: string, admin = fals
   return result;
 }
 
-export async function restoreSession(): Promise<Session | null> {
+/**
+ * React 18 StrictMode mounts effects twice in development, so restoreSession() can be called twice
+ * on load. Because an expired access token triggers a single-use refresh exchange, two concurrent
+ * restores would redeem the same refresh token — the second redemption looks like a replay to the
+ * server, which bumps the account's token version and signs every session out. Sharing one in-flight
+ * restore (and keeping it cached so a reload mid-flight does not start a second) prevents that.
+ */
+let restoreInFlight: Promise<Session | null> | null = null;
+
+async function performRestore(): Promise<Session | null> {
   const existing = loadSession();
   if (!existing) return null;
   try {
@@ -125,8 +163,8 @@ export async function restoreSession(): Promise<Session | null> {
     const user = await request<User>('/users/me', { skipSessionInvalidation: true });
     const restored: Session = {
       access,
-      refresh: sessionStorage.getItem('ws_refresh') ?? existing.refresh,
-      role: (sessionStorage.getItem('ws_role') as Role | null) ?? existing.role,
+      refresh: sessionStore.getItem('ws_refresh') ?? existing.refresh,
+      role: (sessionStore.getItem('ws_role') as Role | null) ?? existing.role,
       user,
     };
     saveSession(restored);
@@ -135,4 +173,9 @@ export async function restoreSession(): Promise<Session | null> {
     clearSession();
     return null;
   }
+}
+
+export async function restoreSession(): Promise<Session | null> {
+  restoreInFlight ??= performRestore().finally(() => { restoreInFlight = null; });
+  return restoreInFlight;
 }
