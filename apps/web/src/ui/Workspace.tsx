@@ -264,6 +264,10 @@ function AdminAccounts({ notify }: { notify: (message: string) => void }) {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [term, setTerm] = useState('');
+  const [reloadToken, setReloadToken] = useState(0);
+  const [editing, setEditing] = useState<AdminUser | null>(null);
+  const [deleting, setDeleting] = useState<AdminUser | null>(null);
+  const refresh = () => setReloadToken((token) => token + 1);
   // Debounce the typed search so we don't fire a request on every keystroke; reset to page 1 whenever the term changes.
   useEffect(() => {
     const handle = setTimeout(() => { setTerm(search.trim()); setPage(1); }, 300);
@@ -278,14 +282,92 @@ function AdminAccounts({ notify }: { notify: (message: string) => void }) {
       .catch((error: Error) => { if (active) notify(error.message); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [page, term, notify]);
+  }, [page, term, notify, reloadToken]);
   const users = data?.users ?? [];
   const total = data?.total ?? 0;
   const totalPages = data?.totalPages ?? 1;
   const rangeStart = total ? (page - 1) * USERS_PAGE_SIZE + 1 : 0;
   const rangeEnd = (page - 1) * USERS_PAGE_SIZE + users.length;
-  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div></div><div className="cc requests-card"><div className="cc-head"><h3>⟳ Requests</h3><button className="btn-o btn-sm" onClick={() => notify('Resolved requests cleared.')}>Clear Resolved</button></div><div className="empty-message">No help requests yet. Requests submitted by users will appear here automatically.</div></div><div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <div className="urow" key={user.id}><span className={`ava tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}</small></span><span className={`bdg ${user.status === 'active' ? 'g' : 'y'}`}>{user.status}</span></div>) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div></section>;
+  async function setStatus(user: AdminUser, status: string, done: string) {
+    try {
+      await request(`/admin/users/${user.id}`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      notify(done);
+      refresh();
+    } catch (error) { notify((error as Error).message); }
+  }
+  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div></div><div className="cc requests-card"><div className="cc-head"><h3>⟳ Requests</h3><button className="btn-o btn-sm" onClick={() => notify('Resolved requests cleared.')}>Clear Resolved</button></div><div className="empty-message">No help requests yet. Requests submitted by users will appear here automatically.</div></div><div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <AdminUserRow key={user.id} user={user} onEdit={() => setEditing(user)} onDelete={() => setDeleting(user)} onDeactivate={() => setStatus(user, 'suspended', `${user.fullName} has been deactivated.`)} onActivate={() => setStatus(user, 'active', `${user.fullName} has been reactivated.`)} />) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div>
+    {editing ? <AdminUserEditModal user={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} notify={notify} /> : null}
+    {deleting ? <AdminUserDeleteModal user={deleting} onClose={() => setDeleting(null)} onDeleted={() => { setDeleting(null); refresh(); }} notify={notify} /> : null}
+  </section>;
 }
+
+function AdminUserRow({ user, onEdit, onDelete, onDeactivate, onActivate }: { user: AdminUser; onEdit: () => void; onDelete: () => void; onDeactivate: () => void; onActivate: () => void }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (event: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(event.target as Node)) setOpen(false); };
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDocClick); document.removeEventListener('keydown', onKey); };
+  }, [open]);
+  const suspended = user.status !== 'active';
+  const run = (action: () => void) => { setOpen(false); action(); };
+  return <div className="urow"><span className={`ava tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}</small></span><span className={`bdg ${user.status === 'active' ? 'g' : 'y'}`}>{user.status}</span><div className="ur-menu" ref={menuRef}><button type="button" className="ur-menu-btn" aria-haspopup="menu" aria-expanded={open} aria-label={`Actions for ${user.fullName}`} onClick={() => setOpen((value) => !value)}><DotsIcon /></button>{open ? <div className="ur-menu-pop" role="menu"><button type="button" role="menuitem" onClick={() => run(onEdit)}>Edit</button>{suspended ? <button type="button" role="menuitem" onClick={() => run(onActivate)}>Activate</button> : <button type="button" role="menuitem" onClick={() => run(onDeactivate)}>Deactivate</button>}<button type="button" role="menuitem" className="danger" onClick={() => run(onDelete)}>Delete</button></div> : null}</div></div>;
+}
+
+function AdminUserEditModal({ user, onClose, onSaved, notify }: { user: AdminUser; onClose: () => void; onSaved: () => void; notify: (message: string) => void }) {
+  const [fullName, setFullName] = useState(user.fullName);
+  const [role, setRole] = useState(user.role);
+  const [status, setStatus] = useState(user.status);
+  const [saving, setSaving] = useState(false);
+  async function save() {
+    const trimmed = fullName.trim();
+    if (!trimmed) { notify('Full name is required.'); return; }
+    setSaving(true);
+    try {
+      await request(`/admin/users/${user.id}`, { method: 'PATCH', body: JSON.stringify({ fullName: trimmed, role, status }) });
+      notify(`${trimmed}'s account was updated.`);
+      onSaved();
+    } catch (error) { notify((error as Error).message); }
+    finally { setSaving(false); }
+  }
+  return <div className="logout-ov" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) onClose(); }}>
+    <div className="logout-box ur-edit-box" role="dialog" aria-modal="true" aria-labelledby="ur-edit-title">
+      <h3 id="ur-edit-title" className="ur-edit-title">Edit account</h3>
+      <label className="lbl" htmlFor="ur-edit-name">Full name</label>
+      <input id="ur-edit-name" className="ifield" value={fullName} onChange={(event) => setFullName(event.target.value)} />
+      <label className="lbl" htmlFor="ur-edit-role">Role</label>
+      <select id="ur-edit-role" className="ifield" value={role} onChange={(event) => setRole(event.target.value)}><option value="Administrator">Administrator</option><option value="Project_Leader">Project Leader</option><option value="Project_Member">Project Member</option></select>
+      <label className="lbl" htmlFor="ur-edit-status">Status</label>
+      <select id="ur-edit-status" className="ifield" value={status} onChange={(event) => setStatus(event.target.value)}><option value="active">Active</option><option value="suspended">Suspended</option><option value="deactivated">Deactivated</option><option value="locked">Locked</option></select>
+      <div className="ur-edit-actions"><button type="button" className="btn-o" disabled={saving} onClick={onClose}>Cancel</button><button type="button" className="btn" disabled={saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save changes'}</button></div>
+    </div>
+  </div>;
+}
+
+function AdminUserDeleteModal({ user, onClose, onDeleted, notify }: { user: AdminUser; onClose: () => void; onDeleted: () => void; notify: (message: string) => void }) {
+  const [working, setWorking] = useState(false);
+  async function confirmDelete() {
+    setWorking(true);
+    try {
+      await request(`/admin/users/${user.id}`, { method: 'DELETE' });
+      notify(`${user.fullName}'s account was deleted.`);
+      onDeleted();
+    } catch (error) { notify((error as Error).message); }
+    finally { setWorking(false); }
+  }
+  return <div className="logout-ov" onMouseDown={(event) => { if (event.target === event.currentTarget && !working) onClose(); }}>
+    <div className="logout-box" role="dialog" aria-modal="true" aria-labelledby="ur-del-title">
+      <h3 id="ur-del-title" className="ur-edit-title">Delete account?</h3>
+      <p className="muted">This permanently removes <strong>{user.fullName}</strong> ({user.email}) and signs them out of every device. This can't be undone.</p>
+      <div className="ur-edit-actions"><button type="button" className="btn-o" disabled={working} onClick={onClose}>Cancel</button><button type="button" className="btn btn-red" disabled={working} onClick={() => void confirmDelete()}>{working ? 'Deleting…' : 'Delete account'}</button></div>
+    </div>
+  </div>;
+}
+
+function DotsIcon() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>; }
 
 function ChevronIcon() { return <svg className="sb-sec-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>; }
 function LogoutIcon() { return <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>; }

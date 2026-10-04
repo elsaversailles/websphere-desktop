@@ -32,6 +32,12 @@ const passwordPolicyFailed = (reason: PasswordRequirementId) => fail('VALIDATION
 type Caller = { id: string; role: Role; tv: number };
 const taskProgress = (status: string) => status === 'completed' ? 100 : status === 'for_review' ? 75 : status === 'ongoing' ? 50 : 0;
 
+// Fields an administrator may change from Account Management, kept as explicit allowlists so the
+// update path can never set anything the console doesn't offer (e.g. passwordHash or tokenVersion).
+type AdminAccountStatus = 'active' | 'suspended' | 'deactivated' | 'removed' | 'locked';
+const ADMIN_EDITABLE_ROLES: Role[] = [Role.Administrator, Role.Project_Leader, Role.Project_Member];
+const ADMIN_EDITABLE_STATUSES: AdminAccountStatus[] = ['active', 'suspended', 'deactivated', 'removed', 'locked'];
+
 @Injectable()
 export class AppService implements OnModuleInit, OnApplicationShutdown {
   readonly prisma: any;
@@ -848,10 +854,45 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async adminUpdateUser(caller: Caller, targetId: string, data: any) {
     await this.admin(caller);
-    const updated = await this.prisma.user.update({ where: { id: targetId }, data });
-    if (data.status) await this.audit.log('AdminModule', 'account_lifecycle_change', 'info', `Administrator set account ${updated.email} status to ${data.status}`, caller.id);
-    if (data.role) await this.audit.log('AdminModule', 'account_role_change', 'info', `Administrator set account ${updated.email} role to ${data.role}`, caller.id);
+    // Only a known-safe subset of fields can be set from the admin console — never passwordHash,
+    // tokenVersion, email, etc. — so a crafted request body can't mass-assign sensitive columns.
+    const body = (data ?? {}) as Record<string, unknown>;
+    const patch: { fullName?: string; role?: Role; status?: AdminAccountStatus } = {};
+    if (typeof body.fullName === 'string') {
+      const trimmed = body.fullName.trim();
+      if (!trimmed) fail('VALIDATION_FAILED', 'Full name cannot be empty', 400, { fullName: 'Full name is required' });
+      patch.fullName = trimmed;
+    }
+    if (body.role !== undefined) {
+      if (!ADMIN_EDITABLE_ROLES.includes(body.role as Role)) fail('VALIDATION_FAILED', 'Invalid role', 400, { role: 'Unknown role' });
+      patch.role = body.role as Role;
+    }
+    if (body.status !== undefined) {
+      if (!ADMIN_EDITABLE_STATUSES.includes(body.status as AdminAccountStatus)) fail('VALIDATION_FAILED', 'Invalid status', 400, { status: 'Unknown status' });
+      patch.status = body.status as AdminAccountStatus;
+    }
+    if (Object.keys(patch).length === 0) fail('VALIDATION_FAILED', 'No valid fields to update', 400);
+    // A status change can lock someone out, so invalidate their sessions when they're no longer active.
+    const bumpTokens = patch.status !== undefined && patch.status !== 'active';
+    const updated = await this.prisma.user.update({ where: { id: targetId }, data: bumpTokens ? { ...patch, tokenVersion: { increment: 1 } } : patch });
+    if (patch.status) await this.audit.log('AdminModule', 'account_lifecycle_change', 'info', `Administrator set account ${updated.email} status to ${patch.status}`, caller.id);
+    if (patch.role) await this.audit.log('AdminModule', 'account_role_change', 'info', `Administrator set account ${updated.email} role to ${patch.role}`, caller.id);
     return updated;
+  }
+
+  /**
+   * Soft-deletes an account: flags it `removed` and bumps tokenVersion so every live session is
+   * invalidated. We don't hard-delete the row because the user authors group history (chat, ideas,
+   * announcements, votes) that other members still rely on, and none of those relations cascade.
+   */
+  async adminDeleteUser(caller: Caller, targetId: string) {
+    await this.admin(caller);
+    if (caller.id === targetId) fail('INVALID_OPERATION', 'You cannot delete your own account', 400);
+    const target = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true } });
+    if (!target) fail('NOT_FOUND', 'Account not found', 404);
+    await this.prisma.user.update({ where: { id: targetId }, data: { status: 'removed', tokenVersion: { increment: 1 } } });
+    await this.audit.log('AdminModule', 'account_removed', 'warning', `Administrator removed account ${target.email}`, caller.id);
+    return { ok: true };
   }
   async monitoring(caller: Caller) {
     await this.admin(caller);
