@@ -166,10 +166,20 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async member(groupId: string, userId: string, leader = false) { const membership = await this.prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId } } }); if (!membership || (leader && membership.role !== ProjectRole.Project_Leader)) fail('RBAC_FORBIDDEN', 'Group membership does not grant this action', 403); return membership; }
   async projectMember(projectId: string, userId: string, leader = false) { const membership = await this.prisma.projectMember.findUnique({ where: { projectId_userId: { projectId, userId } } }); if (!membership || (leader && membership.role !== ProjectRole.Project_Leader)) fail('RBAC_FORBIDDEN', 'Project membership does not grant this action', 403); return membership; }
   code() { return `${randomBytes(3).toString('hex').slice(0, 3)}-${randomBytes(3).toString('hex').slice(0, 3)}-${randomBytes(3).toString('hex').slice(0, 3)}`; }
-  async createGroup(caller: Caller, name: string) { const group = await this.prisma.group.create({ data: { name, createdBy: caller.id, members: { create: { userId: caller.id, role: ProjectRole.Project_Leader } } } }); let code = this.code(); while (await this.prisma.joinCode.findUnique({ where: { code } })) code = this.code(); await this.prisma.joinCode.create({ data: { groupId: group.id, code, expiresAt: new Date(Date.now() + 30 * 864e5) } }); return { ...group, joinCode: code }; }
+  async createGroup(caller: Caller, name: string) { const group = await this.prisma.group.create({ data: { name, createdBy: caller.id, members: { create: { userId: caller.id, role: ProjectRole.Project_Leader } } } }); const code = await this.issueJoinCode(group.id); return { ...group, joinCode: code }; }
+  /** Mints a fresh, unique join code for a group (30-day expiry). Used at creation and to self-heal expired codes. */
+  async issueJoinCode(groupId: string) { let code = this.code(); while (await this.prisma.joinCode.findUnique({ where: { code } })) code = this.code(); await this.prisma.joinCode.create({ data: { groupId, code, expiresAt: new Date(Date.now() + 30 * 864e5) } }); return code; }
   async joinGroup(caller: Caller, code: string) { const entry = await this.prisma.joinCode.findUnique({ where: { code }, include: { group: true } }); if (!entry || !entry.active || (entry.expiresAt && entry.expiresAt < new Date())) fail('INVALID_JOIN_CODE', 'Join code is invalid or expired', 400); await this.prisma.groupMember.upsert({ where: { groupId_userId: { groupId: entry.groupId, userId: caller.id } }, update: {}, create: { groupId: entry.groupId, userId: caller.id } }); return entry.group; }
   async groups(caller: Caller) { return this.prisma.group.findMany({ where: { members: { some: { userId: caller.id } } }, include: { members: { where: { userId: caller.id }, select: { role: true } }, _count: { select: { projects: true, ideas: true } } } }); }
-  async group(caller: Caller, id: string) { await this.member(id, caller.id); return this.prisma.group.findUniqueOrThrow({ where: { id }, include: { members: { include: { user: { select: { id: true, fullName: true, avatarUrl: true } } } }, joinCodes: { where: { active: true, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, orderBy: { id: 'desc' }, take: 1 }, projects: true, ideas: true } }); }
+  async group(caller: Caller, id: string) {
+    await this.member(id, caller.id);
+    const activeCode = { active: true, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] };
+    const include = { members: { include: { user: { select: { id: true, fullName: true, avatarUrl: true } } } }, joinCodes: { where: activeCode, orderBy: { id: 'desc' as const }, take: 1 }, projects: true, ideas: true };
+    const group = await this.prisma.group.findUniqueOrThrow({ where: { id }, include });
+    // Self-heal: a group whose only join code has expired (or never had one) always gets a fresh active code.
+    if (!group.joinCodes.length) { await this.issueJoinCode(id); return this.prisma.group.findUniqueOrThrow({ where: { id }, include }); }
+    return group;
+  }
   async addGroupMember(caller: Caller, groupId: string, userId: string) {
     await this.member(groupId, caller.id);
     const existing = await this.prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId } } });
