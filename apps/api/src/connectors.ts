@@ -3,7 +3,14 @@ export type OAuthTokens = { accessToken: string; refreshToken?: string; expiresA
 export type LinkTarget = { projectId?: string; taskId?: string; externalId: string; title: string; externalUrl: string };
 export type SyncTarget = Pick<LinkTarget, 'externalId' | 'title' | 'externalUrl'>;
 export type SyncResult = { summary: string };
+/** One Outlook calendar event normalized from Microsoft Graph. `cancelled` marks a delta removal. */
+export type CalendarSyncEvent = { externalId: string; title: string; startAt: Date; endAt?: Date; webUrl?: string; cancelled: boolean };
+/** Result of a delta calendar read: the changed events plus the cursor to resume from next time. */
+export type CalendarSyncResult = { events: CalendarSyncEvent[]; deltaLink?: string };
 export interface Connector { readonly provider: ProviderId; authorizeUrl(state: string, redirectUri: string, codeChallenge?: string): string; exchangeCode(code: string, redirectUri: string, codeVerifier?: string): Promise<OAuthTokens>; refresh(tokens: OAuthTokens): Promise<OAuthTokens>; sync(tokens: OAuthTokens, targets?: SyncTarget[]): Promise<SyncResult>; launchUrl(target: LinkTarget): Promise<string>; }
+/** Implemented only by providers that expose a syncable calendar (currently Microsoft/Outlook). */
+export interface CalendarConnector extends Connector { fetchCalendar(tokens: OAuthTokens, deltaLink?: string): Promise<CalendarSyncResult>; }
+export function supportsCalendar(connector: Connector): connector is CalendarConnector { return typeof (connector as CalendarConnector).fetchCalendar === 'function'; }
 
 type OAuthPayload = { access_token?: string; refresh_token?: string; expires_in?: number };
 const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error('OAUTH_NOT_CONFIGURED'); return value; };
@@ -66,16 +73,55 @@ class GoogleConnector extends DirectOAuthConnector {
     return { summary: `Synced ${available} of ${targets.length} linked Google Drive files` };
   }
 }
-class MicrosoftConnector extends DirectOAuthConnector {
+class MicrosoftConnector extends DirectOAuthConnector implements CalendarConnector {
   readonly provider = 'microsoft' as const;
   protected readonly authorizationEndpoint = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize';
   protected readonly tokenEndpoint = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
   protected readonly clientIdEnv = 'MICROSOFT_CLIENT_ID';
   protected readonly clientSecretEnv = 'MICROSOFT_CLIENT_SECRET';
-  protected authorizationParams() { return { scope: 'offline_access User.Read Files.Read', response_mode: 'query' }; }
+  // Calendars.Read lets WebSphere mirror Outlook meetings/appointments and surface invite/reminder notifications.
+  protected authorizationParams() { return { scope: 'offline_access User.Read Files.Read Calendars.Read', response_mode: 'query' }; }
   async sync(tokens: OAuthTokens): Promise<SyncResult> {
     const data = await requestJson('https://graph.microsoft.com/v1.0/me/drive/recent?$top=100&$select=id,name,webUrl,lastModifiedDateTime,file', tokens.accessToken);
     return { summary: `Synced ${Array.isArray(data.value) ? data.value.length : 0} Microsoft 365 files` };
+  }
+  /**
+   * Reads Outlook calendar changes via Microsoft Graph delta. The first call (no deltaLink) seeds the
+   * state and returns a deltaLink; later calls pass that link back and receive only events that changed.
+   * Graph marks a removed/cancelled event with an `@removed` annotation, surfaced here as `cancelled`.
+   */
+  async fetchCalendar(tokens: OAuthTokens, deltaLink?: string): Promise<CalendarSyncResult> {
+    // Seed a 1-year window (±6 months) on the first sync; the deltaLink carries the window afterwards.
+    const now = Date.now();
+    const start = new Date(now - 182 * 86400000).toISOString();
+    const end = new Date(now + 182 * 86400000).toISOString();
+    const seedUrl = `https://graph.microsoft.com/v1.0/me/calendarView/delta?${new URLSearchParams({ startDateTime: start, endDateTime: end, '$select': 'subject,start,end,webLink,isCancelled' }).toString()}`;
+    let url = deltaLink ?? seedUrl;
+    let usedStaleDelta = !!deltaLink;
+    const events: CalendarSyncEvent[] = [];
+    let nextDeltaLink: string | undefined;
+    // Follow nextLink pages until Graph hands back the final deltaLink. Cap pages to avoid a runaway loop.
+    for (let page = 0; page < 50; page++) {
+      const response = await fetch(url, { headers: { authorization: `Bearer ${tokens.accessToken}` } });
+      // A 410 Gone means the delta cursor expired; Graph wants a full resync from the seed URL.
+      if (response.status === 410 && usedStaleDelta) { url = seedUrl; usedStaleDelta = false; events.length = 0; continue; }
+      if (!response.ok) throw new Error('INTEGRATION_SYNC_FAILED');
+      const data: any = await response.json();
+      for (const item of Array.isArray(data.value) ? data.value : []) {
+        const externalId = item.id;
+        if (!externalId) continue;
+        const removed = !!item['@removed'] || item.isCancelled === true;
+        if (removed) { events.push({ externalId, title: item.subject ?? 'Outlook event', startAt: new Date(0), cancelled: true }); continue; }
+        const startRaw = item.start?.dateTime; const endRaw = item.end?.dateTime;
+        if (!startRaw) continue;
+        // Graph returns naive datetimes with a separate timeZone; the delta default is UTC.
+        events.push({ externalId, title: item.subject?.trim() || 'Outlook event', startAt: new Date(`${startRaw}Z`), endAt: endRaw ? new Date(`${endRaw}Z`) : undefined, webUrl: item.webLink ?? undefined, cancelled: false });
+      }
+      if (data['@odata.nextLink']) { url = data['@odata.nextLink']; continue; }
+      nextDeltaLink = data['@odata.deltaLink'] ?? deltaLink;
+      break;
+    }
+    return { events, deltaLink: nextDeltaLink };
   }
 }
 class FigmaConnector extends DirectOAuthConnector {

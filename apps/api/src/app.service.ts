@@ -4,7 +4,7 @@ import { SignJWT, jwtVerify } from 'jose';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { completionRate, projectAnalytics, recommendations } from './analytics.js';
 import { CryptoService } from './security.js';
-import { connectors, type OAuthTokens } from './connectors.js';
+import { connectors, supportsCalendar, type OAuthTokens } from './connectors.js';
 import { PrismaService } from './prisma.service.js';
 import { ConfigService } from './config.service.js';
 import { RedisService } from './redis.service.js';
@@ -23,6 +23,9 @@ type Role = (typeof Role)[keyof typeof Role];
 type TaskStatus = 'pending' | 'ongoing' | 'for_review' | 'completed';
 type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva' | 'figma';
 type NotificationType = (typeof NotificationType)[keyof typeof NotificationType];
+// Outlook has no WebSphere event taxonomy, so mirrored events import as meetings — the best fit for
+// invites/appointments. Module-level so it does not depend on constructor init order.
+const OUTLOOK_EVENT_TYPE = 'meeting' as const;
 const fail = (code: string, message: string, status: number = HttpStatus.BAD_REQUEST, fields?: Record<string, string>): never => { throw new HttpException({ code, message, ...(fields ? { fields } : {}) }, status); };
 const PASSWORD_REASON_LABEL = Object.fromEntries(passwordRequirements('').map((requirement) => [requirement.id, requirement.label]));
 const passwordPolicyFailed = (reason: PasswordRequirementId) => fail('VALIDATION_FAILED', `Password does not meet the required policy: ${PASSWORD_REASON_LABEL[reason]}`, 400, { password: reason });
@@ -33,6 +36,8 @@ const taskProgress = (status: string) => status === 'completed' ? 100 : status =
 export class AppService implements OnModuleInit, OnApplicationShutdown {
   readonly prisma: any;
   private pollSweep?: ReturnType<typeof setInterval>;
+  private outlookSweep?: ReturnType<typeof setInterval>;
+  private outlookSweepRunning = false;
 
   private readonly accessSecret: Uint8Array;
   private readonly refreshSecret: Uint8Array;
@@ -340,9 +345,57 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     let result: { summary: string } = { summary: '' };
     try { result = await connectors[connection.provider as ProviderId].sync(tokens, targets); }
     catch { fail('INTEGRATION_SYNC_FAILED', `Could not sync ${connection.tool.name}. Try again shortly.`, 502); }
-    const updated = await this.prisma.toolConnection.update({ where: { id: connection.id }, data: { lastSyncedAt: new Date(), syncState: result.summary } });
+    // Providers with a calendar (Outlook) also mirror events into the WebSphere calendar on each sync.
+    let summary = result.summary;
+    const connector = connectors[connection.provider as ProviderId];
+    if (supportsCalendar(connector)) {
+      try { const calendar = await this.reconcileOutlook(connection, tokens); if (calendar.summary) summary = summary ? `${summary} · ${calendar.summary}` : calendar.summary; }
+      catch { /* A calendar hiccup should not fail the whole sync; the next poll retries. */ }
+    }
+    const updated = await this.prisma.toolConnection.update({ where: { id: connection.id }, data: { lastSyncedAt: new Date(), syncState: summary } });
     await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Synced ${connection.tool.name}` } });
-    return { ...updated, platform: connection.tool.name, summary: result.summary };
+    return { ...updated, platform: connection.tool.name, summary };
+  }
+  /**
+   * Pulls Outlook calendar changes for one Microsoft connection and reconciles them into owner-private
+   * CalendarEvent rows (source=outlook). New/changed/cancelled events raise an `outlook` notification so
+   * they appear in the WebSphere notification panel. The Graph delta cursor is persisted for the next poll.
+   * Returns a short summary; callers decide whether to surface it.
+   */
+  async reconcileOutlook(connection: any, prefetchedTokens?: OAuthTokens): Promise<{ summary: string; created: number; updated: number; cancelled: number }> {
+    const connector = connectors[connection.provider as ProviderId];
+    if (!supportsCalendar(connector)) return { summary: '', created: 0, updated: 0, cancelled: 0 };
+    const tokens = prefetchedTokens ?? await this.connectionTokens(connection);
+    const { events, deltaLink } = await connector.fetchCalendar(tokens, connection.deltaLink ?? undefined);
+    let created = 0, updated = 0, cancelled = 0;
+    const notes: { message: string; relatedId: string }[] = [];
+    for (const event of events) {
+      const key = { ownerId_source_externalId: { ownerId: connection.userId, source: 'outlook' as const, externalId: event.externalId } };
+      if (event.cancelled) {
+        const existing = await this.prisma.calendarEvent.findUnique({ where: key });
+        if (!existing) continue;
+        await this.prisma.calendarEvent.delete({ where: key });
+        cancelled++;
+        notes.push({ message: `Outlook event cancelled: ${existing.title}`, relatedId: existing.id });
+        continue;
+      }
+      const existing = await this.prisma.calendarEvent.findUnique({ where: key });
+      const data = { title: event.title, type: OUTLOOK_EVENT_TYPE, startAt: event.startAt, endAt: event.endAt ?? null };
+      if (existing) {
+        const changed = existing.title !== data.title || +existing.startAt !== +data.startAt || +(existing.endAt ?? 0) !== +(data.endAt ?? 0);
+        const saved = await this.prisma.calendarEvent.update({ where: key, data });
+        if (changed) { updated++; notes.push({ message: `Outlook event updated: ${event.title}`, relatedId: saved.id }); }
+      } else {
+        const saved = await this.prisma.calendarEvent.create({ data: { ...data, ownerId: connection.userId, projectId: null, source: 'outlook', externalId: event.externalId } });
+        created++;
+        notes.push({ message: `New Outlook event: ${event.title}`, relatedId: saved.id });
+      }
+    }
+    // One notification per changed event (capped) so the panel reflects invites/reminders/updates.
+    for (const note of notes.slice(0, 20)) await this.notify([connection.userId], 'outlook' as NotificationType, note.message, note.relatedId, 'calendar_event');
+    if (deltaLink && deltaLink !== connection.deltaLink) await this.prisma.toolConnection.update({ where: { id: connection.id }, data: { deltaLink } });
+    const summary = created + updated + cancelled > 0 ? `Outlook calendar: ${created} new, ${updated} updated, ${cancelled} cancelled` : 'Outlook calendar up to date';
+    return { summary, created, updated, cancelled };
   }
   async idea(caller: Caller, groupId: string, input: any) { await this.member(groupId, caller.id); return this.prisma.idea.create({ data: { ...input, groupId, authorId: caller.id } }); }
   async ideas(caller: Caller, groupId: string) { await this.member(groupId, caller.id); return this.prisma.idea.findMany({ where: { groupId }, orderBy: { createdAt: 'desc' } }); }
@@ -385,8 +438,29 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   onModuleInit() {
     this.pollSweep = setInterval(() => { void this.closeExpiredPolls().catch(() => undefined); }, 30_000);
     this.pollSweep.unref?.();
+    // Poll Outlook calendars for near-real-time sync. Only runs when Microsoft OAuth is configured.
+    if (process.env.MICROSOFT_CLIENT_ID?.trim()) {
+      this.outlookSweep = setInterval(() => { void this.sweepOutlook().catch(() => undefined); }, 5 * 60_000);
+      this.outlookSweep.unref?.();
+    }
   }
-  onApplicationShutdown() { if (this.pollSweep) clearInterval(this.pollSweep); }
+  onApplicationShutdown() { if (this.pollSweep) clearInterval(this.pollSweep); if (this.outlookSweep) clearInterval(this.outlookSweep); }
+  /**
+   * Background pass that reconciles every connected Microsoft user's Outlook calendar. Delta queries
+   * keep each pass cheap. A re-entrancy flag prevents overlap if a sweep runs long, and per-connection
+   * failures are swallowed so one bad token cannot stall the rest.
+   */
+  async sweepOutlook() {
+    if (this.outlookSweepRunning) return;
+    this.outlookSweepRunning = true;
+    try {
+      const connections = await this.prisma.toolConnection.findMany({ where: { provider: 'microsoft', status: 'connected' }, include: { tool: true } });
+      for (const connection of connections) {
+        try { await this.reconcileOutlook(connection); }
+        catch { /* Expired tokens flip status in connectionTokens; the next sweep skips them. */ }
+      }
+    } finally { this.outlookSweepRunning = false; }
+  }
   async openPoll(caller: Caller, groupId: string, input: { ideaIds: string[]; durationHours?: number | null }) {
     await this.member(groupId, caller.id);
     const { ideaIds, durationHours } = input;

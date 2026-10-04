@@ -56,6 +56,10 @@ enum CalendarEventType {
   presentation
   activity
 }
+enum CalendarEventSource {
+  websphere
+  outlook
+}
 enum NotificationType {
   task_assignment
   task_update
@@ -66,6 +70,7 @@ enum NotificationType {
   delay_risk
   ai_suggestion
   ticket_update
+  outlook
 }
 enum ProviderId {
   google
@@ -333,7 +338,12 @@ model CalendarEvent {
   startAt DateTime
   endAt DateTime?
   createdAt DateTime @default(now())
+  // Where the event came from. "websphere" events are user-created; "outlook" events are mirrored
+  // from Microsoft Graph and reconciled by externalId, so they must not be edited by hand.
+  source CalendarEventSource @default(websphere)
+  externalId String?
   project Project? @relation(fields: [projectId], references: [id])
+  @@unique([ownerId, source, externalId])
   @@index([ownerId, startAt])
 }
 model Notification {
@@ -389,6 +399,9 @@ model ToolConnection {
   expiresAt DateTime?
   lastSyncedAt DateTime?
   syncState String?
+  // Microsoft Graph delta link for Outlook calendar sync, so each poll only fetches events that
+  // changed since the last reconcile instead of re-reading the whole calendar.
+  deltaLink String? @db.Text
   user User @relation(fields: [userId], references: [id])
   tool ConnectedTool @relation(fields: [provider], references: [provider])
   linkedResources LinkedResource[]
