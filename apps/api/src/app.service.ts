@@ -832,14 +832,17 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async admin(caller: Caller) { if (caller.role !== Role.Administrator) fail('RBAC_FORBIDDEN', 'Administrator access is required', 403); }
   async adminSupportTickets(caller: Caller) { await this.admin(caller); return this.prisma.supportTicket.findMany({ include: { user: { select: { fullName: true, email: true } } }, orderBy: { createdAt: 'desc' }, take: 24 }); }
   /** Paginated user list for Account Management. Fetches only one page (default 10) from the DB per request. */
-  async adminUsers(caller: Caller, page = 1, pageSize = 10) {
+  async adminUsers(caller: Caller, page = 1, pageSize = 10, q?: string) {
     await this.admin(caller);
     const take = Math.min(Math.max(Math.trunc(pageSize) || 10, 1), 100);
     const safePage = Math.max(Math.trunc(page) || 1, 1);
     const skip = (safePage - 1) * take;
+    const term = (q ?? '').trim();
+    // Case-insensitive match on name or email (MySQL's default collation makes `contains` case-insensitive).
+    const where = term ? { OR: [{ fullName: { contains: term } }, { email: { contains: term } }] } : {};
     const [users, total] = await this.prisma.$transaction([
-      this.prisma.user.findMany({ select: { id: true, email: true, fullName: true, role: true, status: true, createdAt: true }, orderBy: { createdAt: 'asc' }, skip, take }),
-      this.prisma.user.count(),
+      this.prisma.user.findMany({ where, select: { id: true, email: true, fullName: true, role: true, status: true, createdAt: true }, orderBy: { createdAt: 'asc' }, skip, take }),
+      this.prisma.user.count({ where }),
     ]);
     return { users, total, page: safePage, pageSize: take, totalPages: Math.max(1, Math.ceil(total / take)) };
   }
