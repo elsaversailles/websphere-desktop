@@ -79,6 +79,55 @@ describe('RealtimeGateway room authorization', () => {
     expect(groupEmit).toHaveBeenCalledWith('call:invite', expect.objectContaining({ groupId: 'group-1', kind: 'video' }));
   });
 
+  it('broadcasts a chat message and notifies the other group members by name', async () => {
+    const groupEmit = vi.fn();
+    const notify = vi.fn().mockResolvedValue({ ok: true });
+    const app = {
+      member: vi.fn().mockResolvedValue({}),
+      notify,
+      prisma: {
+        chatMessage: { create: vi.fn().mockResolvedValue({ id: 'msg-1', groupId: 'group-1', senderId: 'user-1', body: 'hi' }) },
+        group: { findUnique: vi.fn().mockResolvedValue({ name: 'Capstone Team' }) },
+        user: { findUnique: vi.fn().mockResolvedValue({ fullName: 'Ada Lovelace' }) },
+        groupMember: { findMany: vi.fn().mockResolvedValue([{ userId: 'user-2' }, { userId: 'user-3' }]) },
+      },
+    };
+    const gateway = new RealtimeGateway(app as any, {} as any, events);
+    gateway.server = { to: vi.fn(() => ({ emit: groupEmit })) } as any;
+    const client = socket({ id: 'user-1' });
+
+    const result = await gateway.chatSend(client, { groupId: 'group-1', body: ' hi ' });
+
+    expect(result).toEqual({ ok: true });
+    expect(gateway.server.to).toHaveBeenCalledWith('group:group-1');
+    expect(groupEmit).toHaveBeenCalledWith('chat:message', expect.objectContaining({ id: 'msg-1' }));
+    // The sender is excluded from the recipient query, and the message names the group + sender.
+    expect(app.prisma.groupMember.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { groupId: 'group-1', userId: { not: 'user-1' } } }));
+    expect(notify).toHaveBeenCalledWith(['user-2', 'user-3'], 'group_activity', 'Ada Lovelace sent a new message in Capstone Team.', 'group-1', 'chat');
+  });
+
+  it('still delivers the chat message when the follow-up notification lookup fails', async () => {
+    const groupEmit = vi.fn();
+    const app = {
+      member: vi.fn().mockResolvedValue({}),
+      notify: vi.fn(),
+      prisma: {
+        chatMessage: { create: vi.fn().mockResolvedValue({ id: 'msg-2' }) },
+        group: { findUnique: vi.fn().mockRejectedValue(new Error('db down')) },
+        user: { findUnique: vi.fn() },
+        groupMember: { findMany: vi.fn() },
+      },
+    };
+    const gateway = new RealtimeGateway(app as any, {} as any, events);
+    gateway.server = { to: vi.fn(() => ({ emit: groupEmit })) } as any;
+
+    const result = await gateway.chatSend(socket({ id: 'user-1' }), { groupId: 'group-1', body: 'hey' });
+
+    expect(result).toEqual({ ok: true });
+    expect(groupEmit).toHaveBeenCalledWith('chat:message', expect.objectContaining({ id: 'msg-2' }));
+    expect(app.notify).not.toHaveBeenCalled();
+  });
+
   it('rejects a seventh participant before joining the call room', async () => {
     const gateway = new RealtimeGateway({ member: vi.fn().mockResolvedValue({}) } as any, {} as any, events);
     gateway.server = { in: vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue(Array.from({ length: 6 }, (_, index) => ({ id: `socket-${index}`, data: { caller: { id: `user-${index}` } } }))) })) } as any;

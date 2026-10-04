@@ -35,7 +35,27 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
   handleDisconnect(socket: Socket) { const userId = socket.data.caller?.id; if (!userId) return; const ids = this.presence.get(userId); ids?.delete(socket.id); if (!ids?.size) this.presence.delete(userId); }
   @SubscribeMessage('group:join') groupJoin(@ConnectedSocket() socket: Socket, @MessageBody() groupId: string) { return this.ack(async () => { this.assertAuthenticated(socket); if (!groupId) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Group ID is required' }, 400); await this.app.member(groupId, socket.data.caller.id); await socket.join(`group:${groupId}`); }); }
   @SubscribeMessage('project:join') projectJoin(@ConnectedSocket() socket: Socket, @MessageBody() projectId: string) { return this.ack(async () => { this.assertAuthenticated(socket); if (!projectId) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Project ID is required' }, 400); await this.app.projectMember(projectId, socket.data.caller.id); await socket.join(`project:${projectId}`); }); }
-  @SubscribeMessage('chat:send') chatSend(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; body: string }) { return this.ack(async () => { this.assertAuthenticated(socket); const messageBody = body?.body?.trim(); if (!body?.groupId || !messageBody) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Group and message are required' }, 400); await this.app.member(body.groupId, socket.data.caller.id); const message = await this.app.prisma.chatMessage.create({ data: { groupId: body.groupId, senderId: socket.data.caller.id, body: messageBody } }); this.server.to(`group:${body.groupId}`).emit('chat:message', message); }); }
+  @SubscribeMessage('chat:send') chatSend(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; body: string }) { return this.ack(async () => { this.assertAuthenticated(socket); const messageBody = body?.body?.trim(); if (!body?.groupId || !messageBody) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Group and message are required' }, 400); const senderId = socket.data.caller.id; await this.app.member(body.groupId, senderId); const message = await this.app.prisma.chatMessage.create({ data: { groupId: body.groupId, senderId, body: messageBody } }); this.server.to(`group:${body.groupId}`).emit('chat:message', message); await this.notifyGroupMessage(body.groupId, senderId); }); }
+
+  /**
+   * Tells every other member of the group that a new message landed, naming the group and the
+   * sender so a notification is actionable on its own. Best-effort: a failed lookup must not fail
+   * the send that already succeeded and broadcast.
+   */
+  private async notifyGroupMessage(groupId: string, senderId: string) {
+    try {
+      const [group, sender, members] = await Promise.all([
+        this.app.prisma.group.findUnique({ where: { id: groupId }, select: { name: true } }),
+        this.app.prisma.user.findUnique({ where: { id: senderId }, select: { fullName: true } }),
+        this.app.prisma.groupMember.findMany({ where: { groupId, userId: { not: senderId } }, select: { userId: true } }),
+      ]);
+      const recipients = members.map((member) => member.userId);
+      if (!recipients.length) return;
+      const groupName = group?.name ?? 'your group';
+      const senderName = sender?.fullName ?? 'A member';
+      await this.app.notify(recipients, 'group_activity', `${senderName} sent a new message in ${groupName}.`, groupId, 'chat');
+    } catch { /* notification is a side effect; never fail the delivered message over it */ }
+  }
   @SubscribeMessage('sync:request') async reconcile(@ConnectedSocket() socket: Socket, @MessageBody() body: { projectId: string }) { await this.app.projectMember(body.projectId, socket.data.caller.id); const tasks = await this.app.prisma.task.findMany({ where: { projectId: body.projectId }, include: { assignments: { where: { active: true } } } }); return { projectId: body.projectId, tasks }; }
   @SubscribeMessage('call:join') async callJoin(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; kind: 'voice' | 'video' }): Promise<AckDto & { participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[] }> {
     try {
