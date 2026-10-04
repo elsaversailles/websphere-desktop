@@ -319,6 +319,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     socket.on('connect', () => socket.emit('group:join', selectedGroupId, () => undefined));
     socket.on('poll:tally', (tally: { groupId?: string }) => { if (tally.groupId === selectedGroupId) void refreshHub(); });
     socket.on('chat:message', (message: GroupHub['messages'][number]) => setHub((current) => current ? { ...current, messages: [message, ...current.messages.filter((item) => item.id !== message.id)] } : current));
+    socket.on('group:removed', (event: { groupId: string }) => { if (event.groupId === selectedGroupId) { if (callRef.current?.groupId === selectedGroupId) clearCall(); setManageOpen(false); setHub(null); onSelectGroup(''); notify('You were removed from this group.'); } });
     socket.on('call:participant-joined', (event: { groupId: string; participant: CallParticipant; hostSocketId: string }) => { if (event.groupId === callRef.current?.groupId) { setHostSocketId(event.hostSocketId); void createPeer(event.participant, true); } });
     socket.on('call:participant-left', (event: { groupId: string; socketId: string }) => { if (event.groupId === callRef.current?.groupId) removePeer(event.socketId); });
     socket.on('call:signal', (event: { groupId: string; fromSocketId: string; signal: CallSignal }) => { if (event.groupId === callRef.current?.groupId) void acceptSignal(event.fromSocketId, event.signal); });
@@ -380,11 +381,11 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   async function removeMember(memberUserId: string) {
     if (!hub || !selectedGroupId || !viewerIsLeader) return;
     const name = hub.group.members.find((member) => member.userId === memberUserId)?.user.fullName ?? 'this member';
-    if (!window.confirm(`Remove ${name} from “${hub.group.name}”? They will lose access to its chat, projects and tasks.`)) return;
+    if (!window.confirm(`Kick ${name} from “${hub.group.name}”? They will immediately lose access to its chat, projects and tasks.`)) return;
     try {
       await request(`/groups/${selectedGroupId}/members/${memberUserId}`, { method: 'DELETE' });
       await refreshHub();
-      notify(`${name} was removed from the group.`);
+      notify(`${name} was kicked from the group.`);
     } catch (error: any) { notify(error.message); }
   }
 

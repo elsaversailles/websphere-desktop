@@ -6,7 +6,7 @@ const socket = (caller?: { id: string }) => ({
   id: 'socket-1', data: { caller }, handshake: { auth: {} }, join: vi.fn(), leave: vi.fn(), to: vi.fn(() => ({ emit: vi.fn() })), rooms: new Set<string>(['socket-1']), disconnect: vi.fn(),
 }) as any;
 
-const events = { onNotification: vi.fn(), onPollTally: vi.fn(), registerPresenceProvider: vi.fn() } as any;
+const events = { onNotification: vi.fn(), onPollTally: vi.fn(), onGroupMembershipRevoked: vi.fn(), registerPresenceProvider: vi.fn() } as any;
 
 describe('RealtimeGateway room authorization', () => {
   it('installs the Redis adapter on the underlying Socket.IO server for a namespace gateway', async () => {
@@ -25,7 +25,7 @@ describe('RealtimeGateway room authorization', () => {
   });
 
   it('reports connected users through the presence provider and drops them on disconnect', async () => {
-    const presenceEvents = { onNotification: vi.fn(), onPollTally: vi.fn(), registerPresenceProvider: vi.fn() } as any;
+    const presenceEvents = { onNotification: vi.fn(), onPollTally: vi.fn(), onGroupMembershipRevoked: vi.fn(), registerPresenceProvider: vi.fn() } as any;
     const app = { caller: vi.fn().mockResolvedValue({ id: 'user-1' }) };
     const gateway = new RealtimeGateway(app as any, {} as any, presenceEvents);
     const readPresence = presenceEvents.registerPresenceProvider.mock.calls[0][0] as () => string[];
@@ -126,6 +126,22 @@ describe('RealtimeGateway room authorization', () => {
     expect(result).toEqual({ ok: true });
     expect(groupEmit).toHaveBeenCalledWith('chat:message', expect.objectContaining({ id: 'msg-2' }));
     expect(app.notify).not.toHaveBeenCalled();
+  });
+
+  it('evicts a kicked member from the group and call rooms and tells their client', () => {
+    const gateway = new RealtimeGateway({} as any, {} as any, events);
+    const onGroupMembershipRevoked = events.onGroupMembershipRevoked.mock.calls.at(-1)?.[0] as (groupId: string, userId: string) => void;
+    const socketsLeave = vi.fn();
+    const emit = vi.fn();
+    gateway.server = { in: vi.fn(() => ({ socketsLeave })), to: vi.fn(() => ({ emit })) } as any;
+
+    onGroupMembershipRevoked('group-1', 'user-9');
+
+    expect(gateway.server.in).toHaveBeenCalledWith('user:user-9');
+    expect(socketsLeave).toHaveBeenCalledWith('group:group-1');
+    expect(socketsLeave).toHaveBeenCalledWith('call:group-1');
+    expect(gateway.server.to).toHaveBeenCalledWith('user:user-9');
+    expect(emit).toHaveBeenCalledWith('group:removed', { groupId: 'group-1' });
   });
 
   it('rejects a seventh participant before joining the call room', async () => {

@@ -31,7 +31,7 @@ export function GroupHub({ hub, userId, onAdd, onRemove, onIdeas, notify }: Grou
         {invitation ? <div className="invite-code"><span>Share this code</span><strong>{invitation}</strong><button className="button secondary small" onClick={copyCode}>Copy</button></div> : <p className="muted">No active invitation code.</p>}
         <form className="inline-form" onSubmit={addMember}><input aria-label="Member email" name="email" placeholder="Member email" type="email" /><button className="button secondary small">Add</button></form>
         <h3 className="section-title">Members · {hub.group.members.length}</h3>
-        <div className="member-list">{hub.group.members.map((member) => <div className="member" key={member.userId}><span className="avatar">{member.user.fullName.split(' ').map((part) => part[0]).join('').slice(0, 2)}</span><span className="member-name">{member.user.fullName}</span><span className="pill">{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</span>{leader && member.userId !== userId ? <button className="text-button danger" onClick={() => void onRemove(member.userId)}>Remove</button> : null}</div>)}</div>
+        <div className="member-list">{hub.group.members.map((member) => <div className="member" key={member.userId}><span className="avatar">{member.user.fullName.split(' ').map((part) => part[0]).join('').slice(0, 2)}</span><span className="member-name">{member.user.fullName}</span><span className="pill">{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</span>{leader && member.userId !== userId ? <button className="text-button danger" onClick={() => void onRemove(member.userId)}>Kick</button> : null}</div>)}</div>
       </div>
       <div>
         <h3>Idea board</h3>

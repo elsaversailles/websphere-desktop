@@ -221,7 +221,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return membership;
   }
   async addGroupMemberByEmail(caller: Caller, groupId: string, email: string) { const user = await this.prisma.user.findUnique({ where: { email } }); if (!user) fail('NOT_FOUND', 'No registered account uses that email address', 404); return this.addGroupMember(caller, groupId, user.id); }
-  async removeGroupMember(caller: Caller, groupId: string, userId: string) { await this.member(groupId, caller.id, true); await this.prisma.groupMember.delete({ where: { groupId_userId: { groupId, userId } } }); return { ok: true }; }
+  async removeGroupMember(caller: Caller, groupId: string, userId: string) { await this.member(groupId, caller.id, true); await this.prisma.groupMember.delete({ where: { groupId_userId: { groupId, userId } } }); this.events.emitGroupMembershipRevoked(groupId, userId); return { ok: true }; }
   /**
    * Self-service exit, unlike removeGroupMember which is leader-only.
    * The last leader is held back so a group cannot be left without anyone able to administer it.

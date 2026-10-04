@@ -165,6 +165,7 @@ export type ServerToClientEvents = {
   'task:updated': (task: unknown) => void;
   'poll:tally': (tally: unknown) => void;
   'notification:new': (notification: unknown) => void;
+  'group:removed': (payload: { groupId: string }) => void;
   'activity:new': (activity: unknown) => void;
   'sync:reconcile': (state: unknown) => void;
   'call:invite': (call: { groupId: string; kind: CallKind; initiatorSocketId: string; initiatorUserId: string }) => void;

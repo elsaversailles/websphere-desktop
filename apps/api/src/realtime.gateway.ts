@@ -18,6 +18,7 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
   constructor(private readonly app: AppService, private readonly redis: RedisService, private readonly events: DomainEventsService) {
     this.events.onNotification((userId, notification) => this.publishNotification(userId, notification));
     this.events.onPollTally((groupId, tally) => this.publishPollTally(groupId, tally));
+    this.events.onGroupMembershipRevoked((groupId, userId) => this.revokeGroupAccess(groupId, userId));
     this.events.registerPresenceProvider(() => [...this.presence.keys()]);
   }
   async afterInit(server: Server | Namespace) {
@@ -30,6 +31,17 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
   }
   async handleConnection(socket: Socket) { try { const token = socket.handshake.auth?.token; const caller = await this.app.caller(token ? `Bearer ${token}` : undefined); socket.data.caller = caller; this.presence.set(caller.id, new Set([...(this.presence.get(caller.id) ?? []), socket.id])); await socket.join(`user:${caller.id}`); socket.on('disconnecting', () => { void this.removeSocketFromCalls(socket); }); } catch { socket.disconnect(true); } }
   publishPollTally(groupId: string, tally: unknown) { this.server.to(`group:${groupId}`).emit('poll:tally', tally); }
+  /**
+   * A kicked member's live sockets are still in the group room and would keep receiving its chat
+   * broadcasts until they reloaded. Force them out of the group (and any active call) and tell the
+   * client it was removed so it can navigate away immediately.
+   */
+  private revokeGroupAccess(groupId: string, userId: string) {
+    const userRoom = `user:${userId}`;
+    this.server.in(userRoom).socketsLeave(`group:${groupId}`);
+    this.server.in(userRoom).socketsLeave(`call:${groupId}`);
+    this.server.to(userRoom).emit('group:removed', { groupId });
+  }
   publishTaskUpdated(projectId: string, task: unknown) { this.server.to(`project:${projectId}`).emit('task:updated', task); }
   publishNotification(userId: string, notification: unknown) { this.server.to(`user:${userId}`).emit('notification:new', notification); }
   handleDisconnect(socket: Socket) { const userId = socket.data.caller?.id; if (!userId) return; const ids = this.presence.get(userId); ids?.delete(socket.id); if (!ids?.size) this.presence.delete(userId); }

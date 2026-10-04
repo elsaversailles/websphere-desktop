@@ -23,6 +23,13 @@ export class DomainEventsService extends EventEmitter {
   onPollTally(listener: (groupId: string, tally: unknown) => void) {
     this.on('poll-tally', listener);
   }
+  /** Raised when a member is removed/kicked from a group, so the gateway can evict their live sockets. */
+  emitGroupMembershipRevoked(groupId: string, userId: string) {
+    this.emit('group-membership-revoked', groupId, userId);
+  }
+  onGroupMembershipRevoked(listener: (groupId: string, userId: string) => void) {
+    this.on('group-membership-revoked', listener);
+  }
   registerPresenceProvider(provider: () => string[]) {
     this.presenceProvider = provider;
   }
