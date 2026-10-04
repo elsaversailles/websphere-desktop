@@ -119,11 +119,13 @@ function disconnectService(found: any) {
   return service as AppService & { prisma: any; ops: any[] };
 }
 
+const caller = { id: 'user-1', role: 'Project_Member', tv: 0 } as any;
+
 describe('disconnectIntegration', () => {
   it('removes a Microsoft connection, its dependents, and the mirrored Outlook events', async () => {
     const service = disconnectService({ id: 'conn-1', userId: 'user-1', provider: 'microsoft', tool: { name: 'Microsoft 365' } });
 
-    await expect(service.disconnectIntegration({ id: 'user-1' }, 'conn-1')).resolves.toEqual({ ok: true, platform: 'Microsoft 365' });
+    await expect(service.disconnectIntegration(caller, 'conn-1')).resolves.toEqual({ ok: true, platform: 'Microsoft 365' });
 
     const tables = service.ops.map((op) => `${op.table}.${op.kind}`);
     expect(tables).toEqual(['toolUsage.deleteMany', 'linkedResource.deleteMany', 'toolConnection.delete', 'calendarEvent.deleteMany']);
@@ -134,13 +136,13 @@ describe('disconnectIntegration', () => {
   it('does not touch calendar events when disconnecting a non-Microsoft provider', async () => {
     const service = disconnectService({ id: 'conn-2', userId: 'user-1', provider: 'trello', tool: { name: 'Trello' } });
 
-    await service.disconnectIntegration({ id: 'user-1' }, 'conn-2');
+    await service.disconnectIntegration(caller, 'conn-2');
 
     expect(service.ops.some((op) => op.table === 'calendarEvent')).toBe(false);
   });
 
   it('rejects disconnecting a connection the caller does not own', async () => {
     const service = disconnectService(null);
-    await expect(service.disconnectIntegration({ id: 'user-1' }, 'missing')).rejects.toMatchObject({ status: 404 });
+    await expect(service.disconnectIntegration(caller, 'missing')).rejects.toMatchObject({ status: 404 });
   });
 });
