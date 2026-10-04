@@ -140,7 +140,10 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   return <main className="page on">{incomingCall && (page !== 'chat' || incomingCall.groupId !== selectedGroupId) ? <div className="workspace-call-invite call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => { setSelectedGroupId(incomingCall.groupId); setPage('chat'); }}>Join call</button><button className="btn-o btn-sm" onClick={() => setIncomingCall(null)}>Dismiss</button></div> : null}<div className="layout">
     <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
       <div className="sb-head"><button className="sb-brand" onClick={() => setPage(administrator ? 'admin' : 'dashboard')}><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">WebSphere</span></button><button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'} title={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'}><BurgerIcon /></button></div>
-      <nav aria-label="Main navigation">{sections.map((section) => {
+      <nav aria-label="Main navigation">{administrator
+        // Admins get the menu pinned inline in the sidebar (no hover flyout) so every item is one click away.
+        ? sections.map((section) => <div className="sb-inline-sec" key={section.title}><div className="sb-sec-label">{section.title}</div>{section.links.map((link) => <button type="button" className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => setPage(link.id)}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>)
+        : sections.map((section) => {
         const holdsActivePage = section.links.some((link) => link.id === page);
         const isFlyoutOpen = flyoutTitle === section.title;
         return <button
@@ -159,7 +162,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
           <ChevronIcon />
         </button>;
       })}</nav>
-      {flyoutSection ? <div
+      {!administrator && flyoutSection ? <div
         className="sb-flyout"
         style={{ top: flyoutPos.top, left: flyoutPos.left }}
         onMouseEnter={cancelCloseFlyout}

@@ -244,6 +244,10 @@
 .sb-sec.has-active{color:#fff}
 .sb-sec-chevron{flex:0 0 auto;opacity:.6;transition:opacity .2s ease}
 .sb-sec:hover .sb-sec-chevron,.sb-sec.flyout-open .sb-sec-chevron{opacity:1}
+/* admins get every section pinned inline in the sidebar (no flyout): a muted section header followed by its .sb-item buttons */
+.sb-inline-sec{display:flex;flex-direction:column;gap:2px;margin-top:6px}
+.sb-inline-sec:first-child{margin-top:0}
+.sb-sec-label{padding:10px 10px 4px;font-size:10px;font-weight:700;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:1.2px}
 /* the flyout escapes the sidebar's own scroll clipping via position:fixed, positioned in JS from the hovered section's rect */
 .sb-flyout{position:fixed;z-index:45;min-width:220px;max-width:280px;padding:8px;border-radius:14px;background:linear-gradient(165deg,var(--acc) 0%,var(--acc2) 100%);box-shadow:0 18px 44px rgba(0,0,60,.38),0 2px 10px rgba(0,0,60,.22);animation:sb-flyout-in .16s ease}
 .sb-flyout-title{padding:6px 10px 8px;font-size:10px;font-weight:700;color:rgba(255,255,255,.65);text-transform:uppercase;letter-spacing:1.2px;border-bottom:1px solid rgba(255,255,255,.16);margin-bottom:4px}
