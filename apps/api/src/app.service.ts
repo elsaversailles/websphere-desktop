@@ -739,6 +739,18 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   private clip(text: string, max: number) { return text.length > max ? `${text.slice(0, max - 1)}…` : text; }
   async admin(caller: Caller) { if (caller.role !== Role.Administrator) fail('RBAC_FORBIDDEN', 'Administrator access is required', 403); }
   async adminSupportTickets(caller: Caller) { await this.admin(caller); return this.prisma.supportTicket.findMany({ include: { user: { select: { fullName: true, email: true } } }, orderBy: { createdAt: 'desc' }, take: 24 }); }
+  /** Paginated user list for Account Management. Fetches only one page (default 10) from the DB per request. */
+  async adminUsers(caller: Caller, page = 1, pageSize = 10) {
+    await this.admin(caller);
+    const take = Math.min(Math.max(Math.trunc(pageSize) || 10, 1), 100);
+    const safePage = Math.max(Math.trunc(page) || 1, 1);
+    const skip = (safePage - 1) * take;
+    const [users, total] = await this.prisma.$transaction([
+      this.prisma.user.findMany({ select: { id: true, email: true, fullName: true, role: true, status: true, createdAt: true }, orderBy: { createdAt: 'asc' }, skip, take }),
+      this.prisma.user.count(),
+    ]);
+    return { users, total, page: safePage, pageSize: take, totalPages: Math.max(1, Math.ceil(total / take)) };
+  }
   async adminUpdateUser(caller: Caller, targetId: string, data: any) {
     await this.admin(caller);
     const updated = await this.prisma.user.update({ where: { id: targetId }, data });
