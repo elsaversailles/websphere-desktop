@@ -173,7 +173,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     {sidebarCollapsed ? <button className="sidebar-reopen" type="button" onClick={() => setSidebarCollapsed(false)} aria-label="Show sidebar navigation" title="Show sidebar navigation"><BurgerIcon /></button> : null}
     <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">WebSphere</span></span><select value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}</select></div><div className="main">
       {page === 'dashboard' ? <Dashboard name={session.user.fullName} notify={notify} onPage={navigate} onNotificationClick={openNotification} /> : null}
-      {page === 'groups' ? <GroupsPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onIdeas={() => setPage('ideas')} onChat={() => setPage('chat')} notify={notify} /> : null}
+      {page === 'groups' ? <GroupsPage selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onChat={() => setPage('chat')} notify={notify} /> : null}
       {page === 'ideas' ? <IdeasPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} /> : null}
       {page === 'projects' ? <ProjectsPage notify={notify} /> : null}
       {page === 'admin' ? <AdminPage notify={notify} /> : null}
