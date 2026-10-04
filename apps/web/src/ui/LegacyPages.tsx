@@ -19,6 +19,33 @@ const Empty = ({ children }: { children: React.ReactNode }) => <div className="l
 const Head = ({ title, action }: { title: string; action?: React.ReactNode }) => <div className="ph"><h2>{title}</h2>{action}</div>;
 const Badge = ({ value }: { value: string }) => <span className={`bdg ${value === 'completed' || value === 'active' ? 'g' : value === 'pending' ? 'y' : 'ac'}`}>{value.replaceAll('_', ' ')}</span>;
 
+type ReleaseNote = { version: string; releaseDate: string; summary: string; features: string[]; fixes: string[]; enhancements: string[] };
+// Shown in the Software Update release-notes modal. The newest release leads the list.
+const RELEASE_NOTES: ReleaseNote[] = [
+  {
+    version: '0.1.0',
+    releaseDate: 'September 23, 2026',
+    summary: 'Account administration and collaboration polish across the admin console, group hub, and sign-in flow.',
+    features: [
+      'Admin navigation is now pinned inline in the sidebar so every section is one click away.',
+      'Account Management search finds users instantly by name or email.',
+      'Per-user actions menu to edit, deactivate, or delete an account.',
+      'Group leaders can kick a member from the Group Hub.',
+      'Signed-out users can request account deactivation from the login screen.',
+    ],
+    fixes: [
+      'Admin user avatars now use their assigned color instead of all showing blue.',
+      'Sessions survive a page refresh or a new tab instead of logging you out.',
+      'Group join codes self-heal when a stale code is detected.',
+    ],
+    enhancements: [
+      'Registration verification shows a 5-minute countdown with resend throttling.',
+      'Admin account updates are restricted to a safe set of fields and invalidate sessions on status changes.',
+      'Outlook calendar and notifications sync on a 5-minute delta sweep.',
+    ],
+  },
+];
+
 export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTaskId?: string }) {
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null);
@@ -378,6 +405,8 @@ export function AdminSettingsPage({ notify }: { notify: Notice }) {
   const [logsOpen, setLogsOpen] = useState(false);
   const [logs, setLogs] = useState<AuditLogEntry[] | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const latestRelease = RELEASE_NOTES[0];
   useEffect(() => { void request<Array<{ key: string; value: unknown }>>('/admin/settings').then((rows) => setMaintenance(Boolean(rows.find((row) => row.key === 'maintenanceMode')?.value))).catch(() => undefined); }, []);
   async function toggleMaintenance() {
     const next = !maintenance;
@@ -393,7 +422,7 @@ export function AdminSettingsPage({ notify }: { notify: Notice }) {
     catch (error) { notify(error instanceof Error ? error.message : 'Could not load system logs.'); setLogs([]); }
     finally { setLogsLoading(false); }
   }
-  return <section className="sp on"><Head title="System Settings" /><div className="g2 settings-top"><div className="cc"><div className="cc-head"><h3>General Configuration</h3></div><div className="lbl">System Name</div><div className="ifield"><span>WebSphere</span></div><div className="lbl">Max Ideas per AI Search</div><div className="ifield"><span>10 ideas (maximum)</span></div><button className="btn" onClick={() => notify('Settings saved!')}>Save Settings</button></div><div className="cc"><div className="cc-head"><h3>Security & Access</h3></div><Security title="Admin Password" description="Change admin credentials" action="Change" onClick={() => notify('Password change instructions sent.')} /><Security title="Session Timeout" description="Currently: 30 minutes" action="Edit" onClick={() => notify('Session settings are ready to edit.')} /><Security title="Email Notifications" description="Inactive account alerts" action="Configure" onClick={() => notify('Email settings are ready to configure.')} /><Security title="System Logs" description="View recent activity" action="View Logs" onClick={() => void openLogs()} /></div></div><div className="cc maintenance-card"><div className="cc-head"><h3>Maintenance & Updates</h3></div><div className="g3"><Security title="Software Update" description="Your installed version is shown here" action="Check Now" onClick={() => notify('WebSphere is ready for update checks.')} /><Security title="Backup Database" description="Backups use your Linux instance" action="Backup Now" onClick={() => notify('Database backup request received.')} /><Security danger={maintenance} title="Maintenance Mode" description={maintenance ? 'Enabled — only administrators can access WebSphere' : 'Disabled — WebSphere is available to everyone'} action={saving ? 'Saving…' : maintenance ? 'Disable' : 'Enable'} onClick={() => void toggleMaintenance()} /></div></div><div className="cc"><div className="cc-head"><h3>Notifications</h3><button className="btn-o btn-sm">Mark All Read</button></div><Empty>System notifications will appear here.</Empty></div>
+  return <section className="sp on"><Head title="System Settings" /><div className="g2 settings-top"><div className="cc"><div className="cc-head"><h3>General Configuration</h3></div><div className="lbl">System Name</div><div className="ifield"><span>WebSphere</span></div><div className="lbl">Max Ideas per AI Search</div><div className="ifield"><span>10 ideas (maximum)</span></div><button className="btn" onClick={() => notify('Settings saved!')}>Save Settings</button></div><div className="cc"><div className="cc-head"><h3>Security & Access</h3></div><Security title="Admin Password" description="Change admin credentials" action="Change" onClick={() => notify('Password change instructions sent.')} /><Security title="Session Timeout" description="Currently: 30 minutes" action="Edit" onClick={() => notify('Session settings are ready to edit.')} /><Security title="Email Notifications" description="Inactive account alerts" action="Configure" onClick={() => notify('Email settings are ready to configure.')} /><Security title="System Logs" description="View recent activity" action="View Logs" onClick={() => void openLogs()} /></div></div><div className="cc maintenance-card"><div className="cc-head"><h3>Maintenance & Updates</h3></div><div className="g3"><Security title="Software Update" description={`Version ${latestRelease.version} · released ${latestRelease.releaseDate}`} action="View details" onClick={() => setUpdateOpen(true)} /><Security title="Backup Database" description="Backups use your Linux instance" action="Backup Now" onClick={() => notify('Database backup request received.')} /><Security danger={maintenance} title="Maintenance Mode" description={maintenance ? 'Enabled — only administrators can access WebSphere' : 'Disabled — WebSphere is available to everyone'} action={saving ? 'Saving…' : maintenance ? 'Disable' : 'Enable'} onClick={() => void toggleMaintenance()} /></div></div><div className="cc"><div className="cc-head"><h3>Notifications</h3><button className="btn-o btn-sm">Mark All Read</button></div><Empty>System notifications will appear here.</Empty></div>
     {logsOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLogsOpen(false); }}>
       <div className="modal-box logs-modal" role="dialog" aria-modal="true" aria-labelledby="settings-system-logs-title">
         <div className="modal-ttl"><span id="settings-system-logs-title">System Logs</span><button type="button" className="modal-close" aria-label="Close system logs" onClick={() => setLogsOpen(false)}>×</button></div>
@@ -401,6 +430,21 @@ export function AdminSettingsPage({ notify }: { notify: Notice }) {
           {logsLoading ? <div className="empty-message">Loading system logs…</div> : logs?.length ? logs.map((entry) => <div className="log-row" key={entry.id}><span className={`log-sev ${entry.severity}`}>{entry.severity.toUpperCase()}</span><span className="log-time">{new Date(entry.createdAt).toLocaleString()}</span><span className="log-desc">{entry.module} — {entry.description}</span></div>) : <div className="empty-message">No system logs yet.</div>}
         </div>
         <div className="modal-acts"><button type="button" className="btn" onClick={() => setLogsOpen(false)}>Close</button></div>
+      </div>
+    </div> : null}
+    {updateOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setUpdateOpen(false); }}>
+      <div className="modal-box release-modal" role="dialog" aria-modal="true" aria-labelledby="software-update-title">
+        <div className="modal-ttl"><span id="software-update-title">Software Update</span><button type="button" className="modal-close" aria-label="Close release notes" onClick={() => setUpdateOpen(false)}>×</button></div>
+        <div className="release-list">
+          {RELEASE_NOTES.map((release) => <article className="release-entry" key={release.version}>
+            <header className="release-head"><h3>WebSphere {release.version}</h3><span className="bdg ac">{release.releaseDate}</span></header>
+            <p className="release-summary">{release.summary}</p>
+            {release.features.length ? <div className="release-group"><h4>New features</h4><ul>{release.features.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}
+            {release.fixes.length ? <div className="release-group"><h4>Bug fixes</h4><ul>{release.fixes.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}
+            {release.enhancements.length ? <div className="release-group"><h4>System enhancements</h4><ul>{release.enhancements.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}
+          </article>)}
+        </div>
+        <div className="modal-acts"><button type="button" className="btn-o" onClick={() => { setUpdateOpen(false); notify('You are on the latest version of WebSphere.'); }}>Check for updates</button><button type="button" className="btn" onClick={() => setUpdateOpen(false)}>Close</button></div>
       </div>
     </div> : null}
   </section>;
