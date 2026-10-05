@@ -17,6 +17,7 @@ type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | '
 type WorkspaceProps = { session: Session; onSessionChange: (session: Session) => void; onLogout: () => void; notify: (message: string) => void };
 type Link = { id: Page; label: string; icon: string };
 type NotificationEntry = { id: string; read: boolean; relatedId?: string | null; relatedType?: string | null };
+type AdminSupportTicket = SupportTicketRecord & { user: { fullName: string; email: string } };
 
 const userSections: Array<{ title: string; links: Link[] }> = [
   { title: 'Main', links: [{ id: 'dashboard', label: 'Dashboard', icon: '⌂' }] },
@@ -103,7 +104,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
         break;
       case 'idea': setPage('ideas'); break;
       case 'ticket':
-        if (administrator) { setPage('admin'); break; }
+        if (administrator) { setPage('accounts'); break; }
         setSelectedTicketId(notification.relatedId ?? '');
         setPage('support');
         break;
@@ -210,14 +211,10 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
 
 function AdminPage({ notify }: { notify: (message: string) => void }) {
   type Monitoring = { users: { total: number; active: number; locked: number; suspended: number; newSignups7d: number }; projects: { active: number; completed: number }; activity: { tasksCompleted24h: number; openSupportTickets: number }; health: { database: string; redis: string; overall: string } };
-  type SupportTicket = SupportTicketRecord & { user: { fullName: string; email: string } };
   const [data, setData] = useState<Monitoring | null>(null);
-  const [tickets, setTickets] = useState<SupportTicket[] | null>(null);
   async function refresh() {
     try {
-      const [monitoring, supportTickets] = await Promise.all([request<Monitoring>('/admin/monitoring'), request<SupportTicket[]>('/admin/support/tickets')]);
-      setData(monitoring);
-      setTickets(supportTickets);
+      setData(await request<Monitoring>('/admin/monitoring'));
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not load administrator data.'); }
   }
   useEffect(() => { void refresh(); }, [notify]);
@@ -225,11 +222,10 @@ function AdminPage({ notify }: { notify: (message: string) => void }) {
     <div className="ph"><div><h2>User Activity</h2></div></div>
     <div className="krow">{data ? <><Kpi label="Active Projects" value={data.projects.active} /><Kpi label="Active Users" value={data.users.active} /><Kpi label="Flagged Inactive" value={data.users.locked + data.users.suspended} tone="yel" /><Kpi label="System Status" value={data.health.overall === 'up' ? 'Online' : 'Degraded'} tone={data.health.overall === 'up' ? 'grn' : 'red'} /></> : <div className="cc">Loading system activity…</div>}</div>
     <div className="g2"><div className="cc"><div className="cc-head"><h3>System Health</h3></div><Health label="Database" detail="Connected to the WebSphere database" ok={data?.health.database === 'up'} /><Health label="Redis" detail="Session and job queue store" ok={data?.health.redis === 'up'} /><Health label="File Storage" detail="Linux instance storage" ok /></div><div className="cc"><div className="cc-head"><h3>Recent User Activity</h3></div>{data ? <><Health label="New signups (7 days)" detail={`${data.users.newSignups7d} accounts created`} ok /><Health label="Tasks completed (24h)" detail={`${data.activity.tasksCompleted24h} tasks marked complete`} ok /><Health label="Open support tickets" detail={`${data.activity.openSupportTickets} awaiting response`} ok={data.activity.openSupportTickets === 0} /><Health label="Completed projects" detail={`${data.projects.completed} projects completed`} ok /></> : <div className="empty-message">Live audit activity will appear here.</div>}</div></div>
-    <section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{tickets?.length ?? 0} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => void refresh()}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <div className="support-ticket-list">{tickets.map((ticket) => <AdminTicketCard key={`${ticket.id}-${ticket.updatedAt}`} ticket={ticket} notify={notify} onSaved={() => void refresh()} />)}</div> : <div className="empty-message">New support requests will appear here.</div>}</section>
   </section>;
 }
 
-function AdminTicketCard({ ticket, notify, onSaved }: { ticket: SupportTicketRecord & { user: { fullName: string; email: string } }; notify: (message: string) => void; onSaved: () => void }) {
+function AdminTicketCard({ ticket, notify, onSaved }: { ticket: AdminSupportTicket; notify: (message: string) => void; onSaved: () => void }) {
   const [status, setStatus] = useState<TicketStatus>(ticket.status);
   const [response, setResponse] = useState(ticket.response ?? '');
   const [saving, setSaving] = useState(false);
@@ -260,6 +256,7 @@ const USERS_PAGE_SIZE = 10;
 
 function AdminAccounts({ notify }: { notify: (message: string) => void }) {
   const [data, setData] = useState<AdminUsersPage | null>(null);
+  const [tickets, setTickets] = useState<AdminSupportTicket[] | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -267,7 +264,12 @@ function AdminAccounts({ notify }: { notify: (message: string) => void }) {
   const [reloadToken, setReloadToken] = useState(0);
   const [editing, setEditing] = useState<AdminUser | null>(null);
   const [deleting, setDeleting] = useState<AdminUser | null>(null);
-  const refresh = () => setReloadToken((token) => token + 1);
+  const refreshUsers = () => setReloadToken((token) => token + 1);
+  async function refreshSupportRequests() {
+    try {
+      setTickets(await request<AdminSupportTicket[]>('/admin/support/tickets'));
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not load support requests.'); }
+  }
   // Debounce the typed search so we don't fire a request on every keystroke; reset to page 1 whenever the term changes.
   useEffect(() => {
     const handle = setTimeout(() => { setTerm(search.trim()); setPage(1); }, 300);
@@ -283,6 +285,7 @@ function AdminAccounts({ notify }: { notify: (message: string) => void }) {
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [page, term, notify, reloadToken]);
+  useEffect(() => { void refreshSupportRequests(); }, [notify]);
   const users = data?.users ?? [];
   const total = data?.total ?? 0;
   const totalPages = data?.totalPages ?? 1;
@@ -292,12 +295,12 @@ function AdminAccounts({ notify }: { notify: (message: string) => void }) {
     try {
       await request(`/admin/users/${user.id}`, { method: 'PATCH', body: JSON.stringify({ status }) });
       notify(done);
-      refresh();
+      refreshUsers();
     } catch (error) { notify((error as Error).message); }
   }
-  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div></div><div className="cc requests-card"><div className="cc-head"><h3>⟳ Requests</h3><button className="btn-o btn-sm" onClick={() => notify('Resolved requests cleared.')}>Clear Resolved</button></div><div className="empty-message">No help requests yet. Requests submitted by users will appear here automatically.</div></div><div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <AdminUserRow key={user.id} user={user} onEdit={() => setEditing(user)} onDelete={() => setDeleting(user)} onDeactivate={() => setStatus(user, 'suspended', `${user.fullName} has been deactivated.`)} onActivate={() => setStatus(user, 'active', `${user.fullName} has been reactivated.`)} />) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div>
-    {editing ? <AdminUserEditModal user={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} notify={notify} /> : null}
-    {deleting ? <AdminUserDeleteModal user={deleting} onClose={() => setDeleting(null)} onDeleted={() => { setDeleting(null); refresh(); }} notify={notify} /> : null}
+  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div></div><section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{tickets?.length ?? 0} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => void refreshSupportRequests()}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <div className="support-ticket-list">{tickets.map((ticket) => <AdminTicketCard key={`${ticket.id}-${ticket.updatedAt}`} ticket={ticket} notify={notify} onSaved={() => void refreshSupportRequests()} />)}</div> : <div className="empty-message">New support requests will appear here.</div>}</section><div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <AdminUserRow key={user.id} user={user} onEdit={() => setEditing(user)} onDelete={() => setDeleting(user)} onDeactivate={() => setStatus(user, 'suspended', `${user.fullName} has been deactivated.`)} onActivate={() => setStatus(user, 'active', `${user.fullName} has been reactivated.`)} />) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div>
+    {editing ? <AdminUserEditModal user={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refreshUsers(); }} notify={notify} /> : null}
+    {deleting ? <AdminUserDeleteModal user={deleting} onClose={() => setDeleting(null)} onDeleted={() => { setDeleting(null); refreshUsers(); }} notify={notify} /> : null}
   </section>;
 }
 
