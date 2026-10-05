@@ -21,7 +21,7 @@ const WorkflowEventType = { status_change: 'status_change', task_completed: 'tas
 const NotificationType = { task_assignment: 'task_assignment', group_activity: 'group_activity', announcement: 'announcement', ticket_update: 'ticket_update' } as const;
 type Role = (typeof Role)[keyof typeof Role];
 type TaskStatus = 'pending' | 'ongoing' | 'for_review' | 'completed';
-type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva' | 'figma';
+type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva';
 type NotificationType = (typeof NotificationType)[keyof typeof NotificationType];
 // Outlook has no WebSphere event taxonomy, so mirrored events import as meetings — the best fit for
 // invites/appointments. Module-level so it does not depend on constructor init order.
@@ -31,6 +31,28 @@ const PASSWORD_REASON_LABEL = Object.fromEntries(passwordRequirements('').map((r
 const passwordPolicyFailed = (reason: PasswordRequirementId) => fail('VALIDATION_FAILED', `Password does not meet the required policy: ${PASSWORD_REASON_LABEL[reason]}`, 400, { password: reason });
 type Caller = { id: string; role: Role; tv: number };
 const taskProgress = (status: string) => status === 'completed' ? 100 : status === 'for_review' ? 75 : status === 'ongoing' ? 50 : 0;
+const taskPrediction = (task: any, now: Date) => {
+  const progress = taskProgress(task.status) / 100;
+  const expectedHours = Number(task.expectedDurationHrs ?? 0);
+  const deadline = task.deadline ? new Date(task.deadline) : null;
+  let predictedCompletion = task.completedAt ? new Date(task.completedAt) : deadline ? new Date(deadline) : new Date(now);
+  if (!task.completedAt && expectedHours) {
+    const remainingHours = expectedHours * (1 - progress);
+    predictedCompletion = new Date(now.getTime() + remainingHours * 36e5);
+  }
+  const delayDays = deadline ? Math.ceil((predictedCompletion.getTime() - deadline.getTime()) / 86400000) : 0;
+  let score = 15;
+  if (task.status === 'completed') score = task.completedAt && deadline && task.completedAt > deadline ? 45 : 5;
+  else if (deadline && deadline < now) score = 90;
+  else if (delayDays > 2) score = 85;
+  else if (delayDays > 0) score = 65;
+  else if (deadline) {
+    const daysRemaining = (deadline.getTime() - now.getTime()) / 86400000;
+    score = daysRemaining <= 1 ? 75 : daysRemaining <= 3 ? 55 : daysRemaining <= 7 ? 35 : 15;
+  }
+  const level = score > 70 ? 'high' : score > 35 ? 'medium' : 'low';
+  return { score, level, predictedCompletion, delayDays };
+};
 
 // Fields an administrator may change from Account Management, kept as explicit allowlists so the
 // update path can never set anything the console doesn't offer (e.g. passwordHash or tokenVersion).
@@ -200,6 +222,16 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async issueJoinCode(groupId: string) { let code = this.code(); while (await this.prisma.joinCode.findUnique({ where: { code } })) code = this.code(); await this.prisma.joinCode.create({ data: { groupId, code, expiresAt: new Date(Date.now() + 30 * 864e5) } }); return code; }
   async joinGroup(caller: Caller, code: string) { const entry = await this.prisma.joinCode.findUnique({ where: { code }, include: { group: true } }); if (!entry || !entry.active || (entry.expiresAt && entry.expiresAt < new Date())) fail('INVALID_JOIN_CODE', 'Join code is invalid or expired', 400); await this.prisma.groupMember.upsert({ where: { groupId_userId: { groupId: entry.groupId, userId: caller.id } }, update: {}, create: { groupId: entry.groupId, userId: caller.id } }); return entry.group; }
   async groups(caller: Caller) { return this.prisma.group.findMany({ where: { members: { some: { userId: caller.id } } }, include: { members: { where: { userId: caller.id }, select: { role: true } }, _count: { select: { projects: true, ideas: true } } } }); }
+  async searchGroupChats(caller: Caller, query: string) {
+    const term = query.trim();
+    if (!term) return this.groups(caller);
+    const groups = await this.prisma.group.findMany({
+      where: { members: { some: { userId: caller.id } }, OR: [{ name: { contains: term } }, { messages: { some: { body: { contains: term } } } }] },
+      include: { members: { where: { userId: caller.id }, select: { role: true } }, _count: { select: { projects: true, ideas: true } }, messages: { where: { body: { contains: term } }, orderBy: { createdAt: 'desc' }, take: 1, select: { body: true } } },
+      orderBy: { name: 'asc' },
+    });
+    return groups.map((group: any) => ({ id: group.id, name: group.name, members: group.members, _count: group._count, messageMatch: group.messages[0]?.body ?? null }));
+  }
   async group(caller: Caller, id: string) {
     await this.member(id, caller.id);
     const activeCode = { active: true, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] };
@@ -675,7 +707,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (!connectors[provider]) fail('VALIDATION_FAILED', 'This integration provider is not supported');
     try { new URL(redirectUri); } catch { fail('VALIDATION_FAILED', 'A valid OAuth callback URL is required', 400); }
     const state = randomBytes(20).toString('hex');
-    const codeVerifier = provider === 'trello' || provider === 'asana' || provider === 'canva' || provider === 'figma' ? randomBytes(48).toString('base64url') : undefined;
+    const codeVerifier = provider === 'trello' || provider === 'asana' || provider === 'canva' ? randomBytes(48).toString('base64url') : undefined;
     const codeChallenge = codeVerifier ? createHash('sha256').update(codeVerifier).digest('base64url') : undefined;
     await this.redis.set(this.oauthStateKey(state), JSON.stringify({ userId: caller.id, provider, redirectUri, codeVerifier }), 600);
     let authorizeUrl: string;
@@ -772,21 +804,41 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const project = await this.project(caller, projectId);
     const taskIds = project.tasks.map((task: any) => task.id);
     const dependencies = taskIds.length ? await this.prisma.taskDependency.findMany({ where: { OR: [{ prerequisiteId: { in: taskIds } }, { dependentId: { in: taskIds } }] }, select: { prerequisiteId: true, dependentId: true } }) : [];
-    const stats = projectAnalytics(project.tasks.map((task: any) => ({ ...task, assigneeId: task.assignments[0]?.assigneeId })), project.deadline, new Date(), dependencies);
-    return { ...stats, recommendations: recommendations(stats.riskLevel, stats.bottlenecks), tasksCompleted: project.tasks.filter((task: any) => task.status === 'completed').length };
+    const now = new Date();
+    const stats = projectAnalytics(project.tasks.map((task: any) => ({ ...task, assigneeId: task.assignments[0]?.assigneeId })), project.deadline, now, dependencies);
+    const bottlenecksByTask = new Map(stats.bottlenecks.map((bottleneck) => [bottleneck.taskId, bottleneck]));
+    const stages = project.tasks.filter((task: any) => task.expectedDurationHrs && task.startedAt).map((task: any) => {
+      const averageDays = ((task.completedAt ?? now).getTime() - task.startedAt.getTime()) / 86400000;
+      const expectedDays = task.expectedDurationHrs / 24;
+      const delayDays = Math.max(0, averageDays - expectedDays);
+      const bottleneck = bottlenecksByTask.get(task.id);
+      const impact = delayDays >= 3 || (bottleneck?.blastRadius ?? 0) >= 4 ? 'high' : delayDays >= 1 || (bottleneck?.blastRadius ?? 0) >= 2 ? 'medium' : 'none';
+      return { taskId: task.id, stage: task.title, averageDays, expectedDays, delayDays, impact };
+    });
+    const taskRisks = project.tasks.map((task: any) => ({
+      taskId: task.id,
+      title: task.title,
+      status: task.status,
+      deadline: task.deadline,
+      projectTitle: project.title,
+      assignees: task.assignments.map((assignment: any) => project.members.find((member: any) => member.userId === assignment.assigneeId)?.user.fullName).filter(Boolean),
+      ...taskPrediction(task, now),
+    })).sort((a: any, b: any) => b.score - a.score || new Date(a.deadline ?? 0).getTime() - new Date(b.deadline ?? 0).getTime());
+    return { ...stats, stages, taskRisks, recommendations: recommendations(stats.riskLevel, stats.bottlenecks), tasksCompleted: project.tasks.filter((task: any) => task.status === 'completed').length };
   }
   async analyticsTrends(caller: Caller, projectId: string) {
     const project = await this.project(caller, projectId);
     const now = new Date();
-    const weeks = Array.from({ length: 6 }, (_, index) => 5 - index).map((weeksAgo) => {
-      const start = new Date(now.getTime() - (weeksAgo + 1) * 7 * 86400000);
-      const end = new Date(now.getTime() - weeksAgo * 7 * 86400000);
+    const days = Array.from({ length: 7 }, (_, index) => 6 - index).map((daysAgo) => {
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo);
+      const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
       const completed = project.tasks.filter((task: any) => task.completedAt && task.completedAt >= start && task.completedAt < end).length;
       const total = project.tasks.filter((task: any) => task.createdAt < end).length;
       return { periodStart: start, periodEnd: end, tasksCompleted: completed, progress: completionRate(project.tasks.filter((task: any) => task.status === 'completed' && task.completedAt && task.completedAt < end).length, total) };
     });
-    const improving = weeks.length > 1 && weeks[weeks.length - 1].tasksCompleted >= weeks[0].tasksCompleted;
-    return { periods: weeks, trend: improving ? 'improving' : 'declining' };
+    const firstHalf = days.slice(0, 3).reduce((total, day) => total + day.tasksCompleted, 0);
+    const secondHalf = days.slice(-3).reduce((total, day) => total + day.tasksCompleted, 0);
+    return { periods: days, trend: secondHalf >= firstHalf ? 'improving' : 'declining' };
   }
   async teamPerformance(caller: Caller, projectId: string) {
     const project = await this.project(caller, projectId);
@@ -802,13 +854,17 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       end: new Date(now.getTime() - weeksAgo * 7 * 86400000),
     }));
     const members = project.members.map((membership: any) => ({ id: membership.user.id, fullName: membership.user.fullName, role: membership.role }));
+    const assignmentsByMember = new Map<string, any[]>(members.map((member: any) => [member.id, (project.tasks as any[]).filter((task: any) => task.assignments.some((assignment: any) => assignment.assigneeId === member.id))]));
     const weeks = weekRanges.map((range) => {
       const label = range.start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
       const memberStats = members.map((member: any) => {
         const memberEvents = events.filter((event: any) => event.actorId === member.id && event.createdAt >= range.start && event.createdAt < range.end);
         const tasksCompleted = memberEvents.filter((event: any) => event.type === WorkflowEventType.task_completed).length;
         const contributions = memberEvents.length;
-        return { id: member.id, fullName: member.fullName, role: member.role, contributions, tasksCompleted, active: contributions > 0 };
+        const assignedTasks = assignmentsByMember.get(member.id) ?? [];
+        const completedAssigned = assignedTasks.filter((task: any) => task.status === 'completed').length;
+        const performance = assignedTasks.length ? Math.round((completedAssigned / assignedTasks.length) * 100) : 0;
+        return { id: member.id, fullName: member.fullName, role: member.role, contributions, tasksCompleted, performance, active: contributions > 0 };
       });
       const activeMembers = memberStats.filter((member: any) => member.active);
       return { periodStart: range.start, periodEnd: range.end, label, members: memberStats, activeCount: activeMembers.length, inactiveCount: memberStats.length - activeMembers.length };
@@ -819,14 +875,41 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       const totalContributions = perWeek.reduce((sum: number, entry: any) => sum + entry.contributions, 0);
       const totalCompleted = perWeek.reduce((sum: number, entry: any) => sum + entry.tasksCompleted, 0);
       const activeWeeks = perWeek.filter((entry: any) => entry.active).length;
-      return { id: member.id, fullName: member.fullName, role: member.role, totalContributions, totalCompleted, activeWeeks, active: activeWeeks > 0 };
+      const assignedTasks = assignmentsByMember.get(member.id) ?? [];
+      const completedAssigned = assignedTasks.filter((task: any) => task.status === 'completed').length;
+      const performance = assignedTasks.length ? Math.round((completedAssigned / assignedTasks.length) * 100) : 0;
+      return { id: member.id, fullName: member.fullName, role: member.role, totalContributions, totalCompleted, activeWeeks, performance, active: activeWeeks > 0 };
     });
     return { weeks, members: memberSummary, activeMembers: memberSummary.filter((member: any) => member.active).length, inactiveMembers: memberSummary.filter((member: any) => !member.active).length };
   }
   async analyticsSummary(caller: Caller, projectId: string) {
-    const stats = await this.analytics(caller, projectId);
+    const [stats, trends] = await Promise.all([this.analytics(caller, projectId), this.analyticsTrends(caller, projectId)]);
     const summary = `This project has completed ${Math.round(stats.taskCompletionRate * 100)}% of its tasks with ${Math.round(stats.overallEfficiency * 100)}% on-time delivery. Current risk level is ${stats.riskLevel.replace('_', ' ')}${stats.bottlenecks.length ? ` with ${stats.bottlenecks.length} bottleneck${stats.bottlenecks.length === 1 ? '' : 's'} detected` : ''}.`;
-    return { summary, recommendations: stats.recommendations, riskLevel: stats.riskLevel, taskCompletionRate: stats.taskCompletionRate, overallEfficiency: stats.overallEfficiency };
+    const insights: Array<{ tone: 'great' | 'notice' | 'action'; label: string; text: string }> = [];
+    if (trends.trend === 'improving') insights.push({ tone: 'great', label: 'Great', text: 'Task completion improved over the last few days. Keep the momentum going.' });
+    else insights.push({ tone: 'notice', label: 'Notice', text: 'Task completion has slowed recently. Review open work with the team.' });
+    const highestImpact = stats.stages.sort((a: any, b: any) => b.delayDays - a.delayDays)[0];
+    if (highestImpact) insights.push({ tone: 'notice', label: 'Notice', text: `${highestImpact.stage} is taking longer than expected. Consider redistributing tasks.` });
+    if (stats.bottlenecks.length) insights.push({ tone: 'action', label: 'Action', text: 'Resolve the most delayed work before starting dependent tasks.' });
+    return { summary, insights, recommendations: stats.recommendations, riskLevel: stats.riskLevel, taskCompletionRate: stats.taskCompletionRate, overallEfficiency: stats.overallEfficiency };
+  }
+  async analyticsToolUsage(caller: Caller, projectId: string) {
+    await this.project(caller, projectId);
+    const resources = await this.prisma.linkedResource.findMany({
+      where: { projectId },
+      select: { connectionId: true, connection: { select: { provider: true, tool: { select: { name: true } } } } },
+    });
+    const connectionIds = [...new Set(resources.map((resource: any) => resource.connectionId))];
+    if (!connectionIds.length) return [];
+    const since = new Date(Date.now() - 30 * 86400000);
+    const usage = await this.prisma.toolUsage.groupBy({ by: ['connectionId'], where: { connectionId: { in: connectionIds }, createdAt: { gte: since } }, _count: { id: true } });
+    const counts = new Map<string, number>(usage.map((entry: any) => [entry.connectionId, entry._count.id]));
+    return [...new Map(resources.map((resource: any) => [resource.connectionId, resource])).values()].map((resource: any) => ({
+      provider: resource.connection.provider,
+      name: resource.connection.tool.name,
+      actions: counts.get(resource.connectionId) ?? 0,
+      usagePercent: Math.min(100, Math.round(((counts.get(resource.connectionId) ?? 0) / 30) * 100)),
+    })).sort((a: any, b: any) => b.usagePercent - a.usagePercent || b.actions - a.actions);
   }
   async ticket(caller: Caller, input: any) {
     const ticket = await this.prisma.supportTicket.create({ data: { ...input, userId: caller.id } });

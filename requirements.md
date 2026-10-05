@@ -25,7 +25,7 @@ This document specifies the end-to-end requirements for the full WebSphere syste
 - **Risk_Score**: A quantitative value derived from workflow and task data that expresses the likelihood a project or task will miss its deadline.
 - **Risk_Level**: A categorical classification derived from the Risk_Score, one of on-track, at-risk, or critical.
 - **Blast_Radius**: A quantitative impact measure describing how many dependent tasks, members, or milestones a given bottleneck affects.
-- **Connected_Tool**: An external productivity or design service that a user links through OAuth2 (Google Drive/Docs, Microsoft 365 via Graph, Trello, Asana, Canva, or Figma).
+- **Connected_Tool**: An external productivity or design service that a user links through OAuth2 (Google Drive/Docs, Microsoft 365 via Graph, Trello, Asana, or Canva).
 - **RAG (Retrieval-Augmented Generation)**: The technique by which the AI assistant retrieves grounded context (including the current WebSphere tools catalog) before generating responses.
 - **MCP (Model Context Protocol)**: The protocol used to expose WebSphere data and functions to the AI assistant in a controlled way.
 - **@helper**: The invocation keyword used inside collaboration surfaces to summon the WebSphere AI assistant.
@@ -686,7 +686,7 @@ This document specifies the end-to-end requirements for the full WebSphere syste
 
 #### Acceptance Criteria
 
-1. WHEN a student opens the external tools catalog, THE WebSphere_System SHALL display the supported tools including Canva, Figma, MS 365 (Word, Excel, PowerPoint), Google Drive, Google Docs, Trello, and Asana.
+1. WHEN a student opens the external tools catalog, THE WebSphere_System SHALL display the supported tools including Canva, MS 365 (Word, Excel, PowerPoint), Google Drive, Google Docs, Trello, and Asana.
 2. WHEN a student connects a supported external tool, THE WebSphere_System SHALL establish the connection through MCP or API.
 3. THE WebSphere_System SHALL be able to include collaboration, file-management, communication, and academic-work applications in the catalog.
 

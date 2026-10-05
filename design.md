@@ -84,7 +84,7 @@ flowchart TB
     OPENAI["OpenAI API\n(chat + embeddings + moderation)"]
     SES["AWS SES (email via SMTP)"]
     PUSH["Web Push (VAPID)"]
-    PROV["Providers:\nGoogle, Microsoft Graph,\nTrello, Asana, Canva, Figma"]
+    PROV["Providers:\nGoogle, Microsoft Graph,\nTrello, Asana, Canva"]
   end
 
   SPA --> NGINX
@@ -417,7 +417,7 @@ POST  /push/subscribe                (store VAPID subscription)
 
 ```ts
 interface Connector {
-  readonly provider: ProviderId; // 'google'|'microsoft'|'trello'|'asana'|'canva'|'figma'
+  readonly provider: ProviderId; // 'google'|'microsoft'|'trello'|'asana'|'canva'
   authorizeUrl(state: string, redirectUri: string): string;              // OAuth2 start
   exchangeCode(code: string, redirectUri: string): Promise<OAuthTokens>; // → encrypted at rest
   refresh(tokens: OAuthTokens): Promise<OAuthTokens>;                    // where supported
@@ -427,7 +427,7 @@ interface Connector {
 }
 ```
 
-All six families (Google Drive/Docs, Microsoft 365 via Graph, Trello, Asana, Canva, Figma) are fully implemented as per-provider adapters behind this common interface, registered in a `ConnectorRegistry`. OAuth2 tokens are encrypted with AES-GCM (key from env/secret) before persistence and decrypted only in-adapter (NFR-3). Where a provider supports refresh tokens, a BullMQ job refreshes them before expiry; where it does not, the connection is flagged and the user is prompted to reconnect. Connected-tool usage is recorded and surfaced to analytics (US-053/069).
+The supported families (Google Drive/Docs, Microsoft 365 via Graph, Trello, Asana, and Canva) are implemented as per-provider adapters behind this common interface, registered in a `ConnectorRegistry`. OAuth2 tokens are encrypted with AES-GCM (key from env/secret) before persistence and decrypted only in-adapter (NFR-3). Where a provider supports refresh tokens, a BullMQ job refreshes them before expiry; where it does not, the connection is flagged and the user is prompted to reconnect. Connected-tool usage is recorded and surfaced to analytics (US-053/069).
 
 ```
 GET    /integrations/catalog             (US-067.1 supported tools)
@@ -857,7 +857,7 @@ model PushSubscription {              // VAPID web push
 }
 
 // ---------- Connected tools / integrations ----------
-enum ProviderId { google microsoft trello asana canva figma }
+enum ProviderId { google microsoft trello asana canva }
 enum ConnectionStatus { connected expired revoked error }
 
 model ConnectedTool {                 // Tools_Catalog entry (US-067)

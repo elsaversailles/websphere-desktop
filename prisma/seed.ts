@@ -7,7 +7,7 @@ async function main() {
   await prisma.admin.upsert({ where: { userId: admin.id }, update: {}, create: { userId: admin.id } });
   await prisma.user.upsert({ where: { email: 'student@websphere.local' }, update: {}, create: { email: 'student@websphere.local', fullName: 'Demo Student', passwordHash, role: Role.Project_Member, institution: 'STI College', course: 'BSIT' } });
   for (const tool of [
-    [ProviderId.google, 'Google Drive & Docs', 'file'], [ProviderId.microsoft, 'Microsoft 365', 'collaboration'], [ProviderId.trello, 'Trello', 'project-management'], [ProviderId.asana, 'Asana', 'project-management'], [ProviderId.canva, 'Canva', 'design'], [ProviderId.figma, 'Figma', 'design'],
+    [ProviderId.google, 'Google Drive & Docs', 'file'], [ProviderId.microsoft, 'Microsoft 365', 'collaboration'], [ProviderId.trello, 'Trello', 'project-management'], [ProviderId.asana, 'Asana', 'project-management'], [ProviderId.canva, 'Canva', 'design'],
   ] as const) await prisma.connectedTool.upsert({ where: { provider: tool[0] }, update: { name: tool[1], category: tool[2] }, create: { provider: tool[0], name: tool[1], category: tool[2] } });
 }
 main().finally(() => prisma.$disconnect());
