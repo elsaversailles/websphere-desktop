@@ -10,5 +10,9 @@ WHERE tc.`provider` = 'figma';
 DELETE FROM `ToolConnection` WHERE `provider` = 'figma';
 DELETE FROM `ConnectedTool` WHERE `provider` = 'figma';
 
-ALTER TABLE `ConnectedTool` MODIFY `provider` ENUM('google', 'microsoft', 'trello', 'asana', 'canva') NOT NULL;
+-- The provider columns are related by a foreign key, so temporarily remove it before changing
+-- either enum and restore the same constraint after both columns use the narrowed enum.
+ALTER TABLE `ToolConnection` DROP FOREIGN KEY `ToolConnection_provider_fkey`;
 ALTER TABLE `ToolConnection` MODIFY `provider` ENUM('google', 'microsoft', 'trello', 'asana', 'canva') NOT NULL;
+ALTER TABLE `ConnectedTool` MODIFY `provider` ENUM('google', 'microsoft', 'trello', 'asana', 'canva') NOT NULL;
+ALTER TABLE `ToolConnection` ADD CONSTRAINT `ToolConnection_provider_fkey` FOREIGN KEY (`provider`) REFERENCES `ConnectedTool`(`provider`) ON DELETE RESTRICT ON UPDATE CASCADE;
