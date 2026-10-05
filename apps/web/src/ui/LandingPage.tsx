@@ -12,7 +12,8 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
     </header>
 
     <section className="lp-hero">
-      <span className="swirl s1" aria-hidden="true" /><span className="swirl s2" aria-hidden="true" />
+      <span className="lp-hero-glow lp-hero-glow-left" aria-hidden="true" />
+      <span className="lp-hero-glow lp-hero-glow-right" aria-hidden="true" />
       <div className="lp-hero-copy">
         <span className="lp-eyebrow">For student project teams</span>
         <h1>One workspace for the whole <em>academic project</em></h1>
@@ -24,7 +25,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
       </div>
     </section>
 
-    <section className="lp-features">
+    <section className="lp-features" aria-label="WebSphere features">
       {features.map((feature) => <article className="lp-card" key={feature.title}>
         <span className="lp-card-icon" aria-hidden="true">{feature.icon}</span>
         <h2>{feature.title}</h2>
@@ -33,18 +34,23 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
     </section>
 
     <section className="lp-steps">
-      <h2>From idea to finished project</h2>
+      <div className="lp-steps-inner">
+      <h2>Make group projects easier, from day one</h2>
       <ol>
-        <li><strong>Form your group</strong><span>Create one or join with a code</span></li>
-        <li><strong>Pitch and vote</strong><span>Decide together, inside a time limit</span></li>
-        <li><strong>Build it</strong><span>Tasks, owners, real deadlines</span></li>
-        <li><strong>Stay ahead</strong><span>Know a deadline is slipping before it does</span></li>
+        <li><strong>Bring your team together</strong><span>Create a group or join with one code.</span></li>
+        <li><strong>Choose your best idea</strong><span>Pitch, vote, and move forward together.</span></li>
+        <li><strong>Know what comes next</strong><span>Assign tasks and see every step of progress.</span></li>
+        <li><strong>Finish with confidence</strong><span>Spot delays early and stay on schedule.</span></li>
       </ol>
+      </div>
     </section>
 
     <section className="lp-cta">
-      <h2>Your next group project deserves better than five group chats</h2>
-      <button type="button" className="lp-btn lp-btn-lg" onClick={() => onGetStarted('register')}>Get started free</button>
+      <div className="lp-cta-glow" aria-hidden="true" />
+      <div className="lp-cta-content">
+        <h2>Less chasing. More creating.<br />Your best group project starts here.</h2>
+        <button type="button" className="lp-btn lp-btn-lg" onClick={() => onGetStarted('register')}>Start your project free</button>
+      </div>
     </section>
 
     <footer className="lp-footer">
