@@ -31,7 +31,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - Tests to write (integration): apply migration to a throwaway MySQL 8, assert `@@unique([groupId,userId])`, `@@unique([pollId,voterId])`, `Project.ideaId @unique`, and email uniqueness are enforced
     - _Requirements: NFR 16, 20; Design: Data Models (Prisma model definitions), ERD_
   - [x] 1.4 Seed script and Tools_Catalog seed data
-    - Create `prisma/seed.ts` seeding an Administrator account, a demo Project_Member, and the six `ConnectedTool` catalog rows (google, microsoft, trello, asana, canva, figma) with categories
+    - Create `prisma/seed.ts` seeding an Administrator account, a demo Project_Member, and the supported `ConnectedTool` catalog rows (google, microsoft, trello, asana, canva) with categories
     - Tests to write: unit test that seed is idempotent (re-running does not duplicate catalog rows)
     - _Requirements: US-067; Design: IntegrationsModule (Tools_Catalog), AdminModule_
   - [x] 1.5 SharedInfra services and `/health` endpoint
@@ -396,7 +396,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
 
 - [-] 20. Phase 15 — External tools (connector framework + six adapters)
   - [x] 20.1 Connector framework, registry, and catalog
-    - Implement the `Connector` interface, `ConnectorRegistry`, and `GET /integrations/catalog` returning supported tools (Canva, Figma, MS 365, Google Drive/Docs, Trello, Asana) with categories
+    - Implement the `Connector` interface, `ConnectorRegistry`, and `GET /integrations/catalog` returning supported tools (Canva, MS 365, Google Drive/Docs, Trello, Asana) with categories
     - Tests to write (integration): catalog lists all six with categories
     - _Requirements: US-067.1, 67.3; Design: IntegrationsModule (Connector, registry)_
   - [x] 20.2 OAuth2 flow with AES-GCM encrypted token storage
@@ -413,7 +413,6 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - _Requirements: US-068.1, 68.2, US-069.1, 69.2; Design: IntegrationsModule (link/launch/sync)_
   - [-] 20.5 Implement all six provider adapters
     - Implemented Google Drive, Microsoft 365, Trello, Asana, and Canva OAuth adapters behind the common `Connector` interface. Canva uses Authorization Code + PKCE and syncs accessible designs. Its public app review is required before non-owner Canva users can connect.
-    - Figma OAuth is implemented locally with Authorization Code + PKCE and linked-design verification; it awaits Figma Client ID/Secret configuration and commit/CI deployment.
     - Removed the defunct Trello monitoring/sidebar flow; Trello is retained only as a standard user connection.
     - Tests to write: per-adapter unit tests for URL building, code exchange, refresh, and sync handling.
     - _Requirements: US-067.1, 67.2, US-068.1, 68.2, US-069.1, 69.2; Design: IntegrationsModule (six adapters)_
@@ -491,7 +490,6 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
 - [x] Browser notifications use VAPID and are sent when a subscribed user receives an in-app notification.
 - [x] Asana OAuth is implemented and deployed.
 - [x] Canva OAuth is implemented and deployed. The configured Client ID and redirect request have been verified; the current Canva secret must be rotated because it was exposed during local debugging. Canva public review is required for non-owner users.
-- [-] Figma OAuth needs a Figma OAuth app (`current_user:read`, `file_content:read`), production `FIGMA_CLIENT_ID`/`FIGMA_CLIENT_SECRET`, and the pending local Figma commit merged through CI.
 - [-] SES production setup needs SMTP credentials from SES → SMTP settings, a verified `SES_FROM` identity, and a final real-recipient delivery test.
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; they are NOT implemented during core execution but SHOULD be written for verification.

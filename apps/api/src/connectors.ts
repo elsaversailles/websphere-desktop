@@ -1,4 +1,4 @@
-export type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva' | 'figma';
+export type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva';
 export type OAuthTokens = { accessToken: string; refreshToken?: string; expiresAt?: Date };
 export type LinkTarget = { projectId?: string; taskId?: string; externalId: string; title: string; externalUrl: string };
 export type SyncTarget = Pick<LinkTarget, 'externalId' | 'title' | 'externalUrl'>;
@@ -124,41 +124,6 @@ class MicrosoftConnector extends DirectOAuthConnector implements CalendarConnect
     return { events, deltaLink: nextDeltaLink };
   }
 }
-class FigmaConnector extends DirectOAuthConnector {
-  readonly provider = 'figma' as const;
-  protected readonly authorizationEndpoint = 'https://www.figma.com/oauth';
-  protected readonly tokenEndpoint = 'https://api.figma.com/v1/oauth/token';
-  protected readonly clientIdEnv = 'FIGMA_CLIENT_ID';
-  protected readonly clientSecretEnv = 'FIGMA_CLIENT_SECRET';
-  protected authorizationParams() { return { scope: 'current_user:read,file_content:read' }; }
-  override authorizeUrl(state: string, redirectUri: string, codeChallenge?: string) {
-    if (!codeChallenge) throw new Error('OAUTH_EXCHANGE_FAILED');
-    return `${this.authorizationEndpoint}?${new URLSearchParams({ client_id: required(this.clientIdEnv), redirect_uri: redirectUri, response_type: 'code', state, ...this.authorizationParams(), code_challenge: codeChallenge, code_challenge_method: 'S256' }).toString()}`;
-  }
-  async sync(tokens: OAuthTokens, targets: SyncTarget[] = []): Promise<SyncResult> {
-    if (!targets.length) {
-      await requestJson('https://api.figma.com/v1/me', tokens.accessToken);
-      return { summary: 'Verified Figma account access' };
-    }
-    const results = await Promise.all(targets.map(async (target) => {
-      const key = target.externalUrl.match(/figma\\.com\\\/(?:file|design)\\\/([^/?#]+)/i)?.[1] ?? target.externalId;
-      try { await requestJson(`https://api.figma.com/v1/files/${encodeURIComponent(key)}?depth=1`, tokens.accessToken); return true; }
-      catch { return false; }
-    }));
-    const available = results.filter(Boolean).length;
-    return { summary: `Synced ${available} of ${targets.length} linked Figma design${targets.length === 1 ? '' : 's'}` };
-  }
-  override async exchangeCode(code: string, redirectUri: string, codeVerifier?: string) {
-    if (!code || !redirectUri || !codeVerifier) throw new Error('OAUTH_EXCHANGE_FAILED');
-    const basic = Buffer.from(`${required(this.clientIdEnv)}:${required(this.clientSecretEnv)}`).toString('base64');
-    return tokensFrom(await requestForm(this.tokenEndpoint, new URLSearchParams({ redirect_uri: redirectUri, code, code_verifier: codeVerifier, grant_type: 'authorization_code' }), { authorization: `Basic ${basic}` }));
-  }
-  override async refresh(tokens: OAuthTokens) {
-    if (!tokens.refreshToken) throw new Error('OAUTH_RECONNECT_REQUIRED');
-    const basic = Buffer.from(`${required(this.clientIdEnv)}:${required(this.clientSecretEnv)}`).toString('base64');
-    return tokensFrom(await requestForm('https://api.figma.com/v1/oauth/refresh', new URLSearchParams({ refresh_token: tokens.refreshToken }), { authorization: `Basic ${basic}` }), tokens.refreshToken);
-  }
-}
 class TrelloConnector implements Connector {
   readonly provider = 'trello' as const;
   private readonly authorizationEndpoint = 'https://auth.atlassian.com/authorize';
@@ -272,6 +237,6 @@ class UnavailableConnector implements Connector {
   async launchUrl(target: LinkTarget) { return target.externalUrl; }
 }
 export const connectors: Record<ProviderId, Connector> = {
-  google: new GoogleConnector(), microsoft: new MicrosoftConnector(), figma: new FigmaConnector(),
+  google: new GoogleConnector(), microsoft: new MicrosoftConnector(),
   trello: new TrelloConnector(), asana: new AsanaConnector(), canva: new CanvaConnector(),
 };

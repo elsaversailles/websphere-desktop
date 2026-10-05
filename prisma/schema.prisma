@@ -78,7 +78,6 @@ enum ProviderId {
   trello
   asana
   canva
-  figma
 }
 enum ConnectionStatus {
   connected

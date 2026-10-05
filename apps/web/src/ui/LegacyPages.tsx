@@ -10,10 +10,13 @@ type Task = { id: string; title: string; projectId: string; deadline?: string | 
 type Project = { id: string; title: string; status: string; deadline?: string | null; group: { name: string }; members?: Array<{ role: string }>; tasks: Array<{ status: string }> };
 type CalendarData = { events: Array<{ id: string; title: string; type: string; startAt: string; source?: string }>; hints: Array<{ id: string; title: string; type: string; deadline: string }> };
 
-type TeamMemberWeek = { id: string; fullName: string; role: string; contributions: number; tasksCompleted: number; active: boolean };
+type TeamMemberWeek = { id: string; fullName: string; role: string; contributions: number; tasksCompleted: number; performance: number; active: boolean };
 type TeamPerformanceWeek = { periodStart: string; periodEnd: string; label: string; members: TeamMemberWeek[]; activeCount: number; inactiveCount: number };
-type TeamMemberSummary = { id: string; fullName: string; role: string; totalContributions: number; totalCompleted: number; activeWeeks: number; active: boolean };
+type TeamMemberSummary = { id: string; fullName: string; role: string; totalContributions: number; totalCompleted: number; activeWeeks: number; performance: number; active: boolean };
 type TeamPerformance = { weeks: TeamPerformanceWeek[]; members: TeamMemberSummary[]; activeMembers: number; inactiveMembers: number };
+type ToolUsage = { provider: string; name: string; actions: number; usagePercent: number };
+type WorkflowSummary = { summary: string; recommendations: string[]; insights: Array<{ tone: 'great' | 'notice' | 'action'; label: string; text: string }> };
+type TaskRisk = { taskId: string; title: string; status: string; deadline?: string | null; projectTitle: string; assignees: string[]; score: number; level: 'high' | 'medium' | 'low'; predictedCompletion: string; delayDays: number };
 
 const Empty = ({ children }: { children: React.ReactNode }) => <div className="legacy-empty">{children}</div>;
 const Head = ({ title, action }: { title: string; action?: React.ReactNode }) => <div className="ph"><h2>{title}</h2>{action}</div>;
@@ -125,20 +128,25 @@ export function ProjectsAnalyticsPage({ kind, notify }: { kind: 'workflow' | 'pr
   const [selected, setSelected] = useState('');
   const [analytics, setAnalytics] = useState<any>(null);
   const [trends, setTrends] = useState<{ periods: Array<{ periodStart: string; tasksCompleted: number; progress: number }>; trend: string } | null>(null);
-  const [summary, setSummary] = useState<{ summary: string; recommendations: string[] } | null>(null);
+  const [summary, setSummary] = useState<WorkflowSummary | null>(null);
   const [team, setTeam] = useState<TeamPerformance | null>(null);
+  const [tools, setTools] = useState<ToolUsage[] | null>(null);
   useEffect(() => { void request<Project[]>('/projects').then((next) => { setProjects(next); setSelected((current) => current || next[0]?.id || ''); }).catch((error: Error) => notify(error.message)); }, [notify]);
   useEffect(() => {
-    if (!selected) { setAnalytics(null); setTrends(null); setSummary(null); setTeam(null); return; }
+    if (!selected) { setAnalytics(null); setTrends(null); setSummary(null); setTeam(null); setTools(null); return; }
     void request(`/projects/${selected}/analytics`).then(setAnalytics).catch((error: Error) => notify(error.message));
     void request<{ periods: Array<{ periodStart: string; tasksCompleted: number; progress: number }>; trend: string }>(`/projects/${selected}/analytics/trends`).then(setTrends).catch(() => setTrends(null));
-    void request<{ summary: string; recommendations: string[] }>(`/projects/${selected}/analytics/summary`).then(setSummary).catch(() => setSummary(null));
+    void request<WorkflowSummary>(`/projects/${selected}/analytics/summary`).then(setSummary).catch(() => setSummary(null));
     void request<TeamPerformance>(`/projects/${selected}/analytics/team`).then(setTeam).catch(() => setTeam(null));
+    void request<ToolUsage[]>(`/projects/${selected}/analytics/tools`).then(setTools).catch(() => setTools(null));
   }, [selected, notify]);
   const picker = <select className="legacy-select" value={selected} onChange={(event) => setSelected(event.target.value)}><option value="">Select a project</option>{projects?.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select>;
-  if (kind === 'workflow') return <section className="sp on"><Head title="Workflow Analytics" action={picker} /><div className="krow c3"><Kpi value={analytics ? `${Math.round((analytics.overallEfficiency ?? 0) * 100)}%` : '—'} label="Overall Efficiency" /><Kpi value={analytics?.bottlenecks?.length ?? '—'} label="Bottlenecks Detected" tone="yel" /><Kpi value={analytics?.tasksCompleted ?? '—'} label="Tasks Completed" tone="grn" /></div><div className="g2"><TrendChartCard trends={trends} /><TeamPerformanceCard team={team} /></div><div className="cc"><div className="cc-head"><h3>Bottleneck Analysis</h3></div>{analytics?.bottlenecks?.length ? <table className="tbl"><thead><tr><th>Task</th><th>Delay (days)</th><th>Blast Radius</th><th>Recommendation</th></tr></thead><tbody>{analytics.bottlenecks.map((item: any, index: number) => <tr key={index}><td>{item.taskId ?? 'Task'}</td><td>{item.delayDays?.toFixed?.(1) ?? item.delayDays}</td><td><span className="bdg y">{item.blastRadius}</span></td><td>Discuss with your group and update the task plan.</td></tr>)}</tbody></table> : <Empty>Workflow insights will appear after your project has activity.</Empty>}</div><div className="g2"><InfoCard title="Connected Tool Usage" text="Tool activity will appear after you connect an external app." /><div className="cc"><div className="cc-head"><h3>Workflow Summary</h3></div>{summary ? <><p style={{ fontSize: '13px', color: 'var(--sub)', marginBottom: '10px' }}>{summary.summary}</p>{summary.recommendations.length ? summary.recommendations.map((value, index) => <div className="alert y" key={index}>{value}</div>) : null}</> : <Empty>Your workflow summary will appear here.</Empty>}</div></div></section>;
-  const score = Number(analytics?.riskScore ?? 0);
-  return <section className="sp on"><Head title="Predictive Monitoring" action={picker} /><div className="krow c3"><Kpi value={score ? 1 : '—'} label="High Risk Tasks" tone="red" /><Kpi value={analytics?.deltaDays ?? '—'} label="Possible Delays" tone="yel" /><Kpi value={analytics ? Math.max(0, (projects?.find((p) => p.id === selected)?.tasks.length ?? 0) - (score ? 1 : 0)) : '—'} label="On-Track Tasks" tone="grn" /></div><div className="cc"><div className="cc-head"><h3>Risk Assessment by Task</h3></div>{analytics ? <div className="risk-cards"><RiskRing score={score} title="Project Risk" /></div> : <Empty>Project risk and progress insights will appear here once you have project data.</Empty>}</div><div className="cc prediction-alerts"><div className="lbl">AI Predictions &amp; Alerts</div>{analytics?.recommendations?.length ? analytics.recommendations.map((value: string, index: number) => <div className="alert y" key={index}>{value}</div>) : <Empty>Your AI predictions and alerts will appear here.</Empty>}</div><div className="cc"><div className="cc-head"><h3>Predicted Timeline</h3></div>{analytics ? <table className="tbl"><thead><tr><th>Project</th><th>Original Deadline</th><th>Predicted Completion</th><th>Risk</th><th>Recommendation</th></tr></thead><tbody><tr><td>{projects?.find((p) => p.id === selected)?.title}</td><td>{date(projects?.find((p) => p.id === selected)?.deadline)}</td><td>{date(analytics.predictedCompletion)}</td><td><Badge value={analytics.riskLevel ?? 'low'} /></td><td>{analytics.recommendations?.[0] ?? 'No action needed'}</td></tr></tbody></table> : <Empty>Predicted timelines will appear here.</Empty>}</div></section>;
+  if (kind === 'workflow') return <section className="sp on workflow-analytics"><Head title="Workflow Analytics" action={picker} /><div className="krow c3 workflow-kpis"><Kpi value={analytics ? `${Math.round((analytics.overallEfficiency ?? 0) * 100)}%` : '—'} label="Overall Efficiency" /><Kpi value={analytics?.bottlenecks?.length ?? '—'} label="Bottlenecks Detected" tone="yel" /><Kpi value={analytics?.tasksCompleted ?? '—'} label="Tasks Completed" tone="grn" /></div><div className="g2 workflow-top-grid"><TrendChartCard trends={trends} /><TeamPerformanceCard team={team} /></div><BottleneckAnalysis stages={analytics?.stages ?? null} /><div className="g2 workflow-bottom-grid"><ToolUsageCard tools={tools} /><WorkflowSummaryCard summary={summary} /></div></section>;
+  const taskRisks: TaskRisk[] = analytics?.taskRisks ?? [];
+  const highRiskTasks = taskRisks.filter((task) => task.level === 'high');
+  const delayedTasks = taskRisks.filter((task) => task.delayDays > 0);
+  const onTrackTasks = taskRisks.filter((task) => task.level === 'low');
+  return <section className="sp on predictive-monitoring"><Head title="Predictive Monitoring" action={picker} /><div className="krow c3 predictive-kpis"><Kpi value={analytics ? highRiskTasks.length : '—'} label="High Risk Tasks" tone="red" /><Kpi value={analytics ? delayedTasks.length : '—'} label="Possible Delays" tone="yel" /><Kpi value={analytics ? onTrackTasks.length : '—'} label="On-Track Tasks" tone="grn" /></div><div className="cc predictive-risk-assessment"><div className="cc-head"><h3>Risk Assessment by Task</h3></div>{analytics ? taskRisks.length ? <div className="risk-cards">{taskRisks.map((task) => <TaskRiskCard task={task} key={task.taskId} />)}</div> : <Empty>Tasks will appear here once they are added to this project.</Empty> : <Empty>Project risk and progress insights will appear here once you have project data.</Empty>}</div><PredictionAlerts tasks={taskRisks} recommendations={analytics?.recommendations ?? []} /><div className="cc predicted-timeline"><div className="cc-head"><h3>Predicted Timeline</h3></div>{analytics ? taskRisks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Assigned Member</th><th>Project</th><th>Original Deadline</th><th>Predicted Completion</th><th>Risk</th><th>Recommendation</th></tr></thead><tbody>{taskRisks.map((task) => <tr key={task.taskId}><td>{task.title}</td><td>{assigneeLabel(task)}</td><td>{task.projectTitle}</td><td>{date(task.deadline)}</td><td className={`timeline-${task.level}`}>{date(task.predictedCompletion)}{task.delayDays ? ` (${task.delayDays > 0 ? '+' : ''}${task.delayDays} days)` : ''}</td><td><Badge value={task.level} /></td><td>{taskRecommendation(task)}</td></tr>)}</tbody></table> : <Empty>Predicted timelines will appear here.</Empty> : <Empty>Predicted timelines will appear here.</Empty>}</div></section>;
 }
 
 export function NotificationsPage({ notify, onNotificationClick }: { notify: Notice; onNotificationClick: (notification: { id: string; read: boolean; relatedId?: string | null; relatedType?: string | null }) => void }) {
@@ -383,7 +391,7 @@ export function IntegrationsPage({ notify }: { notify: Notice }) {
     finally { setDisconnecting(null); }
   }
   async function connect(tool: { provider: string; name: string }) {
-    if (!['google', 'microsoft', 'figma', 'trello', 'asana', 'canva'].includes(tool.provider)) { notify(`${tool.name} is not available yet.`); return; }
+    if (!['google', 'microsoft', 'trello', 'asana', 'canva'].includes(tool.provider)) { notify(`${tool.name} is not available yet.`); return; }
     setConnecting(tool.provider);
     try {
       const callbackPath = apiUrl(`/integrations/${tool.provider}/callback`);
@@ -394,7 +402,7 @@ export function IntegrationsPage({ notify }: { notify: Notice }) {
   }
   const connected = tools?.filter((tool) => tool.connections.length).length ?? 0;
   const sections = useMemo(() => groupBy(tools ?? [], (tool) => tool.category || 'Other'), [tools]);
-  return <section className="sp on"><div className="ext-workspace-header"><div><div className="ext-workspace-title">Apps & External Tools</div><div className="ext-workspace-sub" /></div></div><div className="ext-status-bar"><span className="ext-status-pill"><i className="dot-pulse connected" />{connected} Connected</span><i className="ext-divider" /><span className="ext-status-pill"><i className="dot-pulse idle" />0 Active Sessions</span><i className="ext-divider" /><span className="ext-status-pill">✓ 0 Tasks Auto-Completed Today</span><span className="ext-last-sync">Last synced: not yet</span></div>{tools === null ? <div className="cc"><Empty>Loading apps…</Empty></div> : tools.length ? Object.entries(sections).map(([category, values]) => <div key={category}><div className="ext-section-label">{category}</div><div className="ext-app-grid">{values.map((tool) => <article className={`ext-app-card ${tool.connections.length ? 'connected' : ''}`} key={tool.id}><div className="ext-card-top"><div className="ext-app-icon"><ToolLogo provider={tool.provider} name={tool.name} size="lg" /></div><span className={`ext-conn-badge ${tool.connections.length ? 'connected' : 'not-connected'}`}>{tool.connections.length ? '● Connected' : 'Not Connected'}</span></div><div className="ext-app-name">{tool.name}</div><div className="ext-app-category">{tool.category}</div><div className="ext-recent-activity">{tool.connections.length ? 'Connected — ready to launch and link to a task.' : `Connect ${tool.name} when your project needs it.`}</div><div className="ext-card-footer"><span className="ext-task-link">No task linked yet</span><div className="ext-card-actions">{tool.connections.length ? <button className="ext-action-btn disconnect" disabled={disconnecting === tool.provider} onClick={() => void disconnect(tool)}>{disconnecting === tool.provider ? 'Removing…' : 'Disconnect'}</button> : null}<button className={`ext-action-btn ${tool.connections.length ? 'launch' : 'connect'}`} disabled={connecting === tool.provider} onClick={() => tool.connections.length ? notify(`${tool.name} is ready to launch.`) : void connect(tool)}>{tool.connections.length ? 'Launch' : connecting === tool.provider ? 'Opening…' : ['google', 'microsoft', 'figma', 'trello', 'asana', 'canva'].includes(tool.provider) ? 'Connect' : 'Coming Soon'}</button></div></div></article>)}</div></div>) : <div className="cc"><Empty>Connect a tool when your project needs one.</Empty></div>}</section>;
+  return <section className="sp on"><div className="ext-workspace-header"><div><div className="ext-workspace-title">Apps & External Tools</div><div className="ext-workspace-sub" /></div></div><div className="ext-status-bar"><span className="ext-status-pill"><i className="dot-pulse connected" />{connected} Connected</span><i className="ext-divider" /><span className="ext-status-pill"><i className="dot-pulse idle" />0 Active Sessions</span><i className="ext-divider" /><span className="ext-status-pill">✓ 0 Tasks Auto-Completed Today</span><span className="ext-last-sync">Last synced: not yet</span></div>{tools === null ? <div className="cc"><Empty>Loading apps…</Empty></div> : tools.length ? Object.entries(sections).map(([category, values]) => <div key={category}><div className="ext-section-label">{category}</div><div className="ext-app-grid">{values.map((tool) => <article className={`ext-app-card ${tool.connections.length ? 'connected' : ''}`} key={tool.id}><div className="ext-card-top"><div className="ext-app-icon"><ToolLogo provider={tool.provider} name={tool.name} size="lg" /></div><span className={`ext-conn-badge ${tool.connections.length ? 'connected' : 'not-connected'}`}>{tool.connections.length ? '● Connected' : 'Not Connected'}</span></div><div className="ext-app-name">{tool.name}</div><div className="ext-app-category">{tool.category}</div><div className="ext-recent-activity">{tool.connections.length ? 'Connected — ready to launch and link to a task.' : `Connect ${tool.name} when your project needs it.`}</div><div className="ext-card-footer"><span className="ext-task-link">No task linked yet</span><div className="ext-card-actions">{tool.connections.length ? <button className="ext-action-btn disconnect" disabled={disconnecting === tool.provider} onClick={() => void disconnect(tool)}>{disconnecting === tool.provider ? 'Removing…' : 'Disconnect'}</button> : null}<button className={`ext-action-btn ${tool.connections.length ? 'launch' : 'connect'}`} disabled={connecting === tool.provider} onClick={() => tool.connections.length ? notify(`${tool.name} is ready to launch.`) : void connect(tool)}>{tool.connections.length ? 'Launch' : connecting === tool.provider ? 'Opening…' : ['google', 'microsoft', 'trello', 'asana', 'canva'].includes(tool.provider) ? 'Connect' : 'Coming Soon'}</button></div></div></article>)}</div></div>) : <div className="cc"><Empty>Connect a tool when your project needs one.</Empty></div>}</section>;
 }
 
 type AuditLogEntry = { id: string; actorId: string | null; module: string; activity: string; severity: string; description: string; createdAt: string };
@@ -452,45 +460,42 @@ export function AdminSettingsPage({ notify }: { notify: Notice }) {
 
 function Kpi({ value, label, tone }: { value: string | number; label: string; tone?: string }) { return <div className="kpi"><div className={`kval ${tone ?? ''}`}>{value}</div><div className="klbl">{label}</div></div>; }
 function TrendChartCard({ trends }: { trends: { periods: Array<{ periodStart: string; tasksCompleted: number; progress: number }>; trend: string } | null }) {
-  return <div className="cc"><div className="cc-head"><h3>Task Completion Rate — Weekly</h3>{trends ? <span className={`bdg ${trends.trend === 'improving' ? 'g' : 'y'}`}>{trends.trend}</span> : null}</div>{trends?.periods.length ? <ChartCanvas height={200} config={{
-    type: 'line',
+  const colors = ['#436dc3', '#48ad7c', '#d49a48', '#7c63df', '#50abd0', '#209d60', '#dc6c6e'];
+  return <div className="cc workflow-chart"><div className="cc-head"><h3>Task Completion Rate — Weekly</h3></div>{trends?.periods.length ? <ChartCanvas height={200} config={{
+    type: 'bar',
     data: {
-      labels: trends.periods.map((period) => new Date(period.periodStart).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })),
-      datasets: [{ label: 'Tasks Completed', data: trends.periods.map((period) => period.tasksCompleted), borderColor: '#0038A8', backgroundColor: 'rgba(0,56,168,0.12)', tension: 0.35, fill: true }],
+      labels: trends.periods.map((period) => new Date(period.periodStart).toLocaleDateString(undefined, { weekday: 'short' })),
+      datasets: [{ label: 'Tasks Completed', data: trends.periods.map((period) => period.tasksCompleted), backgroundColor: colors, borderRadius: 5, borderSkipped: false }],
     },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { display: false }, title: { display: true, text: 'Weekly Task Completion', color: '#3789ad', font: { weight: '600' } } }, y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: 'rgba(168,216,240,.45)' } } } },
   }} /> : <Empty>Your project activity will appear here.</Empty>}</div>;
 }
 function TeamPerformanceCard({ team }: { team: TeamPerformance | null }) {
-  const [weekIndex, setWeekIndex] = useState<number | null>(null);
   const hasData = !!team && team.members.length > 0;
-  // Default to the most recent week once data loads.
-  const selectedIndex = weekIndex ?? ((team?.weeks.length ?? 0) - 1);
-  const week = hasData ? team!.weeks[selectedIndex] : null;
-  const sortedMembers = week ? [...week.members].sort((a, b) => Number(b.active) - Number(a.active) || b.contributions - a.contributions || a.fullName.localeCompare(b.fullName)) : [];
+  const sortedMembers = hasData ? [...team!.members].sort((a, b) => b.performance - a.performance || b.totalContributions - a.totalContributions || a.fullName.localeCompare(b.fullName)) : [];
   return <div className="cc team-performance">
-    <div className="cc-head"><h3>Team Member Performance</h3>{hasData ? <span className="team-perf-legend"><span className="bdg g">{team!.activeMembers} active</span><span className="bdg y">{team!.inactiveMembers} inactive</span></span> : null}</div>
+    <div className="cc-head"><h3>Team Member Performance</h3></div>
     {!hasData ? <Empty>Team member activity will appear here once your group records workflow activity.</Empty> : <>
-      <div className="team-perf-weeks" role="tablist" aria-label="Weekly performance">
-        {team!.weeks.map((entry, index) => <button type="button" role="tab" aria-selected={index === selectedIndex} className={`team-perf-week ${index === selectedIndex ? 'on' : ''}`} key={entry.periodStart} onClick={() => setWeekIndex(index)} title={`${entry.activeCount} active · ${entry.inactiveCount} inactive`}>
-          <span className="team-perf-week-label">{entry.label}</span><span className="team-perf-week-count">{entry.activeCount}/{entry.members.length}</span>
-        </button>)}
-      </div>
-      <table className="tbl team-perf-table">
-        <thead><tr><th>Member</th><th>Status</th><th>Activity</th><th>Done</th></tr></thead>
-        <tbody>
-          {sortedMembers.map((member) => <tr key={member.id}>
-            <td><span className="team-perf-name">{member.fullName}</span><small className="team-perf-role">{member.role.replaceAll('_', ' ')}</small></td>
-            <td><span className={`bdg ${member.active ? 'g' : 'y'}`}>{member.active ? 'Active' : 'Inactive'}</span></td>
-            <td><span className="team-perf-activity">{member.contributions} action{member.contributions === 1 ? '' : 's'}</span></td>
-            <td>{member.tasksCompleted}</td>
-          </tr>)}
-        </tbody>
-      </table>
+      <div className="performance-list">{sortedMembers.map((member, index) => <div className={`performance-row tone-${index % 4}`} key={member.id}>
+        <div className="performance-label"><span>{member.fullName}{member.role === 'Project_Leader' ? ' (Leader)' : ''}</span><strong>{member.performance}%</strong></div>
+        <div className="performance-track"><i style={{ width: `${member.performance}%` }} /></div>
+      </div>)}</div>
     </>}
   </div>;
 }
-function InfoCard({ title, text }: { title: string; text: string }) { return <div className="cc"><div className="cc-head"><h3>{title}</h3></div><Empty>{text}</Empty></div>; }
+function BottleneckAnalysis({ stages }: { stages: Array<{ taskId: string; stage: string; averageDays: number; expectedDays: number; delayDays: number; impact: 'high' | 'medium' | 'none' }> | null }) {
+  return <div className="cc workflow-bottlenecks"><div className="cc-head"><h3>Bottleneck Analysis</h3></div>{stages?.length ? <table className="tbl"><thead><tr><th>Stage</th><th>Avg Time Spent</th><th>Expected</th><th>Delay</th><th>Impact</th></tr></thead><tbody>{stages.map((stage) => <tr key={stage.taskId}><td>{stage.stage}</td><td>{formatDays(stage.averageDays)}</td><td>{formatDays(stage.expectedDays)}</td><td className={`delay-${stage.impact}`}>{stage.delayDays > 0 ? `+${formatDays(stage.delayDays)}` : 'On Track'}</td><td><span className={`bdg ${stage.impact === 'high' ? 'r' : stage.impact === 'medium' ? 'y' : 'g'}`}>{stage.impact}</span></td></tr>)}</tbody></table> : <Empty>Stages with a time estimate will appear here once work begins.</Empty>}</div>;
+}
+function ToolUsageCard({ tools }: { tools: ToolUsage[] | null }) { return <div className="cc tool-usage"><div className="cc-head"><h3>Connected Tool Usage</h3></div>{tools?.length ? <div className="performance-list">{tools.map((tool, index) => <div className={`performance-row tone-${index % 4}`} key={`${tool.provider}-${tool.name}`}><div className="performance-label"><span>{tool.name}</span><strong>{tool.usagePercent}%</strong></div><div className="performance-track"><i style={{ width: `${tool.usagePercent}%` }} /></div></div>)}</div> : <Empty>Usage will appear after your team links and uses an external tool.</Empty>}</div>; }
+function WorkflowSummaryCard({ summary }: { summary: WorkflowSummary | null }) { return <div className="cc workflow-summary"><div className="cc-head"><h3>Workflow Summary</h3></div>{summary ? <div className="summary-insights">{summary.insights.map((insight, index) => <div className={`summary-insight ${insight.tone}`} key={index}><strong>{insight.label}:</strong> {insight.text}</div>)}</div> : <Empty>Your workflow summary will appear here.</Empty>}</div>; }
+function formatDays(value: number) { const rounded = Math.round(value * 10) / 10; return `${rounded % 1 === 0 ? rounded.toFixed(0) : rounded} day${rounded === 1 ? '' : 's'}`; }
+function TaskRiskCard({ task }: { task: TaskRisk }) { return <article className={`risk-task-card ${task.level}`}><RiskRing score={task.score} title={task.title} /><div className="risk-attribution"><span>{assigneeLabel(task)}</span><small>{task.projectTitle}</small></div></article>; }
+function PredictionAlerts({ tasks, recommendations }: { tasks: TaskRisk[]; recommendations: string[] }) {
+  const alerts = tasks.slice(0, 3);
+  return <div className="cc prediction-alerts"><div className="lbl">AI Predictions &amp; Alerts</div>{alerts.length ? alerts.map((task) => <div className={`prediction-alert ${task.level}`} key={task.taskId}><strong>{task.level === 'high' ? 'High Risk' : task.level === 'medium' ? 'Warning' : 'On Track'}:</strong> “{task.title}” is assigned to {assigneeLabel(task)} in {task.projectTitle}. {task.delayDays > 0 ? `A ${task.delayDays}-day delay is predicted.` : task.level === 'low' ? 'The task is currently on track.' : 'Review its progress and deadline with the team.'}</div>) : recommendations.length ? recommendations.map((value, index) => <div className="prediction-alert medium" key={index}><strong>Notice:</strong> {value}</div>) : <Empty>Your AI predictions and alerts will appear here.</Empty>}</div>;
+}
+function assigneeLabel(task: Pick<TaskRisk, 'assignees'>) { return task.assignees.length ? task.assignees.join(', ') : 'Unassigned'; }
+function taskRecommendation(task: TaskRisk) { return task.level === 'high' ? 'Reassign work or extend the deadline' : task.level === 'medium' ? 'Schedule a review with the assigned member' : 'No action needed'; }
 function RiskRing({ score, title }: { score: number; title: string }) { const level = score >= 70 ? 'h' : score >= 40 ? 'm' : 'l'; return <div className={`risk-ring-card ${level}`}><div className="risk-ring" style={{ '--score': score } as React.CSSProperties}><strong>{score}%</strong></div><span>{title}</span><i className={`rlvl ${level}`}>{level === 'h' ? 'High Risk' : level === 'm' ? 'Medium Risk' : 'Low Risk'}</i></div>; }
 function SettingsTitle({ children }: { children: React.ReactNode }) { return <div className="settings-label">{children}</div>; }
 function Toggle({ title, description, checked, onChange, disabled = false }: { title: string; description: string; checked: boolean; onChange: () => void; disabled?: boolean }) { return <div className="setting-row"><div><strong>{title}</strong><span>{description}</span></div><button type="button" className={`big-toggle ${checked ? 'on' : ''}`} aria-pressed={checked} disabled={disabled} onClick={onChange}><i /></button></div>; }

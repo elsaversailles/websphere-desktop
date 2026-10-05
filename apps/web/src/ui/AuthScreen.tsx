@@ -180,7 +180,7 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <button className="aforgot" type="button" onClick={() => changeMode('forgot')}>Forgot password?</button>
       <button className="abtn" disabled={busy}>{busy ? 'Signing In…' : 'Sign In'}</button>
       <p className="alink">Don&apos;t have an account? <button type="button" onClick={() => changeMode('register')}>Register here</button></p>
-      <p className="alink admin-link"><button type="button" onClick={() => changeMode('admin')}>Admin login</button> · <button type="button" onClick={() => changeMode('deactivate')}>Deactivate account</button></p>
+      <p className="alink admin-link"><button type="button" onClick={() => changeMode('admin')}>Admin login</button> · <button type="button" onClick={() => changeMode('deactivate')}>Need help?</button></p>
     </form> : null}
     {mode === 'admin' ? <form className="abox" onSubmit={(event) => void submitLogin(event, true)}>
       <h1 className="atitle admin-title">Administrator Login</h1>
@@ -299,7 +299,7 @@ function PrivacyPolicyModal({ onClose, onAccept }: { onClose: () => void; onAcce
       <div className="modal-ttl"><span id="privacy-policy-title">Privacy Policy</span><button className="modal-close" type="button" onClick={onClose} aria-label="Close">&times;</button></div>
       <div className="privacy-body">
         <h3>Information we collect</h3>
-        <p>Your name, email address, school/institution, course, and password (stored only as a one-way hash, never in plain text). A profile photo, if you choose to upload one. Content you create in WebSphere &mdash; group messages, submitted ideas and votes, projects, tasks, and calendar events. If you connect an external tool (Google Drive, Microsoft 365, Trello, Asana, Canva, or Figma), the access token for that connection, stored encrypted, and the files or designs you choose to link. Your conversations with the WebSphere AI assistant. The push-notification endpoint for your device, if you enable push notifications.</p>
+        <p>Your name, email address, school/institution, course, and password (stored only as a one-way hash, never in plain text). A profile photo, if you choose to upload one. Content you create in WebSphere &mdash; group messages, submitted ideas and votes, projects, tasks, and calendar events. If you connect an external tool (Google Drive, Microsoft 365, Trello, Asana, or Canva), the access token for that connection, stored encrypted, and the files or designs you choose to link. Your conversations with the WebSphere AI assistant. The push-notification endpoint for your device, if you enable push notifications.</p>
         <h3>How we use it</h3>
         <p>To operate your account, groups, projects, tasks, and dashboard. To notify you about deadlines, assignments, group activity, and support responses. To power the AI assistant&rsquo;s academic help, grounded only in project data you and your group members already have access to. To detect and prevent abuse, such as accounts created with disposable email addresses.</p>
         <h3>Who can see it</h3>
