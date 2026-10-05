@@ -1,10 +1,14 @@
 type Props = { name: string; className?: string };
 
 const palettes = [
-  '#0038A8',
-  '#005EAF',
-  '#1D4E9E',
-  '#183A8C',
+  '#1D4ED8',
+  '#0F766E',
+  '#7C3AED',
+  '#C2410C',
+  '#BE185D',
+  '#4F46E5',
+  '#047857',
+  '#B45309',
 ];
 
 function initials(name: string) {
