@@ -616,6 +616,10 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return this.prisma.pushSubscription.create({ data: { userId: caller.id, endpoint: subscription.endpoint, p256dh: subscription.keys.p256dh, auth: subscription.keys.auth } });
   }
   async unsubscribePush(caller: Caller, endpoint: string) { return this.prisma.pushSubscription.deleteMany({ where: { userId: caller.id, endpoint } }); }
+  async registerMobilePush(caller: Caller, token: string) {
+    return this.prisma.mobilePushToken.upsert({ where: { token }, update: { userId: caller.id }, create: { userId: caller.id, token } });
+  }
+  async unregisterMobilePush(caller: Caller, token: string) { return this.prisma.mobilePushToken.deleteMany({ where: { userId: caller.id, token } }); }
   async notify(userIds: string[], type: NotificationType, message: string, relatedId?: string, relatedType?: string) {
     const created = await Promise.all(userIds.map((userId) => this.prisma.notification.create({ data: { userId, type, message, relatedId, relatedType } })));
     for (const notification of created) {
