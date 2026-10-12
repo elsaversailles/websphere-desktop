@@ -72,7 +72,7 @@ function invalidateSession() {
 }
 
 /**
- * Access tokens are short lived (15 minutes) while refresh tokens last 30 days, so an idle tab
+ * Access tokens are short lived (15 minutes) while refresh sessions last 180 days, so an idle tab
  * would otherwise start failing every request. Exchanging the refresh token here keeps the session
  * alive for its full lifetime instead of stranding the user mid-task.
  */

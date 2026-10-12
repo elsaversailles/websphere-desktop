@@ -10,7 +10,7 @@ const environmentSchema = z.object({
   JWT_ACCESS_SECRET: z.string().min(32),
   JWT_REFRESH_SECRET: z.string().min(32),
   JWT_ACCESS_TTL: z.string().default('15m'),
-  JWT_REFRESH_TTL: z.string().default('30d'),
+  JWT_REFRESH_TTL: z.string().default('180d'),
   LOGIN_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
   LOGIN_WINDOW_SECONDS: z.coerce.number().int().positive().default(900),
   PASSWORD_RESET_TTL_SECONDS: z.coerce.number().int().positive().default(3600),

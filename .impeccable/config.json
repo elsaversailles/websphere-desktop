@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "gradient-text",
+        "value": "*",
+        "files": [
+          "apps/web/src/ui/styles.css"
+        ],
+        "createdAt": "2026-10-12T06:03:22.602Z",
+        "reason": "Existing landing page hero gradient predates the calendar change and is intentional branding."
+      }
+    ]
+  }
+}

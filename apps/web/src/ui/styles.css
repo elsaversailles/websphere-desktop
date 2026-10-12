@@ -438,5 +438,6 @@
 .ur-edit-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
 /* Outlook calendar + notification source */
 .cal-event.outlook{background:rgba(14,143,168,.15);color:#0E8FA8}.notif-source{display:inline-block;margin-right:7px;padding:1px 7px;border-radius:20px;background:rgba(14,143,168,.14);color:#0E8FA8;font-size:10px;font-weight:800;vertical-align:middle}
+.cal-day-num{border:0;background:transparent;color:inherit;cursor:pointer}.cal-day-num:hover,.cal-day-num:focus-visible{outline:2px solid var(--acc);border-radius:50%}.cal-event{width:100%;border:0;text-align:left;cursor:pointer}.cal-event:hover,.cal-event:focus-visible{outline:2px solid currentColor}.calendar-error{margin-bottom:10px;padding:10px 12px;border:1px solid var(--red);border-radius:8px;color:var(--red)}.calendar-error button{margin-left:8px;border:0;background:transparent;color:inherit;font-weight:700;text-decoration:underline;cursor:pointer}
 /* Integration disconnect action */
 .ext-card-actions{display:flex;align-items:center;gap:8px}.ext-action-btn.disconnect{background:transparent;border:1.5px solid rgba(214,59,59,.45);color:var(--red)}.ext-action-btn.disconnect:hover:not(:disabled){background:rgba(214,59,59,.1);border-color:var(--red)}.ext-action-btn:disabled{opacity:.6}
