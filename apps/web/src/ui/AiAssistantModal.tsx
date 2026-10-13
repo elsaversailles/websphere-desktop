@@ -3,7 +3,6 @@ import { request } from '../api';
 import { MarkdownText } from './MarkdownText';
 
 type Message = { role: 'user' | 'assistant'; content: string; refused?: boolean };
-type Props = { open: boolean; onClose: () => void; notify: (message: string) => void };
 
 const quickActions = [
   { label: 'Generate 10 Ideas', prompt: 'Generate 10 academic project ideas for my course.' },
@@ -13,45 +12,91 @@ const quickActions = [
   { label: 'Workflow Planning', prompt: 'Help me plan a workflow and task breakdown for my project.' },
 ];
 
-export function AiAssistantModal({ open, onClose, notify }: Props) {
+export type AiAssistant = {
+  messages: Message[];
+  prompt: string;
+  setPrompt: (value: string) => void;
+  busy: boolean;
+  send: (text: string) => void;
+};
+
+/**
+ * Owns the assistant conversation outside the modal view so a request keeps running — and its
+ * result is still captured — while the panel is minimized or the user navigates to another page.
+ * Living in a parent that stays mounted (the Workspace) is what makes "minimize while processing"
+ * work: the modal is just a view over this state.
+ */
+export function useAiAssistant(notify: (message: string) => void): AiAssistant {
   const [messages, setMessages] = useState<Message[]>([]);
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages, busy]);
-
-  async function send(text: string) {
+  function send(text: string) {
     const value = text.trim();
     if (!value || busy) return;
     setMessages((current) => [...current, { role: 'user', content: value }]);
     setPrompt('');
     setBusy(true);
-    try {
-      const result = await request<{ response: string; refused?: boolean }>('/ai/ask', { method: 'POST', body: JSON.stringify({ prompt: value }) });
-      setMessages((current) => [...current, { role: 'assistant', content: result.response, refused: result.refused }]);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'WebSphere AI is unavailable right now.';
-      setMessages((current) => [...current, { role: 'assistant', content: message, refused: true }]);
-      notify(message);
-    } finally {
-      setBusy(false);
-    }
+    // Fire-and-forget: the promise is owned by this hook (which outlives the modal view), so
+    // minimizing or navigating never cancels the request or drops its response.
+    void (async () => {
+      try {
+        const result = await request<{ response: string; refused?: boolean }>('/ai/ask', { method: 'POST', body: JSON.stringify({ prompt: value }) });
+        setMessages((current) => [...current, { role: 'assistant', content: result.response, refused: result.refused }]);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'WebSphere AI is unavailable right now.';
+        setMessages((current) => [...current, { role: 'assistant', content: message, refused: true }]);
+        notify(message);
+      } finally {
+        setBusy(false);
+      }
+    })();
   }
+
+  return { messages, prompt, setPrompt, busy, send };
+}
+
+type Props = {
+  open: boolean;
+  minimized: boolean;
+  assistant: AiAssistant;
+  onClose: () => void;
+  onMinimize: () => void;
+  onRestore: () => void;
+};
+
+export function AiAssistantModal({ open, minimized, assistant, onClose, onMinimize, onRestore }: Props) {
+  const { messages, prompt, setPrompt, busy, send } = assistant;
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => { if (open && !minimized) bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages, busy, open, minimized]);
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void send(prompt);
+    send(prompt);
+  }
+
+  // Minimized: collapse to an unobtrusive floating pill that still signals progress and, when the
+  // response is ready, surfaces an unread dot so the user knows to reopen.
+  if (open && minimized) {
+    const lastMessage = messages[messages.length - 1];
+    const hasReply = !busy && lastMessage?.role === 'assistant';
+    return <button type="button" className="ai-mini-pill" onClick={onRestore} aria-label="Reopen WebSphere AI Assistant">
+      <span className="ai-mini-icon">✦</span>
+      <span className="ai-mini-text">{busy ? 'WebSphere AI is working…' : 'WebSphere AI Assistant'}</span>
+      {busy ? <span className="ai-mini-spinner" aria-hidden="true" /> : hasReply ? <span className="ai-mini-dot" aria-hidden="true" /> : null}
+    </button>;
   }
 
   if (!open) return null;
-  return <div className="ai-modal-ov" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+  return <div className="ai-modal-ov" onMouseDown={(event) => { if (event.target === event.currentTarget) onMinimize(); }}>
     <div className="ai-modal-box">
       <div className="ai-modal-header">
         <span className="ai-modal-icon">✦</span>
         <div className="ai-modal-title"><strong>WebSphere AI Assistant</strong><small>Academic Project Intelligence</small></div>
         <div className="ai-modal-actions">
-          <button type="button" title="Close" onClick={onClose}>×</button>
+          <button type="button" title="Minimize" aria-label="Minimize assistant" onClick={onMinimize}>–</button>
+          <button type="button" title="Close" aria-label="Close assistant" onClick={onClose}>×</button>
         </div>
       </div>
       <div className="ai-modal-body">
@@ -72,7 +117,7 @@ export function AiAssistantModal({ open, onClose, notify }: Props) {
           {busy ? <div className="ai-modal-msg assistant typing"><span className="ai-typing-dot" /><span className="ai-typing-dot" /><span className="ai-typing-dot" /></div> : null}
           <div ref={bottomRef} />
       </div>
-      <div className="ai-modal-quick">{quickActions.map((action) => <button key={action.label} type="button" disabled={busy} onClick={() => void send(action.prompt)}>{action.label}</button>)}</div>
+      <div className="ai-modal-quick">{quickActions.map((action) => <button key={action.label} type="button" disabled={busy} onClick={() => send(action.prompt)}>{action.label}</button>)}</div>
       <form className="ai-modal-inputrow" onSubmit={onSubmit}>
         <input value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Ask about project titles, thesis topics, tools, or academic planning…" disabled={busy} />
         <button type="submit" disabled={busy || !prompt.trim()} aria-label="Send"><SendIcon /></button>

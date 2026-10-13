@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import type { CallKind, TicketStatus } from '@websphere/shared';
 import { clearSession, getAccessToken, request, saveSession, socketBaseUrl, type Session, type User } from '../api';
-import { AiAssistantModal } from './AiAssistantModal';
+import { AiAssistantModal, useAiAssistant } from './AiAssistantModal';
 import { Dashboard } from './Dashboard';
 import { avatarTone } from './health';
 import { GroupChatPage } from './GroupChatPage';
@@ -39,6 +39,10 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [incomingCall, setIncomingCall] = useState<{ groupId: string; kind: CallKind } | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantMinimized, setAssistantMinimized] = useState(false);
+  // Lives at Workspace level (which stays mounted across page navigation) so an in-flight request
+  // keeps running and its reply is captured even while the panel is minimized.
+  const assistant = useAiAssistant(notify);
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const sections = administrator ? adminSections : userSections;
@@ -84,7 +88,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   useEffect(() => { if (sidebarCollapsed) setFlyoutTitle(null); }, [sidebarCollapsed]);
 
   function navigate(target: Page) {
-    if (target === 'assistant') setAssistantOpen(true);
+    if (target === 'assistant') { setAssistantOpen(true); setAssistantMinimized(false); }
     else setPage(target);
   }
 
@@ -196,7 +200,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'support' ? <SupportRequestsPage notify={notify} focusedTicketId={selectedTicketId} /> : null}
     </div></div>
   </div>
-  <AiAssistantModal open={assistantOpen} onClose={() => setAssistantOpen(false)} notify={notify} />
+  <AiAssistantModal open={assistantOpen} minimized={assistantMinimized} assistant={assistant} onClose={() => { setAssistantOpen(false); setAssistantMinimized(false); }} onMinimize={() => setAssistantMinimized(true)} onRestore={() => setAssistantMinimized(false)} />
   {logoutOpen ? <div className="logout-ov" onMouseDown={(event) => { if (event.target === event.currentTarget && !loggingOut) setLogoutOpen(false); }}>
     <div className="logout-box" role="dialog" aria-modal="true" aria-labelledby="logout-confirm-title">
       <span className="logout-mark" aria-hidden="true"><LogoutIcon /></span>
