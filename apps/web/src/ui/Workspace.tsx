@@ -30,12 +30,45 @@ const adminSections: Array<{ title: string; links: Link[] }> = [
   { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'archive', label: 'Archive Accounts', icon: '🗄' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
 ];
 
+// The sidebar sections are the source of truth for which pages a role may land on, so a restored
+// page can never put a user somewhere their role has no nav entry for.
+const allowedPagesFor = (admin: boolean): Set<Page> => new Set((admin ? adminSections : userSections).flatMap((section) => section.links.map((link) => link.id)));
+const defaultPageFor = (admin: boolean): Page => (admin ? 'admin' : 'dashboard');
+
+type NavState = { page: Page; selectedGroupId: string; selectedTaskId: string; selectedTicketId: string };
+const navStorageKey = (userId: string) => `ws_nav:${userId}`;
+
+/**
+ * Restores the page the user was last on (per account), falling back to the role's default when the
+ * stored page is missing, malformed, or not one this role is allowed to open. Authentication is
+ * handled upstream in App/restoreSession; this only decides which in-app page to show once signed in.
+ */
+function loadNavState(userId: string, admin: boolean): NavState {
+  const fallback: NavState = { page: defaultPageFor(admin), selectedGroupId: '', selectedTaskId: '', selectedTicketId: '' };
+  try {
+    const raw = window.localStorage.getItem(navStorageKey(userId));
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<NavState>;
+    const page = typeof parsed.page === 'string' && allowedPagesFor(admin).has(parsed.page as Page) ? (parsed.page as Page) : fallback.page;
+    return {
+      page,
+      selectedGroupId: typeof parsed.selectedGroupId === 'string' ? parsed.selectedGroupId : '',
+      selectedTaskId: typeof parsed.selectedTaskId === 'string' ? parsed.selectedTaskId : '',
+      selectedTicketId: typeof parsed.selectedTicketId === 'string' ? parsed.selectedTicketId : '',
+    };
+  } catch { return fallback; }
+}
+
 export function Workspace({ session, onSessionChange, onLogout, notify }: WorkspaceProps) {
   const administrator = session.role === 'Administrator';
-  const [page, setPage] = useState<Page>(administrator ? 'admin' : 'dashboard');
-  const [selectedGroupId, setSelectedGroupId] = useState('');
-  const [selectedTaskId, setSelectedTaskId] = useState('');
-  const [selectedTicketId, setSelectedTicketId] = useState('');
+  const userId = session.user.id;
+  // Restore where this account left off so a refresh (or reopening a tab) returns to the same page
+  // and selection instead of bouncing to the Dashboard.
+  const initialNav = useState(() => loadNavState(userId, administrator))[0];
+  const [page, setPage] = useState<Page>(initialNav.page);
+  const [selectedGroupId, setSelectedGroupId] = useState(initialNav.selectedGroupId);
+  const [selectedTaskId, setSelectedTaskId] = useState(initialNav.selectedTaskId);
+  const [selectedTicketId, setSelectedTicketId] = useState(initialNav.selectedTicketId);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [incomingCall, setIncomingCall] = useState<{ groupId: string; kind: CallKind } | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
@@ -46,6 +79,11 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const sections = administrator ? adminSections : userSections;
+
+  // Persist the current page + selections per account so a refresh resumes exactly here.
+  useEffect(() => {
+    try { window.localStorage.setItem(navStorageKey(userId), JSON.stringify({ page, selectedGroupId, selectedTaskId, selectedTicketId })); } catch { /* storage unavailable; navigation still works in-session */ }
+  }, [userId, page, selectedGroupId, selectedTaskId, selectedTicketId]);
 
   useEffect(() => {
     if (!logoutOpen) return;
@@ -133,6 +171,8 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   async function logout() {
     setLoggingOut(true);
     try { await request('/auth/logout', { method: 'POST' }); } catch { /* local session is always cleared */ }
+    // Explicit sign-out starts fresh next time; a plain refresh keeps the saved page.
+    try { window.localStorage.removeItem(navStorageKey(userId)); } catch { /* ignore */ }
     clearSession(); onLogout();
   }
 
