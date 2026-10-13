@@ -110,10 +110,18 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const unit = { s: 1, m: 60, h: 3600, d: 86400 }[match[2] as 's' | 'm' | 'h' | 'd'];
     return Number(match[1]) * unit;
   }
-  private async sign(user: { id: string; role: Role; tokenVersion: number }, refresh = false, jti = randomBytes(16).toString('hex')) {
-    return new SignJWT({ role: user.role, tv: user.tokenVersion, ...(refresh ? { jti } : {}) }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt().setExpirationTime(refresh ? this.config.get('JWT_REFRESH_TTL') : this.config.get('JWT_ACCESS_TTL')).sign(refresh ? this.refreshSecret : this.accessSecret);
+  private async sign(user: { id: string; role: Role; tokenVersion: number }, refresh = false, jti = randomBytes(16).toString('hex'), sessionStartedAt?: number) {
+    const token = new SignJWT({ role: user.role, tv: user.tokenVersion, ...(refresh ? { jti, sessionStartedAt } : {}) }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt();
+    return token.setExpirationTime(refresh ? sessionStartedAt! + this.refreshTtlSeconds() : this.config.get('JWT_ACCESS_TTL')).sign(refresh ? this.refreshSecret : this.accessSecret);
   }
-  async issue(user: { id: string; role: Role; tokenVersion: number }) { const jti = randomBytes(16).toString('hex'); const [access, refresh] = await Promise.all([this.sign(user), this.sign(user, true, jti)]); const ttl = this.refreshTtlSeconds(); await Promise.all([this.redis.set(this.refreshKey(jti), JSON.stringify({ userId: user.id }), ttl), this.redis.addToSet(this.userRefreshKey(user.id), jti, ttl)]); return { access, refresh, role: user.role }; }
+  async issue(user: { id: string; role: Role; tokenVersion: number }, sessionStartedAt = Math.floor(Date.now() / 1000)) {
+    const ttl = sessionStartedAt + this.refreshTtlSeconds() - Math.floor(Date.now() / 1000);
+    if (ttl <= 0) fail('AUTH_UNAUTHENTICATED', 'Session has expired', 401);
+    const jti = randomBytes(16).toString('hex');
+    const [access, refresh] = await Promise.all([this.sign(user), this.sign(user, true, jti, sessionStartedAt)]);
+    await Promise.all([this.redis.set(this.refreshKey(jti), JSON.stringify({ userId: user.id }), ttl), this.redis.addToSet(this.userRefreshKey(user.id), jti, ttl)]);
+    return { access, refresh, role: user.role };
+  }
   async caller(header?: string, options: { allowLocked?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
   async sendRegistrationOtp(rawEmail: string) {
     const email = rawEmail.trim().toLowerCase();
@@ -176,7 +184,35 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return { user: this.publicUser(user), ...(await this.issue(user)) };
   }
   async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0 } })]); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in`, user.id); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
-  async refreshToken(token: string) { try { const verified = await jwtVerify(token, this.refreshSecret); const subject = verified.payload.sub; if (!subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const jti = String(verified.payload.jti); const stored = await this.redis.take(this.refreshKey(jti)); if (!stored) { if (await this.redis.get(this.usedRefreshKey(jti))) await this.prisma.user.update({ where: { id: subject }, data: { tokenVersion: { increment: 1 } } }); fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } const record = JSON.parse(stored!) as { userId: string }; if (record.userId !== subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); const user = await this.prisma.user.findUnique({ where: { id: record.userId } }); if (!user || user.status !== 'active' || user.tokenVersion !== Number(verified.payload.tv)) { await this.redis.removeFromSet(this.userRefreshKey(record.userId), jti); fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } const ttl = this.refreshTtlSeconds(); await Promise.all([this.redis.set(this.usedRefreshKey(jti), '1', ttl), this.redis.removeFromSet(this.userRefreshKey(record.userId), jti)]); return this.issue(user); } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401); } }
+  async refreshToken(token: string) {
+    try {
+      const verified = await jwtVerify(token, this.refreshSecret);
+      const subject = verified.payload.sub;
+      if (!subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
+      const jti = String(verified.payload.jti);
+      const stored = await this.redis.take(this.refreshKey(jti));
+      if (!stored) {
+        if (await this.redis.get(this.usedRefreshKey(jti))) await this.prisma.user.update({ where: { id: subject }, data: { tokenVersion: { increment: 1 } } });
+        fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
+      }
+      const record = JSON.parse(stored!) as { userId: string };
+      if (record.userId !== subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
+      const user = await this.prisma.user.findUnique({ where: { id: record.userId } });
+      if (!user || user.status !== 'active' || user.tokenVersion !== Number(verified.payload.tv)) {
+        await this.redis.removeFromSet(this.userRefreshKey(record.userId), jti);
+        fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
+      }
+      // Tokens issued before this change have no sessionStartedAt claim; use their original iat.
+      const sessionStartedAt = Number(verified.payload.sessionStartedAt ?? verified.payload.iat);
+      const ttl = sessionStartedAt + this.refreshTtlSeconds() - Math.floor(Date.now() / 1000);
+      if (!Number.isSafeInteger(sessionStartedAt) || ttl <= 0) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
+      await Promise.all([this.redis.set(this.usedRefreshKey(jti), '1', ttl), this.redis.removeFromSet(this.userRefreshKey(record.userId), jti)]);
+      return this.issue(user, sessionStartedAt);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      return fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
+    }
+  }
   private async removeRefreshSessions(userId: string) { const key = this.userRefreshKey(userId); const jtis = await this.redis.setMembers(key); await this.redis.delete(...jtis.map((jti) => this.refreshKey(jti)), key); }
   async logout(user: Caller) { await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'logout', 'info', 'User signed out and invalidated all sessions', user.id); return { ok: true }; }
   async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) passwordPolicyFailed(policy.reason); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); return { ok: true }; }
@@ -571,7 +607,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async tally(pollId: string, viewerId?: string) { const [poll, viewerVote] = await Promise.all([this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: { include: { votes: { include: { voter: { select: { id: true, fullName: true } } } } } } } }), viewerId ? this.prisma.vote.findUnique({ where: { pollId_voterId: { pollId, voterId: viewerId } }, select: { optionId: true } }) : Promise.resolve(null)]); const open = this.pollIsOpen(poll); return { pollId, groupId: poll.groupId, open, closesAt: poll.closesAt, closedAt: open ? null : poll.closedAt ?? poll.closesAt, closedReason: open ? null : poll.closedBy ? 'manual' : 'expired', viewerOptionId: viewerVote?.optionId ?? null, options: poll.options.map((option) => ({ optionId: option.id, ideaId: option.ideaId, label: option.label, votes: option.votes.length, voters: option.votes.map((vote: any) => ({ userId: vote.voter.id, fullName: vote.voter.fullName })) })) }; }
   async pollResults(caller: Caller, pollId: string) { const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, select: { id: true, groupId: true, open: true, closesAt: true } }); await this.member(poll.groupId, caller.id); await this.settleExpired(poll); return this.tally(pollId, caller.id); }
   async begin(caller: Caller, groupId: string, ideaId: string) { await this.member(groupId, caller.id, true); const idea = await this.prisma.idea.findFirst({ where: { id: ideaId, groupId } }); if (!idea) fail('NOT_FOUND', 'Idea does not belong to group', 404); if (idea.status === 'selected') fail('VALIDATION_FAILED', 'Idea has already been selected'); const members = await this.prisma.groupMember.findMany({ where: { groupId }, select: { userId: true } }); const project = await this.prisma.project.create({ data: { groupId, ideaId, title: idea.title, description: idea.body, createdBy: caller.id, members: { create: members.map((member) => ({ userId: member.userId, role: member.userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } } }); await this.prisma.idea.update({ where: { id: ideaId }, data: { status: 'selected' } }); return project; }
-  async calendar(caller: Caller, from?: string, to?: string) { const events = await this.prisma.calendarEvent.findMany({ where: { ownerId: caller.id, ...(from || to ? { startAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}) } }); const projects = await this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, deadline: { not: null } }, select: { id: true, title: true, deadline: true } }); const tasks = await this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, deadline: { not: null }, status: { not: 'completed' } }, select: { id: true, title: true, deadline: true } }); return { events, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))] }; }
+  async calendar(caller: Caller, from?: string, to?: string) { const events = await this.prisma.calendarEvent.findMany({ where: { OR: [{ ownerId: caller.id }, { project: { members: { some: { userId: caller.id } } } }], ...(from || to ? { startAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}) }, orderBy: { startAt: 'asc' } }); const projects = await this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, deadline: { not: null } }, select: { id: true, title: true, deadline: true } }); const tasks = await this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, deadline: { not: null }, status: { not: 'completed' } }, select: { id: true, title: true, deadline: true } }); return { events, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))] }; }
   async createCalendarEvent(caller: Caller, input: any) { if (input.projectId) await this.projectMember(input.projectId, caller.id); return this.prisma.calendarEvent.create({ data: { ...input, ownerId: caller.id } }); }
   private async calendarEventAccess(caller: Caller, id: string) { const event = await this.prisma.calendarEvent.findUniqueOrThrow({ where: { id } }); if (event.projectId) await this.projectMember(event.projectId, caller.id); else if (event.ownerId !== caller.id) fail('RBAC_FORBIDDEN', 'Only the event owner or project members can modify this event', 403); return event; }
   async updateCalendarEvent(caller: Caller, id: string, input: any) { await this.calendarEventAccess(caller, id); return this.prisma.calendarEvent.update({ where: { id }, data: input }); }
@@ -582,6 +618,10 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return this.prisma.pushSubscription.create({ data: { userId: caller.id, endpoint: subscription.endpoint, p256dh: subscription.keys.p256dh, auth: subscription.keys.auth } });
   }
   async unsubscribePush(caller: Caller, endpoint: string) { return this.prisma.pushSubscription.deleteMany({ where: { userId: caller.id, endpoint } }); }
+  async registerMobilePush(caller: Caller, token: string) {
+    return this.prisma.mobilePushToken.upsert({ where: { token }, update: { userId: caller.id }, create: { userId: caller.id, token } });
+  }
+  async unregisterMobilePush(caller: Caller, token: string) { return this.prisma.mobilePushToken.deleteMany({ where: { userId: caller.id, token } }); }
   async notify(userIds: string[], type: NotificationType, message: string, relatedId?: string, relatedType?: string) {
     const created = await Promise.all(userIds.map((userId) => this.prisma.notification.create({ data: { userId, type, message, relatedId, relatedType } })));
     for (const notification of created) {

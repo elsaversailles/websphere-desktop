@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, Redirect, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { z } from 'zod';
-import { aiAskSchema, announcementSchema, calendarEventSchema, deactivationRequestSchema, ideaSchema, loginSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, pollCreateSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, ticketUpdateSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
+import { aiAskSchema, announcementSchema, calendarEventSchema, deactivationRequestSchema, ideaSchema, loginSchema, mobilePushTokenSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, pollCreateSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, ticketUpdateSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
 import { AppService } from './app.service.js';
 import { LocalStorageService } from './local-storage.service.js';
 import { RedisService } from './redis.service.js';
@@ -95,6 +95,8 @@ export class AppController {
   @Public() @Get('push/config') pushConfig() { return this.app.pushConfig(); }
   @Post('push/subscribe') async subscribe(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.subscribePush(await this.caller(auth), parse(pushSubscriptionSchema, body)); }
   @Delete('push/subscribe') async unsubscribe(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.unsubscribePush(await this.caller(auth), parse(pushUnsubscribeSchema, body).endpoint); }
+  @Post('push/mobile-tokens') async registerMobilePush(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.registerMobilePush(await this.caller(auth), parse(mobilePushTokenSchema, body).token); }
+  @Delete('push/mobile-tokens') async unregisterMobilePush(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.unregisterMobilePush(await this.caller(auth), parse(mobilePushTokenSchema, body).token); }
 
   @Post('ai/ask') async ask(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(aiAskSchema, body); return this.app.ai(await this.caller(auth), input.prompt, input); }
   @Post('ai/planning') async planning(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(aiAskSchema, body); return this.app.ai(await this.caller(auth), input.prompt, input); }

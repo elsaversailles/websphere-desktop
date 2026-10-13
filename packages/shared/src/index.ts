@@ -99,6 +99,7 @@ export const pushSubscriptionSchema = z.object({
   keys: z.object({ p256dh: z.string().min(1).max(512), auth: z.string().min(1).max(512) }),
 });
 export const pushUnsubscribeSchema = z.object({ endpoint: z.string().url().max(4000) });
+export const mobilePushTokenSchema = z.object({ token: z.string().regex(/^(Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$/).max(255) });
 export const loginSchema = z.object({ email: requiredEmail, password: z.string().min(1, 'Password is required') });
 export const passwordChangeSchema = z.object({
   oldPassword: z.string().min(1),

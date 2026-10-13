@@ -8,7 +8,7 @@ import { ToolLogo } from './ToolLogo';
 type Notice = (message: string) => void;
 type Task = { id: string; title: string; projectId: string; deadline?: string | null; priority: string; status: string; project?: { id: string; title: string }; assignedBy?: string; progress?: number };
 type Project = { id: string; title: string; status: string; deadline?: string | null; group: { name: string }; members?: Array<{ role: string }>; tasks: Array<{ status: string }> };
-type CalendarData = { events: Array<{ id: string; title: string; type: string; startAt: string; source?: string }>; hints: Array<{ id: string; title: string; type: string; deadline: string }> };
+type CalendarData = { events: Array<{ id: string; title: string; type: string; startAt: string; endAt?: string | null; projectId?: string | null; source?: string }>; hints: Array<{ id: string; title: string; type: string; deadline: string }> };
 
 type TeamMemberWeek = { id: string; fullName: string; role: string; contributions: number; tasksCompleted: number; performance: number; active: boolean };
 type TeamPerformanceWeek = { periodStart: string; periodEnd: string; label: string; members: TeamMemberWeek[]; activeCount: number; inactiveCount: number };
@@ -78,25 +78,34 @@ export function CalendarPage({ notify }: { notify: Notice }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingEvent, setEditingEvent] = useState<CalendarData['events'][number] | null>(null);
+  const [newEventStart, setNewEventStart] = useState('');
+  const [selectedItem, setSelectedItem] = useState<{ title: string; when: string; category: string } | null>(null);
   const [saving, setSaving] = useState(false);
-  async function refresh() { setData(await request<CalendarData>('/calendar')); }
+  const [loadingCalendar, setLoadingCalendar] = useState(true);
+  const [calendarError, setCalendarError] = useState<string | null>(null);
+  async function refresh() {
+    try { setData(await request<CalendarData>('/calendar')); setCalendarError(null); }
+    catch (error) { setCalendarError(error instanceof Error ? error.message : 'Could not load calendar events.'); throw error; }
+    finally { setLoadingCalendar(false); }
+  }
   useEffect(() => { void refresh().catch((error: Error) => notify(error.message)); }, [notify]);
   useEffect(() => { void request<Project[]>('/projects').then(setProjects).catch(() => undefined); }, []);
   const cells = useMemo(() => monthCells(cursor), [cursor]);
   const items = [...data.events.map((event) => ({ ...event, at: event.startAt, kind: 'event' as const })), ...data.hints.map((hint) => ({ ...hint, at: hint.deadline, kind: 'hint' as const }))];
 
-  function openCreate() { setEditingEvent(null); setDialogOpen(true); }
+  function openCreate(day?: Date) { setEditingEvent(null); setNewEventStart(day ? toLocalInput(new Date(day.getFullYear(), day.getMonth(), day.getDate(), 9)) : ''); setDialogOpen(true); }
   function openEdit(event: CalendarData['events'][number]) { setEditingEvent(event); setDialogOpen(true); }
   async function saveEvent(formEvent: React.FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
     const values = new FormData(formEvent.currentTarget);
-    const payload = { title: values.get('title'), type: values.get('type'), startAt: values.get('startAt'), endAt: values.get('endAt') || undefined, projectId: values.get('projectId') || undefined };
+    const payload = { title: values.get('title'), type: values.get('type'), startAt: new Date(String(values.get('startAt'))).toISOString(), endAt: values.get('endAt') ? new Date(String(values.get('endAt'))).toISOString() : undefined, projectId: values.get('projectId') || undefined };
     setSaving(true);
     try {
       if (editingEvent) await request(`/calendar/events/${editingEvent.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
       else await request('/calendar/events', { method: 'POST', body: JSON.stringify(payload) });
       setDialogOpen(false);
       await refresh();
+      setCursor(new Date(payload.startAt));
       notify(editingEvent ? 'Event updated.' : 'Event created.');
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not save the event.'); }
     finally { setSaving(false); }
@@ -109,15 +118,60 @@ export function CalendarPage({ notify }: { notify: Notice }) {
     finally { setSaving(false); }
   }
 
-  return <section className="sp on cal-page-wrap"><div className="cal-page-header"><div><h2>Calendar</h2><div className="cal-page-header-sub">Your project schedule and deadlines</div></div><div className="cal-header-controls"><div className="cal-legend"><span className="cal-legend-item"><i className="cal-legend-dot event" />Event</span><span className="cal-legend-item"><i className="cal-legend-dot deadline" />Deadline</span></div><button className="cal-nav-btn" onClick={() => setCursor(shiftMonth(cursor, -1))}>‹</button><span className="cal-month-label">{cursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span><button className="cal-nav-btn" onClick={() => setCursor(shiftMonth(cursor, 1))}>›</button><button className="cal-today-btn" onClick={() => setCursor(new Date())}>Today</button><button className="btn btn-sm" onClick={openCreate}>+ New Event</button></div></div><div className="cal-grid-wrap"><div className="cal-weekday-row">{['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map((day) => <div className="cal-weekday-cell" key={day}>{day}</div>)}</div><div className="cal-body">{cells.map((cell, index) => { const dayItems = cell ? items.filter((item) => sameDay(new Date(item.at), cell)) : []; return <div className={`cal-cell ${cell && sameDay(cell, new Date()) ? 'today' : ''}`} key={index}>{cell ? <><span className="cal-day-num">{cell.getDate()}</span>{dayItems.slice(0, 3).map((item) => <span className={`cal-event ${item.type.includes('deadline') ? 'deadline' : 'event'}${'source' in item && item.source === 'outlook' ? ' outlook' : ''}`} key={`${item.id}-${item.type}`} onClick={() => item.kind === 'event' ? openEdit(item as CalendarData['events'][number]) : undefined} style={{ cursor: item.kind === 'event' ? 'pointer' : 'default' }} title={'source' in item && item.source === 'outlook' ? `Outlook · ${item.title}` : item.title}>{'source' in item && item.source === 'outlook' ? '◆ ' : ''}{item.title}</span>)}</> : null}</div>; })}</div></div>{!items.length ? <div className="calendar-empty-note">Your scheduled events will appear here.</div> : null}
-  {dialogOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialogOpen(false); }}><div className="modal-box"><div className="modal-ttl"><span>{editingEvent ? 'Edit Event' : 'New Event'}</span><button className="modal-close" onClick={() => setDialogOpen(false)}>×</button></div><form onSubmit={saveEvent}>
-    <label className="lbl">Title</label><input className="ifield" name="title" required minLength={2} defaultValue={editingEvent?.title ?? ''} placeholder="Event title" />
-    <label className="lbl">Type</label><select className="ifield" name="type" defaultValue={editingEvent?.type ?? 'meeting'}><option value="meeting">Meeting</option><option value="work_session">Work session</option><option value="presentation">Presentation</option><option value="activity">Activity</option></select>
-    <label className="lbl">Start</label><input className="ifield" name="startAt" type="datetime-local" required defaultValue={editingEvent ? toLocalInput(editingEvent.startAt) : ''} />
-    <label className="lbl">End (optional)</label><input className="ifield" name="endAt" type="datetime-local" />
-    <label className="lbl">Related Project (optional)</label><select className="ifield" name="projectId" defaultValue=""><option value="">No project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select>
-    <div className="modal-acts">{editingEvent ? <button type="button" className="btn-red" onClick={() => void deleteEvent()} disabled={saving}>Delete</button> : null}<button type="button" className="btn-o" onClick={() => setDialogOpen(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : editingEvent ? 'Save Changes' : 'Create Event'}</button></div>
-  </form></div></div> : null}
+  return <section className="sp on cal-page-wrap">
+    <div className="cal-page-header">
+      <div><h2>Calendar</h2><div className="cal-page-header-sub">Your project schedule and deadlines</div></div>
+      <div className="cal-header-controls">
+        <div className="cal-legend"><span className="cal-legend-item"><i className="cal-legend-dot event" />Event</span><span className="cal-legend-item"><i className="cal-legend-dot deadline" />Deadline</span></div>
+        <button className="cal-nav-btn" onClick={() => setCursor(shiftMonth(cursor, -1))} aria-label="Previous month">‹</button>
+        <span className="cal-month-label">{cursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span>
+        <button className="cal-nav-btn" onClick={() => setCursor(shiftMonth(cursor, 1))} aria-label="Next month">›</button>
+        <button className="cal-today-btn" onClick={() => setCursor(new Date())}>Today</button>
+        <button className="btn btn-sm" onClick={() => openCreate()}>+ New Event</button>
+      </div>
+    </div>
+    {calendarError ? <div className="calendar-error" role="alert">{calendarError} <button type="button" onClick={() => void refresh().catch(() => undefined)}>Retry</button></div> : null}
+    <div className="cal-grid-wrap">
+      <div className="cal-weekday-row">{['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day) => <div className="cal-weekday-cell" key={day}>{day}</div>)}</div>
+      <div className="cal-body">{cells.map((cell, index) => {
+        const dayItems = cell ? items.filter((item) => sameDay(new Date(item.at), cell)) : [];
+        return <div className={`cal-cell ${cell && sameDay(cell, new Date()) ? 'today' : ''}`} key={index}>
+          {cell ? <>
+            <button className="cal-day-num" type="button" onClick={() => openCreate(cell)} aria-label={`Create event on ${cell.toLocaleDateString()}`} title="Create an event on this day">{cell.getDate()}</button>
+            {dayItems.map((item) => {
+              const outlook = 'source' in item && item.source === 'outlook';
+              const deadline = item.type.includes('deadline');
+              return <button
+                type="button"
+                className={`cal-event ${deadline ? 'deadline' : 'event'}${outlook ? ' outlook' : ''}`}
+                key={`${item.kind}-${item.id}-${item.type}`}
+                title={outlook ? `Outlook · ${item.title}` : item.title}
+                onClick={() => item.kind === 'event' && !outlook
+                  ? openEdit(item as CalendarData['events'][number])
+                  : setSelectedItem({ title: item.title, when: item.at, category: outlook ? 'Outlook event' : deadline ? 'Deadline' : 'Event' })}
+              >{outlook ? '◆ ' : ''}{item.title}</button>;
+            })}
+          </> : null}
+        </div>;
+      })}</div>
+    </div>
+    {loadingCalendar ? <div className="calendar-empty-note">Loading calendar…</div> : !calendarError && !items.length ? <div className="calendar-empty-note">No events or deadlines yet. Choose a day or select New Event to add one.</div> : null}
+    {selectedItem ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedItem(null); }}><div className="modal-box" role="dialog" aria-modal="true" aria-label={selectedItem.title}>
+      <div className="modal-ttl"><span>{selectedItem.category}</span><button className="modal-close" onClick={() => setSelectedItem(null)} aria-label="Close details">×</button></div>
+      <h3>{selectedItem.title}</h3><p>{new Date(selectedItem.when).toLocaleString()}</p>
+      <div className="modal-acts"><button className="btn" onClick={() => setSelectedItem(null)}>Close</button></div>
+    </div></div> : null}
+    {dialogOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialogOpen(false); }}><div className="modal-box" role="dialog" aria-modal="true" aria-label={editingEvent ? 'Edit event' : 'New event'}>
+      <div className="modal-ttl"><span>{editingEvent ? 'Edit Event' : 'New Event'}</span><button className="modal-close" onClick={() => setDialogOpen(false)} aria-label="Close event form">×</button></div>
+      <form onSubmit={saveEvent}>
+        <label className="lbl">Title</label><input className="ifield" name="title" required minLength={2} defaultValue={editingEvent?.title ?? ''} placeholder="Event title" />
+        <label className="lbl">Type</label><select className="ifield" name="type" defaultValue={editingEvent?.type ?? 'meeting'}><option value="meeting">Meeting</option><option value="work_session">Work session</option><option value="presentation">Presentation</option><option value="activity">Activity</option></select>
+        <label className="lbl">Start</label><input className="ifield" name="startAt" type="datetime-local" required defaultValue={editingEvent ? toLocalInput(editingEvent.startAt) : newEventStart} />
+        <label className="lbl">End (optional)</label><input className="ifield" name="endAt" type="datetime-local" defaultValue={editingEvent?.endAt ? toLocalInput(editingEvent.endAt) : ''} />
+        <label className="lbl">Related Project (optional)</label><select className="ifield" name="projectId" defaultValue={editingEvent?.projectId ?? ''}><option value="">No project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select>
+        <div className="modal-acts">{editingEvent ? <button type="button" className="btn-red" onClick={() => void deleteEvent()} disabled={saving}>Delete</button> : null}<button type="button" className="btn-o" onClick={() => setDialogOpen(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : editingEvent ? 'Save Changes' : 'Create Event'}</button></div>
+      </form>
+    </div></div> : null}
   </section>;
 }
 
