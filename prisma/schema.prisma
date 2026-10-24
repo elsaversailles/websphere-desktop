@@ -17,7 +17,6 @@ enum AccountStatus {
   deactivated
   removed
   locked
-  archived
 }
 enum ProjectRole {
   Project_Leader
@@ -123,6 +122,7 @@ model User {
   tokenVersion Int @default(0)
   failedLogins Int @default(0)
   lockedAt DateTime?
+  lastLoginAt DateTime?
   archivedAt DateTime?
   createdAt DateTime @default(now())
   groupMembers GroupMember[]
