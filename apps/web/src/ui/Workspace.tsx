@@ -126,6 +126,46 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     return () => socket.disconnect();
   }, [session.access, session.user.id, notify]);
 
+  // The API enforces the same policy on every authenticated request. This timer gives an idle user
+  // a clear sign-out even when they leave a tab open without making another request.
+  useEffect(() => {
+    let idleTimeoutMinutes = 30;
+    let inactivityTimer: ReturnType<typeof window.setTimeout> | undefined;
+    let lastServerTouch = 0;
+    let signedOut = false;
+    const signOutForInactivity = async () => {
+      if (signedOut) return;
+      signedOut = true;
+      try { await request('/auth/logout'); } catch { /* The local session is always cleared below. */ }
+      clearSession();
+      notify('Your session timed out due to inactivity. Please sign in again.');
+      onLogout();
+    };
+    const schedule = () => {
+      if (inactivityTimer) window.clearTimeout(inactivityTimer);
+      inactivityTimer = window.setTimeout(() => { void signOutForInactivity(); }, idleTimeoutMinutes * 60_000);
+    };
+    const recordActivity = () => {
+      schedule();
+      // Keep the server-side session timestamp current for active users who are reading, typing,
+      // or moving through the interface without otherwise making an API request.
+      if (Date.now() - lastServerTouch >= 60_000) {
+        lastServerTouch = Date.now();
+        void request<{ idleTimeoutMinutes: number }>('/auth/session-policy').then((policy) => {
+          if (Number.isInteger(policy.idleTimeoutMinutes) && policy.idleTimeoutMinutes >= 5 && policy.idleTimeoutMinutes <= 480) idleTimeoutMinutes = policy.idleTimeoutMinutes;
+          schedule();
+        }).catch(() => undefined);
+      }
+    };
+    const events: Array<keyof WindowEventMap> = ['pointerdown', 'keydown', 'touchstart', 'scroll'];
+    events.forEach((event) => window.addEventListener(event, recordActivity, { passive: true }));
+    recordActivity();
+    return () => {
+      if (inactivityTimer) window.clearTimeout(inactivityTimer);
+      events.forEach((event) => window.removeEventListener(event, recordActivity));
+    };
+  }, [session.access, onLogout, notify]);
+
   async function logout() {
     setLoggingOut(true);
     try { await request('/auth/logout', { method: 'POST' }); } catch { /* local session is always cleared */ }
@@ -191,7 +231,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'tracker' ? <TrackerPage notify={notify} /> : null}
       {page === 'notifications' ? <NotificationsPage notify={notify} onNotificationClick={openNotification} /> : null}
       {page === 'profile' ? <ProfilePage user={session.user} onUserUpdated={updateUser} onSessionInvalidated={() => { clearSession(); onLogout(); }} notify={notify} /> : null}
-      {page === 'settings' ? <AdminSettingsPage notify={notify} /> : null}
+      {page === 'settings' ? <AdminSettingsPage notify={notify} onSessionInvalidated={() => { clearSession(); onLogout(); }} /> : null}
       {page === 'support' ? <SupportRequestsPage notify={notify} focusedTicketId={selectedTicketId} /> : null}
     </div></div>
   </div>

@@ -17,6 +17,10 @@ import { passwordRequirements, ticketStatusLabels, validatePassword, type Passwo
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
+const DEFAULT_SESSION_TIMEOUT_MINUTES = 30;
+const DEFAULT_INACTIVE_ACCOUNT_ALERTS = { enabled: false, recipientEmail: '', inactivityDays: 30 };
+type InactiveAccountAlerts = typeof DEFAULT_INACTIVE_ACCOUNT_ALERTS;
+type SecuritySettings = { sessionTimeoutMinutes: number; inactiveAccountAlerts: InactiveAccountAlerts };
 const WorkflowEventType = { status_change: 'status_change', task_completed: 'task_completed', assignment_change: 'assignment_change', progress_activity: 'progress_activity' } as const;
 const NotificationType = { task_assignment: 'task_assignment', group_activity: 'group_activity', announcement: 'announcement', ticket_update: 'ticket_update' } as const;
 type Role = (typeof Role)[keyof typeof Role];
@@ -94,6 +98,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   private refreshKey(jti: string) { return `auth:refresh:${jti}`; }
   private usedRefreshKey(jti: string) { return `auth:refresh:used:${jti}`; }
   private userRefreshKey(userId: string) { return `auth:refresh:user:${userId}`; }
+  private sessionKey(sessionId: string) { return `auth:session:${sessionId}`; }
   private failedLoginKey(userId: string) { return `auth:login-failures:${userId}`; }
   private resetKey(token: string) { return `auth:password-reset:${token}`; }
   private userResetKey(userId: string) { return `auth:password-reset:user:${userId}`; }
@@ -108,19 +113,64 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const unit = { s: 1, m: 60, h: 3600, d: 86400 }[match[2] as 's' | 'm' | 'h' | 'd'];
     return Number(match[1]) * unit;
   }
-  private async sign(user: { id: string; role: Role; tokenVersion: number }, refresh = false, jti = randomBytes(16).toString('hex'), sessionStartedAt?: number) {
-    const token = new SignJWT({ role: user.role, tv: user.tokenVersion, ...(refresh ? { jti, sessionStartedAt } : {}) }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt();
+  private async sign(user: { id: string; role: Role; tokenVersion: number }, refresh = false, jti = randomBytes(16).toString('hex'), sessionStartedAt?: number, sessionId?: string) {
+    const token = new SignJWT({ role: user.role, tv: user.tokenVersion, ...(sessionId ? { sid: sessionId } : {}), ...(refresh ? { jti, sessionStartedAt } : {}) }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt();
     return token.setExpirationTime(refresh ? sessionStartedAt! + this.refreshTtlSeconds() : this.config.get('JWT_ACCESS_TTL')).sign(refresh ? this.refreshSecret : this.accessSecret);
   }
-  async issue(user: { id: string; role: Role; tokenVersion: number }, sessionStartedAt = Math.floor(Date.now() / 1000)) {
+  async issue(user: { id: string; role: Role; tokenVersion: number }, sessionStartedAt = Math.floor(Date.now() / 1000), sessionId = randomBytes(16).toString('hex')) {
     const ttl = sessionStartedAt + this.refreshTtlSeconds() - Math.floor(Date.now() / 1000);
     if (ttl <= 0) fail('AUTH_UNAUTHENTICATED', 'Session has expired', 401);
     const jti = randomBytes(16).toString('hex');
-    const [access, refresh] = await Promise.all([this.sign(user), this.sign(user, true, jti, sessionStartedAt)]);
-    await Promise.all([this.redis.set(this.refreshKey(jti), JSON.stringify({ userId: user.id }), ttl), this.redis.addToSet(this.userRefreshKey(user.id), jti, ttl)]);
+    const [access, refresh] = await Promise.all([this.sign(user, false, undefined, undefined, sessionId), this.sign(user, true, jti, sessionStartedAt, sessionId)]);
+    await Promise.all([this.redis.set(this.refreshKey(jti), JSON.stringify({ userId: user.id, sessionId }), ttl), this.redis.set(this.sessionKey(sessionId), String(Date.now()), ttl), this.redis.addToSet(this.userRefreshKey(user.id), jti, ttl)]);
     return { access, refresh, role: user.role };
   }
-  async caller(header?: string, options: { allowLocked?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
+  private sessionTimeoutMinutes(value: unknown) { return typeof value === 'number' && Number.isInteger(value) && value >= 5 && value <= 480 ? value : DEFAULT_SESSION_TIMEOUT_MINUTES; }
+  private inactiveAccountAlerts(value: unknown): InactiveAccountAlerts {
+    if (!value || typeof value !== 'object') return { ...DEFAULT_INACTIVE_ACCOUNT_ALERTS };
+    const candidate = value as Record<string, unknown>;
+    return {
+      enabled: typeof candidate.enabled === 'boolean' ? candidate.enabled : DEFAULT_INACTIVE_ACCOUNT_ALERTS.enabled,
+      recipientEmail: typeof candidate.recipientEmail === 'string' ? candidate.recipientEmail : DEFAULT_INACTIVE_ACCOUNT_ALERTS.recipientEmail,
+      inactivityDays: typeof candidate.inactivityDays === 'number' && Number.isInteger(candidate.inactivityDays) && candidate.inactivityDays >= 7 && candidate.inactivityDays <= 365 ? candidate.inactivityDays : DEFAULT_INACTIVE_ACCOUNT_ALERTS.inactivityDays,
+    };
+  }
+  async securitySettings(caller: Caller): Promise<SecuritySettings> {
+    await this.admin(caller);
+    const rows = await this.prisma.systemSetting.findMany({ where: { key: { in: ['sessionTimeoutMinutes', 'inactiveAccountAlerts'] } } });
+    return {
+      sessionTimeoutMinutes: this.sessionTimeoutMinutes(rows.find((row) => row.key === 'sessionTimeoutMinutes')?.value),
+      inactiveAccountAlerts: this.inactiveAccountAlerts(rows.find((row) => row.key === 'inactiveAccountAlerts')?.value),
+    };
+  }
+  async updateSecuritySettings(caller: Caller, updates: Partial<SecuritySettings>): Promise<SecuritySettings> {
+    await this.admin(caller);
+    const current = await this.securitySettings(caller);
+    const next: SecuritySettings = {
+      sessionTimeoutMinutes: updates.sessionTimeoutMinutes ?? current.sessionTimeoutMinutes,
+      inactiveAccountAlerts: updates.inactiveAccountAlerts ?? current.inactiveAccountAlerts,
+    };
+    await Promise.all([
+      this.prisma.systemSetting.upsert({ where: { key: 'sessionTimeoutMinutes' }, update: { value: next.sessionTimeoutMinutes, updatedBy: caller.id }, create: { key: 'sessionTimeoutMinutes', value: next.sessionTimeoutMinutes, updatedBy: caller.id } }),
+      this.prisma.systemSetting.upsert({ where: { key: 'inactiveAccountAlerts' }, update: { value: next.inactiveAccountAlerts, updatedBy: caller.id }, create: { key: 'inactiveAccountAlerts', value: next.inactiveAccountAlerts, updatedBy: caller.id } }),
+    ]);
+    await this.audit.log('SecuritySettings', 'updated', 'info', 'Administrator updated security and email alert settings', caller.id);
+    return next;
+  }
+  async sessionPolicy() {
+    const setting = await this.prisma.systemSetting.findUnique({ where: { key: 'sessionTimeoutMinutes' } });
+    return { idleTimeoutMinutes: this.sessionTimeoutMinutes(setting?.value) };
+  }
+  private async enforceSessionTimeout(sessionId: string) {
+    const timeoutMinutes = (await this.sessionPolicy()).idleTimeoutMinutes;
+    const lastActive = Number(await this.redis.get(this.sessionKey(sessionId)));
+    if (!Number.isFinite(lastActive) || Date.now() - lastActive >= timeoutMinutes * 60_000) {
+      await this.redis.delete(this.sessionKey(sessionId));
+      fail('AUTH_UNAUTHENTICATED', 'Your session timed out due to inactivity. Please sign in again.', 401);
+    }
+    await this.redis.set(this.sessionKey(sessionId), String(Date.now()), this.refreshTtlSeconds());
+  }
+  async caller(header?: string, options: { allowLocked?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); if (typeof verified.payload.sid === 'string') await this.enforceSessionTimeout(verified.payload.sid); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
   async sendRegistrationOtp(rawEmail: string) {
     const email = rawEmail.trim().toLowerCase();
     const exists = await this.prisma.user.findUnique({ where: { email } });
@@ -181,7 +231,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.audit.log('AuthModule', 'account_registered', 'info', `New account registered for ${user.email}`, user.id);
     return { user: this.publicUser(user), ...(await this.issue(user)) };
   }
-  async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0 } })]); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in`, user.id); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
+  async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0, lastLoginAt: new Date() } })]); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in`, user.id); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
   async refreshToken(token: string) {
     try {
       const verified = await jwtVerify(token, this.refreshSecret);
@@ -193,8 +243,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
         if (await this.redis.get(this.usedRefreshKey(jti))) await this.prisma.user.update({ where: { id: subject }, data: { tokenVersion: { increment: 1 } } });
         fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
       }
-      const record = JSON.parse(stored!) as { userId: string };
+      const record = JSON.parse(stored!) as { userId: string; sessionId?: string };
       if (record.userId !== subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
+      if (record.sessionId) await this.enforceSessionTimeout(record.sessionId);
       const user = await this.prisma.user.findUnique({ where: { id: record.userId } });
       if (!user || user.status !== 'active' || user.tokenVersion !== Number(verified.payload.tv)) {
         await this.redis.removeFromSet(this.userRefreshKey(record.userId), jti);
@@ -205,7 +256,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       const ttl = sessionStartedAt + this.refreshTtlSeconds() - Math.floor(Date.now() / 1000);
       if (!Number.isSafeInteger(sessionStartedAt) || ttl <= 0) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
       await Promise.all([this.redis.set(this.usedRefreshKey(jti), '1', ttl), this.redis.removeFromSet(this.userRefreshKey(record.userId), jti)]);
-      return this.issue(user, sessionStartedAt);
+      return this.issue(user, sessionStartedAt, record.sessionId);
     } catch (error) {
       if (error instanceof HttpException) throw error;
       return fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
@@ -213,7 +264,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   private async removeRefreshSessions(userId: string) { const key = this.userRefreshKey(userId); const jtis = await this.redis.setMembers(key); await this.redis.delete(...jtis.map((jti) => this.refreshKey(jti)), key); }
   async logout(user: Caller) { await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'logout', 'info', 'User signed out and invalidated all sessions', user.id); return { ok: true }; }
-  async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) passwordPolicyFailed(policy.reason); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); return { ok: true }; }
+  async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) passwordPolicyFailed(policy.reason); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'password_changed', 'info', 'User changed their password', user.id); return { ok: true }; }
   async forgot(email: string) {
     const user = await this.prisma.user.findUnique({ where: { email } });
     if (user?.status !== 'locked') return { ok: true };

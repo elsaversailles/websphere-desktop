@@ -122,6 +122,7 @@ model User {
   tokenVersion Int @default(0)
   failedLogins Int @default(0)
   lockedAt DateTime?
+  lastLoginAt DateTime?
   createdAt DateTime @default(now())
   groupMembers GroupMember[]
   projectMembers ProjectMember[]
@@ -134,6 +135,7 @@ model User {
   aiInteractions AiInteraction[]
   supportTickets SupportTicket[]
   announcements Announcement[]
+  @@index([status, lastLoginAt])
 }
 model Admin {
   id String @id @default(cuid())

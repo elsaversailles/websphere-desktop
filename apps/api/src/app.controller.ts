@@ -13,6 +13,14 @@ import { TurnService } from './turn.service.js';
 // message directly, so "Email is required" reaches the user instead of a generic banner; multiple
 // failures fall back to the generic summary since picking just one would be misleading.
 const parse = <T>(schema: z.ZodType<T>, value: unknown) => { const result = schema.safeParse(value); if (!result.success) { const fields = Object.fromEntries(result.error.issues.map((issue) => [String(issue.path[0] ?? 'body'), issue.message])); const message = result.error.issues.length === 1 ? result.error.issues[0].message : 'One or more fields are invalid'; throw new HttpException({ code: 'VALIDATION_FAILED', message, fields }, 400); } return result.data; };
+const securitySettingsSchema = z.object({
+  sessionTimeoutMinutes: z.number().int().min(5).max(480).optional(),
+  inactiveAccountAlerts: z.object({
+    enabled: z.boolean(),
+    recipientEmail: z.string().trim().max(320),
+    inactivityDays: z.number().int().min(7).max(365),
+  }).superRefine((value, context) => { if (value.enabled && !z.string().email().safeParse(value.recipientEmail).success) context.addIssue({ code: z.ZodIssueCode.custom, path: ['recipientEmail'], message: 'Enter a valid recipient email address' }); }).optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one security setting' });
 
 @Controller()
 export class AppController {
@@ -27,6 +35,7 @@ export class AppController {
   @Public() @Post('auth/refresh') refresh(@Body('refresh') refresh: string) { return this.app.refreshToken(refresh); }
   @Post('auth/logout') async logout(@Headers('authorization') auth?: string) { return this.app.logout(await this.caller(auth)); }
   @Public() @Post('auth/password/change') async change(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(passwordChangeSchema, body); return this.app.changePassword(await this.app.caller(auth, { allowLocked: true }), input.oldPassword, input.password, input.confirm); }
+  @Get('auth/session-policy') async sessionPolicy() { return this.app.sessionPolicy(); }
   @Public() @Post('auth/password/forgot') forgot(@Body() body: unknown) { return this.app.forgot(parse(passwordForgotSchema, body).email); }
   @Public() @Post('auth/deactivation-request') deactivationRequest(@Body() body: unknown) { const input = parse(deactivationRequestSchema, body); return this.app.requestAccountDeactivation(input.email, input.reason); }
   @Public() @Post('auth/password/reset') reset(@Body() body: unknown) { const input = parse(passwordResetSchema, body); return this.app.resetPassword(input.token, input.password, input.confirm); }
@@ -130,6 +139,8 @@ export class AppController {
   @Roles('Administrator') @Patch('admin/users/:id') async adminUser(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.adminUpdateUser(await this.caller(auth), id, body); }
   @Roles('Administrator') @Delete('admin/users/:id') async adminDeleteUser(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.adminDeleteUser(await this.caller(auth), id); }
   @Roles('Administrator') @Get('admin/logs') async logs(@Headers('authorization') auth: string) { const caller = await this.caller(auth); await this.app.admin(caller); return this.app.prisma.auditLog.findMany({ orderBy: { createdAt: 'desc' } }); }
+  @Roles('Administrator') @Get('admin/security-settings') async securitySettings(@Headers('authorization') auth: string) { return this.app.securitySettings(await this.caller(auth)); }
+  @Roles('Administrator') @Put('admin/security-settings') async updateSecuritySettings(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.updateSecuritySettings(await this.caller(auth), parse(securitySettingsSchema, body)); }
   @Roles('Administrator') @Get('admin/settings') async settings(@Headers('authorization') auth: string) { const caller = await this.caller(auth); await this.app.admin(caller); return this.app.prisma.systemSetting.findMany(); }
   @Roles('Administrator') @Put('admin/settings') async setSettings(@Headers('authorization') auth: string, @Body() body: Record<string, unknown>) { const caller = await this.caller(auth); await this.app.admin(caller); const settings = body.maintenanceMode === false && !Object.prototype.hasOwnProperty.call(body, 'maintenanceSchedule') ? { ...body, maintenanceSchedule: null } : body; return Promise.all(Object.entries(settings).map(([key, value]) => this.app.prisma.systemSetting.upsert({ where: { key }, update: { value: value as any, updatedBy: caller.id }, create: { key, value: value as any, updatedBy: caller.id } }))); }
 }

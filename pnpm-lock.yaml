@@ -188,7 +188,13 @@ importers:
       ioredis:
         specifier: ^5.4.1
         version: 5.11.1
+      nodemailer:
+        specifier: ^7.0.6
+        version: 7.0.13
     devDependencies:
+      '@types/nodemailer':
+        specifier: ^7.0.1
+        version: 7.0.12
       prisma:
         specifier: ^6.1.0
         version: 6.19.3(typescript@5.9.3)
