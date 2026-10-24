@@ -120,11 +120,12 @@ export const profileUpdateSchema = z.object({
   course: z.string().trim().min(2).max(160).optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one profile field' });
 export const projectSchema = z.object({
-  groupId: z.string().cuid(), title: z.string().trim().min(2).max(180), description: z.string().trim().min(1),
+  // A project can be started independently; linking it to a group chat is optional.
+  groupId: z.string().cuid().optional(), title: z.string().trim().min(2).max(180), description: z.string().trim().min(1),
   startDate: z.coerce.date().optional(), deadline: z.coerce.date().optional(), memberIds: z.array(z.string().cuid()).default([]),
 });
 export const taskSchema = z.object({
-  title: z.string().trim().min(2).max(180), description: z.string().trim().min(1), deadline: z.coerce.date().optional(),
+  title: z.string().trim().min(2).max(180), description: z.string().trim().min(1), deadline: z.coerce.date().nullable().optional(),
   priority: z.enum(['low', 'medium', 'high']).default('medium'), expectedDurationHrs: z.number().positive().optional(),
 });
 export const taskStatusSchema = z.object({ status: z.enum(['pending', 'ongoing', 'for_review', 'completed']) });

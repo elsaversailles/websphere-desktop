@@ -17,6 +17,10 @@ import { passwordRequirements, ticketStatusLabels, validatePassword, type Passwo
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
+const DEFAULT_SESSION_TIMEOUT_MINUTES = 30;
+const DEFAULT_INACTIVE_ACCOUNT_ALERTS = { enabled: false, recipientEmail: '', inactivityDays: 30 };
+type InactiveAccountAlerts = typeof DEFAULT_INACTIVE_ACCOUNT_ALERTS;
+type SecuritySettings = { sessionTimeoutMinutes: number; inactiveAccountAlerts: InactiveAccountAlerts };
 const WorkflowEventType = { status_change: 'status_change', task_completed: 'task_completed', assignment_change: 'assignment_change', progress_activity: 'progress_activity' } as const;
 const NotificationType = { task_assignment: 'task_assignment', group_activity: 'group_activity', announcement: 'announcement', ticket_update: 'ticket_update' } as const;
 type Role = (typeof Role)[keyof typeof Role];
@@ -96,6 +100,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   private refreshKey(jti: string) { return `auth:refresh:${jti}`; }
   private usedRefreshKey(jti: string) { return `auth:refresh:used:${jti}`; }
   private userRefreshKey(userId: string) { return `auth:refresh:user:${userId}`; }
+  private sessionKey(sessionId: string) { return `auth:session:${sessionId}`; }
   private failedLoginKey(userId: string) { return `auth:login-failures:${userId}`; }
   private resetKey(token: string) { return `auth:password-reset:${token}`; }
   private userResetKey(userId: string) { return `auth:password-reset:user:${userId}`; }
@@ -110,19 +115,64 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const unit = { s: 1, m: 60, h: 3600, d: 86400 }[match[2] as 's' | 'm' | 'h' | 'd'];
     return Number(match[1]) * unit;
   }
-  private async sign(user: { id: string; role: Role; tokenVersion: number }, refresh = false, jti = randomBytes(16).toString('hex'), sessionStartedAt?: number) {
-    const token = new SignJWT({ role: user.role, tv: user.tokenVersion, ...(refresh ? { jti, sessionStartedAt } : {}) }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt();
+  private async sign(user: { id: string; role: Role; tokenVersion: number }, refresh = false, jti = randomBytes(16).toString('hex'), sessionStartedAt?: number, sessionId?: string) {
+    const token = new SignJWT({ role: user.role, tv: user.tokenVersion, ...(sessionId ? { sid: sessionId } : {}), ...(refresh ? { jti, sessionStartedAt } : {}) }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt();
     return token.setExpirationTime(refresh ? sessionStartedAt! + this.refreshTtlSeconds() : this.config.get('JWT_ACCESS_TTL')).sign(refresh ? this.refreshSecret : this.accessSecret);
   }
-  async issue(user: { id: string; role: Role; tokenVersion: number }, sessionStartedAt = Math.floor(Date.now() / 1000)) {
+  async issue(user: { id: string; role: Role; tokenVersion: number }, sessionStartedAt = Math.floor(Date.now() / 1000), sessionId = randomBytes(16).toString('hex')) {
     const ttl = sessionStartedAt + this.refreshTtlSeconds() - Math.floor(Date.now() / 1000);
     if (ttl <= 0) fail('AUTH_UNAUTHENTICATED', 'Session has expired', 401);
     const jti = randomBytes(16).toString('hex');
-    const [access, refresh] = await Promise.all([this.sign(user), this.sign(user, true, jti, sessionStartedAt)]);
-    await Promise.all([this.redis.set(this.refreshKey(jti), JSON.stringify({ userId: user.id }), ttl), this.redis.addToSet(this.userRefreshKey(user.id), jti, ttl)]);
+    const [access, refresh] = await Promise.all([this.sign(user, false, undefined, undefined, sessionId), this.sign(user, true, jti, sessionStartedAt, sessionId)]);
+    await Promise.all([this.redis.set(this.refreshKey(jti), JSON.stringify({ userId: user.id, sessionId }), ttl), this.redis.set(this.sessionKey(sessionId), String(Date.now()), ttl), this.redis.addToSet(this.userRefreshKey(user.id), jti, ttl)]);
     return { access, refresh, role: user.role };
   }
-  async caller(header?: string, options: { allowLocked?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
+  private sessionTimeoutMinutes(value: unknown) { return typeof value === 'number' && Number.isInteger(value) && value >= 5 && value <= 480 ? value : DEFAULT_SESSION_TIMEOUT_MINUTES; }
+  private inactiveAccountAlerts(value: unknown): InactiveAccountAlerts {
+    if (!value || typeof value !== 'object') return { ...DEFAULT_INACTIVE_ACCOUNT_ALERTS };
+    const candidate = value as Record<string, unknown>;
+    return {
+      enabled: typeof candidate.enabled === 'boolean' ? candidate.enabled : DEFAULT_INACTIVE_ACCOUNT_ALERTS.enabled,
+      recipientEmail: typeof candidate.recipientEmail === 'string' ? candidate.recipientEmail : DEFAULT_INACTIVE_ACCOUNT_ALERTS.recipientEmail,
+      inactivityDays: typeof candidate.inactivityDays === 'number' && Number.isInteger(candidate.inactivityDays) && candidate.inactivityDays >= 7 && candidate.inactivityDays <= 365 ? candidate.inactivityDays : DEFAULT_INACTIVE_ACCOUNT_ALERTS.inactivityDays,
+    };
+  }
+  async securitySettings(caller: Caller): Promise<SecuritySettings> {
+    await this.admin(caller);
+    const rows = await this.prisma.systemSetting.findMany({ where: { key: { in: ['sessionTimeoutMinutes', 'inactiveAccountAlerts'] } } });
+    return {
+      sessionTimeoutMinutes: this.sessionTimeoutMinutes(rows.find((row) => row.key === 'sessionTimeoutMinutes')?.value),
+      inactiveAccountAlerts: this.inactiveAccountAlerts(rows.find((row) => row.key === 'inactiveAccountAlerts')?.value),
+    };
+  }
+  async updateSecuritySettings(caller: Caller, updates: Partial<SecuritySettings>): Promise<SecuritySettings> {
+    await this.admin(caller);
+    const current = await this.securitySettings(caller);
+    const next: SecuritySettings = {
+      sessionTimeoutMinutes: updates.sessionTimeoutMinutes ?? current.sessionTimeoutMinutes,
+      inactiveAccountAlerts: updates.inactiveAccountAlerts ?? current.inactiveAccountAlerts,
+    };
+    await Promise.all([
+      this.prisma.systemSetting.upsert({ where: { key: 'sessionTimeoutMinutes' }, update: { value: next.sessionTimeoutMinutes, updatedBy: caller.id }, create: { key: 'sessionTimeoutMinutes', value: next.sessionTimeoutMinutes, updatedBy: caller.id } }),
+      this.prisma.systemSetting.upsert({ where: { key: 'inactiveAccountAlerts' }, update: { value: next.inactiveAccountAlerts, updatedBy: caller.id }, create: { key: 'inactiveAccountAlerts', value: next.inactiveAccountAlerts, updatedBy: caller.id } }),
+    ]);
+    await this.audit.log('SecuritySettings', 'updated', 'info', 'Administrator updated security and email alert settings', caller.id);
+    return next;
+  }
+  async sessionPolicy() {
+    const setting = await this.prisma.systemSetting.findUnique({ where: { key: 'sessionTimeoutMinutes' } });
+    return { idleTimeoutMinutes: this.sessionTimeoutMinutes(setting?.value) };
+  }
+  private async enforceSessionTimeout(sessionId: string) {
+    const timeoutMinutes = (await this.sessionPolicy()).idleTimeoutMinutes;
+    const lastActive = Number(await this.redis.get(this.sessionKey(sessionId)));
+    if (!Number.isFinite(lastActive) || Date.now() - lastActive >= timeoutMinutes * 60_000) {
+      await this.redis.delete(this.sessionKey(sessionId));
+      fail('AUTH_UNAUTHENTICATED', 'Your session timed out due to inactivity. Please sign in again.', 401);
+    }
+    await this.redis.set(this.sessionKey(sessionId), String(Date.now()), this.refreshTtlSeconds());
+  }
+  async caller(header?: string, options: { allowLocked?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); if (typeof verified.payload.sid === 'string') await this.enforceSessionTimeout(verified.payload.sid); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
   async sendRegistrationOtp(rawEmail: string) {
     const email = rawEmail.trim().toLowerCase();
     const exists = await this.prisma.user.findUnique({ where: { email } });
@@ -183,7 +233,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.audit.log('AuthModule', 'account_registered', 'info', `New account registered for ${user.email}`, user.id);
     return { user: this.publicUser(user), ...(await this.issue(user)) };
   }
-  async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0 } })]); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in`, user.id); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
+  async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0, lastLoginAt: new Date() } })]); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in`, user.id); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
   async refreshToken(token: string) {
     try {
       const verified = await jwtVerify(token, this.refreshSecret);
@@ -195,8 +245,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
         if (await this.redis.get(this.usedRefreshKey(jti))) await this.prisma.user.update({ where: { id: subject }, data: { tokenVersion: { increment: 1 } } });
         fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
       }
-      const record = JSON.parse(stored!) as { userId: string };
+      const record = JSON.parse(stored!) as { userId: string; sessionId?: string };
       if (record.userId !== subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
+      if (record.sessionId) await this.enforceSessionTimeout(record.sessionId);
       const user = await this.prisma.user.findUnique({ where: { id: record.userId } });
       if (!user || user.status !== 'active' || user.tokenVersion !== Number(verified.payload.tv)) {
         await this.redis.removeFromSet(this.userRefreshKey(record.userId), jti);
@@ -207,7 +258,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       const ttl = sessionStartedAt + this.refreshTtlSeconds() - Math.floor(Date.now() / 1000);
       if (!Number.isSafeInteger(sessionStartedAt) || ttl <= 0) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
       await Promise.all([this.redis.set(this.usedRefreshKey(jti), '1', ttl), this.redis.removeFromSet(this.userRefreshKey(record.userId), jti)]);
-      return this.issue(user, sessionStartedAt);
+      return this.issue(user, sessionStartedAt, record.sessionId);
     } catch (error) {
       if (error instanceof HttpException) throw error;
       return fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
@@ -215,7 +266,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   private async removeRefreshSessions(userId: string) { const key = this.userRefreshKey(userId); const jtis = await this.redis.setMembers(key); await this.redis.delete(...jtis.map((jti) => this.refreshKey(jti)), key); }
   async logout(user: Caller) { await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'logout', 'info', 'User signed out and invalidated all sessions', user.id); return { ok: true }; }
-  async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) passwordPolicyFailed(policy.reason); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); return { ok: true }; }
+  async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) passwordPolicyFailed(policy.reason); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'password_changed', 'info', 'User changed their password', user.id); return { ok: true }; }
   async forgot(email: string) {
     const user = await this.prisma.user.findUnique({ where: { email } });
     if (user?.status !== 'locked') return { ok: true };
@@ -311,11 +362,11 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   // memberIds drives the members relation and is not a Project column, so it has to be peeled off
   // before the rest of the payload is spread into create(). projectSchema defaults it to [], which
   // means it is always present and would otherwise always be rejected by Prisma.
-  async createProject(caller: Caller, input: any) { await this.member(input.groupId, caller.id); const { memberIds: requested, ...data } = input; const memberIds = [...new Set([caller.id, ...(requested ?? [])])]; for (const userId of memberIds) await this.member(input.groupId, userId); return this.prisma.project.create({ data: { ...data, createdBy: caller.id, members: { create: memberIds.map((userId) => ({ userId, role: userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } }, include: { members: true } }); }
+  async createProject(caller: Caller, input: any) { const { memberIds: requested, groupId, ...data } = input; if (groupId) await this.member(groupId, caller.id); const memberIds = [...new Set([caller.id, ...(requested ?? [])])]; if (groupId) for (const userId of memberIds) await this.member(groupId, userId); else if (memberIds.length > 1) fail('VALIDATION_FAILED', 'Add collaborators after connecting this project to a group.', 400, { memberIds: 'Independent projects start with their creator only' }); return this.prisma.project.create({ data: { ...data, ...(groupId ? { groupId } : {}), createdBy: caller.id, members: { create: memberIds.map((userId) => ({ userId, role: userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } }, include: { members: true } }); }
   async projects(caller: Caller) { return this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } } }, include: { group: true, members: { where: { userId: caller.id } }, tasks: true, _count: { select: { members: true } } } }); }
   async project(caller: Caller, id: string) { await this.projectMember(id, caller.id); return this.prisma.project.findUniqueOrThrow({ where: { id }, include: { group: { include: { members: { include: { user: { select: { id: true, fullName: true } } } } } }, members: { include: { user: { select: { id: true, fullName: true } } } }, tasks: { include: { assignments: { where: { active: true } } } } } }); }
   async updateProject(caller: Caller, id: string, input: any) { await this.projectMember(id, caller.id, true); const { memberIds, ...data } = input; return this.prisma.project.update({ where: { id }, data }); }
-  async addProjectMember(caller: Caller, projectId: string, userId: string) { await this.projectMember(projectId, caller.id, true); const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } }); await this.member(project.groupId, userId); return this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: ProjectRole.Project_Member } }); }
+  async addProjectMember(caller: Caller, projectId: string, userId: string) { await this.projectMember(projectId, caller.id, true); const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } }); if (!project.groupId) fail('INVALID_OPERATION', 'Connect this independent project to a group before adding members.', 400); await this.member(project.groupId, userId); return this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: ProjectRole.Project_Member } }); }
   async updateResponsibility(caller: Caller, projectId: string, userId: string, responsibility: string) { await this.projectMember(projectId, caller.id, true); await this.projectMember(projectId, userId); return this.prisma.projectMember.update({ where: { projectId_userId: { projectId, userId } }, data: { responsibility } }); }
   async projectProgress(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { tasks: true } }); const analytics = projectAnalytics(project.tasks, project.deadline); return { progress: completionRate(project.tasks.filter((t) => t.status === 'completed').length, project.tasks.length), onTrack: analytics.riskLevel === 'on_track', ...analytics }; }
   async createTask(caller: Caller, projectId: string, input: any) { await this.projectMember(projectId, caller.id, true); return this.prisma.task.create({ data: { ...input, projectId, createdBy: caller.id } }); }
@@ -328,13 +379,28 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async updateTask(caller: Caller, id: string, input: any) { const task = await this.task(caller, id); await this.projectMember(task.projectId, caller.id, true); return this.prisma.task.update({ where: { id }, data: input }); }
   async assignTask(caller: Caller, id: string, assigneeId: string) { const task = await this.task(caller, id); await this.projectMember(task.projectId, caller.id, true); await this.projectMember(task.projectId, assigneeId); await this.prisma.$transaction([this.prisma.taskAssignment.updateMany({ where: { taskId: id, active: true }, data: { active: false } }), this.prisma.taskAssignment.create({ data: { taskId: id, assigneeId, assignerId: caller.id } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: WorkflowEventType.assignment_change, toValue: assigneeId } })]); await this.jobs.enqueueAnalyticsRecompute(task.projectId); return this.notify([assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}”`, id, 'task'); }
-  async taskStatus(caller: Caller, id: string, status: TaskStatus) { const task = await this.task(caller, id); const assignment = await this.prisma.taskAssignment.findFirst({ where: { taskId: id, assigneeId: caller.id, active: true } }); if (!assignment) fail('RBAC_FORBIDDEN', 'Only the active assignee can change task status', 403); const now = new Date(); const updated = await this.prisma.task.update({ where: { id }, data: { status, ...(status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), ...(status === 'completed' ? { completedAt: now } : {}) } }); await this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: status } }); await this.jobs.enqueueAnalyticsRecompute(task.projectId); return updated; }
+  /**
+   * An active task assignment is the authority for changing its status. Do not
+   * call `task()` here: legacy assignments can exist without a ProjectMember
+   * row, and `task()` would incorrectly reject their actual assignee before this
+   * authorization check runs.
+   */
+  async taskStatus(caller: Caller, id: string, status: TaskStatus) {
+    const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, select: { id: true, projectId: true, status: true, startedAt: true } });
+    const assignment = await this.prisma.taskAssignment.findFirst({ where: { taskId: id, assigneeId: caller.id, active: true } });
+    if (!assignment) fail('RBAC_FORBIDDEN', 'Only the active assignee can change task status', 403);
+    const now = new Date();
+    const updated = await this.prisma.task.update({ where: { id }, data: { status, ...(status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), ...(status === 'completed' ? { completedAt: now } : {}) } });
+    await this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: status } });
+    await this.jobs.enqueueAnalyticsRecompute(task.projectId);
+    return updated;
+  }
   async myTasks(caller: Caller, filter: any) {
     const tasks = await this.prisma.task.findMany({ where: { assignments: { some: { assigneeId: caller.id, active: true } }, ...(filter.projectId ? { projectId: filter.projectId } : {}), ...(filter.status ? { status: filter.status } : {}) }, orderBy: filter.sort === 'deadline' ? { deadline: 'asc' } : { createdAt: 'desc' }, include: { project: { select: { id: true, title: true } }, assignments: { where: { assigneeId: caller.id, active: true }, take: 1 } } });
     const assignerIds = [...new Set(tasks.map((task: any) => task.assignments[0]?.assignerId).filter(Boolean))];
     const assigners = assignerIds.length ? await this.prisma.user.findMany({ where: { id: { in: assignerIds } }, select: { id: true, fullName: true } }) : [];
     const assignerName = (id?: string) => assigners.find((user: any) => user.id === id)?.fullName ?? 'Unassigned';
-    return tasks.map((task: any) => ({ ...task, project: task.project, assignedBy: assignerName(task.assignments[0]?.assignerId), progress: taskProgress(task.status) }));
+    return tasks.map((task: any) => ({ ...task, project: task.project, assignedBy: assignerName(task.assignments[0]?.assignerId), assignedAt: task.assignments[0]?.assignedAt ?? task.createdAt, progress: taskProgress(task.status) }));
   }
   async tracker(caller: Caller, projectId: string) { await this.projectMember(projectId, caller.id); const tasks = await this.prisma.task.findMany({ where: { projectId } }); const counts = Object.fromEntries(['pending', 'ongoing', 'for_review', 'completed'].map((status) => [status, tasks.filter((task) => task.status === status).length])); return { ...counts, total: tasks.length, progress: completionRate(counts.completed, tasks.length) }; }
   async taskTracker(caller: Caller) {
@@ -607,6 +673,17 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async tally(pollId: string, viewerId?: string) { const [poll, viewerVote] = await Promise.all([this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: { include: { votes: { include: { voter: { select: { id: true, fullName: true } } } } } } } }), viewerId ? this.prisma.vote.findUnique({ where: { pollId_voterId: { pollId, voterId: viewerId } }, select: { optionId: true } }) : Promise.resolve(null)]); const open = this.pollIsOpen(poll); return { pollId, groupId: poll.groupId, open, closesAt: poll.closesAt, closedAt: open ? null : poll.closedAt ?? poll.closesAt, closedReason: open ? null : poll.closedBy ? 'manual' : 'expired', viewerOptionId: viewerVote?.optionId ?? null, options: poll.options.map((option) => ({ optionId: option.id, ideaId: option.ideaId, label: option.label, votes: option.votes.length, voters: option.votes.map((vote: any) => ({ userId: vote.voter.id, fullName: vote.voter.fullName })) })) }; }
   async pollResults(caller: Caller, pollId: string) { const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, select: { id: true, groupId: true, open: true, closesAt: true } }); await this.member(poll.groupId, caller.id); await this.settleExpired(poll); return this.tally(pollId, caller.id); }
   async begin(caller: Caller, groupId: string, ideaId: string) { await this.member(groupId, caller.id, true); const idea = await this.prisma.idea.findFirst({ where: { id: ideaId, groupId } }); if (!idea) fail('NOT_FOUND', 'Idea does not belong to group', 404); if (idea.status === 'selected') fail('VALIDATION_FAILED', 'Idea has already been selected'); const members = await this.prisma.groupMember.findMany({ where: { groupId }, select: { userId: true } }); const project = await this.prisma.project.create({ data: { groupId, ideaId, title: idea.title, description: idea.body, createdBy: caller.id, members: { create: members.map((member) => ({ userId: member.userId, role: member.userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } } }); await this.prisma.idea.update({ where: { id: ideaId }, data: { status: 'selected' } }); return project; }
+  async maintenanceStatus() {
+    const [mode, scheduled] = await Promise.all([
+      this.prisma.systemSetting.findUnique({ where: { key: 'maintenanceMode' } }),
+      this.prisma.systemSetting.findUnique({ where: { key: 'maintenanceSchedule' } }),
+    ]);
+    const raw = scheduled?.value as { startsAt?: string } | null;
+    const startsAt = raw?.startsAt && !Number.isNaN(new Date(raw.startsAt).getTime()) ? new Date(raw.startsAt) : null;
+    const manuallyEnabled = mode?.value === true || mode?.value?.enabled === true;
+    const scheduledActive = Boolean(startsAt && startsAt <= new Date());
+    return { active: manuallyEnabled || scheduledActive, scheduledStart: startsAt?.toISOString() ?? null };
+  }
   async calendar(caller: Caller, from?: string, to?: string) { const events = await this.prisma.calendarEvent.findMany({ where: { OR: [{ ownerId: caller.id }, { project: { members: { some: { userId: caller.id } } } }], ...(from || to ? { startAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}) }, orderBy: { startAt: 'asc' } }); const projects = await this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, deadline: { not: null } }, select: { id: true, title: true, deadline: true } }); const tasks = await this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, deadline: { not: null }, status: { not: 'completed' } }, select: { id: true, title: true, deadline: true } }); return { events, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))] }; }
   async createCalendarEvent(caller: Caller, input: any) { if (input.projectId) await this.projectMember(input.projectId, caller.id); return this.prisma.calendarEvent.create({ data: { ...input, ownerId: caller.id } }); }
   private async calendarEventAccess(caller: Caller, id: string) { const event = await this.prisma.calendarEvent.findUniqueOrThrow({ where: { id } }); if (event.projectId) await this.projectMember(event.projectId, caller.id); else if (event.ownerId !== caller.id) fail('RBAC_FORBIDDEN', 'Only the event owner or project members can modify this event', 403); return event; }
@@ -699,7 +776,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, status: { not: 'completed' }, deadline: { not: null } }, orderBy: { deadline: 'asc' }, take: 1, include: { project: { select: { title: true } } } }),
     ]);
     const items = [
-      ...completedProjects.map((project: any) => ({ id: `project-${project.id}`, kind: 'achievement' as const, icon: 'check' as const, title: `${project.title} completed`, detail: `${project.group.name} · Project delivered`, at: project.createdAt })),
+      ...completedProjects.map((project: any) => ({ id: `project-${project.id}`, kind: 'achievement' as const, icon: 'check' as const, title: `${project.title} completed`, detail: `${project.group?.name ?? 'Independent'} · Project delivered`, at: project.createdAt })),
       ...completedTasks.map((task: any) => ({ id: `task-${task.id}`, kind: 'achievement' as const, icon: 'check' as const, title: `${task.title} approved`, detail: `${task.project.title} · Task completed`, at: task.completedAt })),
       ...selectedIdeas.map((idea: any) => ({ id: `idea-${idea.id}`, kind: 'award' as const, icon: 'star' as const, title: `${idea.title} selected`, detail: `${idea.group.name} · Chosen from group ideas`, at: idea.createdAt })),
     ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()).slice(0, take - 1);
@@ -745,15 +822,33 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return { accessToken: tokens.accessToken, developerKey, appId };
   }
   private oauthStateKey(state: string) { return `oauth:state:${state}`; }
+  private oauthCallbackUrl(provider: ProviderId) {
+    const base = this.config.get('OAUTH_CALLBACK_BASE_URL');
+    if (!base) fail('OAUTH_NOT_CONFIGURED', 'OAuth callback is not configured. Ask an administrator to set OAUTH_CALLBACK_BASE_URL.', 503);
+    const callbackBase = base as string;
+    return new URL(`integrations/${provider}/callback`, `${callbackBase.replace(/\/+$/, '')}/`).toString();
+  }
+  private oauthReturnUrl(value: string) {
+    const target = (() => { try { return new URL(value); } catch { return null; } })();
+    if (!target) fail('VALIDATION_FAILED', 'A valid OAuth return URL is required', 400);
+    const returnTarget = target as URL;
+    if (returnTarget.protocol === 'websphere:') return returnTarget.toString();
+    const allowed = this.config.get('WEB_ORIGIN').split(',').map((origin) => origin.trim()).filter(Boolean).some((origin) => {
+      try { return returnTarget.origin === new URL(origin).origin; } catch { return false; }
+    });
+    if (!allowed) fail('VALIDATION_FAILED', 'OAuth return URL is not allowed', 400);
+    return returnTarget.toString();
+  }
   async oauthAuthorize(caller: Caller, provider: ProviderId, redirectUri: string) {
     if (!connectors[provider]) fail('VALIDATION_FAILED', 'This integration provider is not supported');
-    try { new URL(redirectUri); } catch { fail('VALIDATION_FAILED', 'A valid OAuth callback URL is required', 400); }
+    const returnUrl = this.oauthReturnUrl(redirectUri);
+    const callbackUrl = this.oauthCallbackUrl(provider);
     const state = randomBytes(20).toString('hex');
     const codeVerifier = provider === 'trello' || provider === 'asana' || provider === 'canva' ? randomBytes(48).toString('base64url') : undefined;
     const codeChallenge = codeVerifier ? createHash('sha256').update(codeVerifier).digest('base64url') : undefined;
-    await this.redis.set(this.oauthStateKey(state), JSON.stringify({ userId: caller.id, provider, redirectUri, codeVerifier }), 600);
+    await this.redis.set(this.oauthStateKey(state), JSON.stringify({ userId: caller.id, provider, returnUrl, callbackUrl, codeVerifier }), 600);
     let authorizeUrl: string;
-    try { authorizeUrl = connectors[provider].authorizeUrl(state, redirectUri, codeChallenge); }
+    try { authorizeUrl = connectors[provider].authorizeUrl(state, callbackUrl, codeChallenge); }
     catch (error) {
       if (error instanceof Error && error.message === 'OAUTH_NOT_CONFIGURED') fail('OAUTH_NOT_CONFIGURED', 'This integration is not configured yet. Ask an administrator to add its OAuth credentials.', 503);
       if (error instanceof Error && error.message === 'INTEGRATION_NOT_IMPLEMENTED') fail('INTEGRATION_NOT_IMPLEMENTED', 'This integration is not available yet.', 501);
@@ -778,22 +873,23 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.prisma.toolConnection.update({ where: { id: connection.id }, data: this.encryptedTokens(tokens) });
     return tokens;
   }
-  async oauthCallback(provider: ProviderId, code: string, state: string, redirectUri?: string) {
+  async oauthCallback(provider: ProviderId, code: string, state: string) {
     if (!code || !state) fail('OAUTH_EXCHANGE_FAILED', 'Authorization code and state are required');
     const stored = await this.redis.take(this.oauthStateKey(state));
     if (!stored) fail('OAUTH_EXCHANGE_FAILED', 'OAuth state is invalid or expired');
-    const record = JSON.parse(stored!) as { userId: string; provider: ProviderId; redirectUri: string; codeVerifier?: string };
-    if (record.provider !== provider || (redirectUri && redirectUri !== record.redirectUri)) fail('OAUTH_EXCHANGE_FAILED', 'OAuth state does not match this request');
+    const record = JSON.parse(stored!) as { userId: string; provider: ProviderId; returnUrl: string; callbackUrl: string; codeVerifier?: string };
+    if (record.provider !== provider) fail('OAUTH_EXCHANGE_FAILED', 'OAuth state does not match this request');
     let tokens;
-    try { tokens = await connectors[provider].exchangeCode(code, record.redirectUri, record.codeVerifier); }
+    try { tokens = await connectors[provider].exchangeCode(code, record.callbackUrl, record.codeVerifier); }
     catch { fail('OAUTH_EXCHANGE_FAILED', 'The provider rejected the authorization code'); }
     const encrypted = this.encryptedTokens(tokens!);
-    return this.prisma.toolConnection.upsert({
+    await this.prisma.toolConnection.upsert({
       where: { userId_provider: { userId: record.userId, provider } },
       // Reset the Outlook delta cursor on reconnect so a re-add always does a clean full reseed.
       update: { ...encrypted, status: 'connected', syncState: null, deltaLink: null },
       create: { userId: record.userId, provider, ...encrypted, status: 'connected' },
     });
+    return { returnUrl: record.returnUrl };
   }
   private static readonly NON_ACADEMIC_PATTERNS = [/\bhack(ing)?\b.*\b(bank|account|password|network)\b/i, /\bmake\b.*\b(bomb|explosive|weapon)\b/i, /\bcheat(ing)?\b.*\b(exam|test|spouse|partner)\b/i, /\b(illegal drugs?|buy drugs)\b/i, /\bself[- ]harm\b/i];
   private looksNonAcademic(prompt: string) { return AppService.NON_ACADEMIC_PATTERNS.some((pattern) => pattern.test(prompt)); }
@@ -1035,9 +1131,11 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (Object.keys(patch).length === 0) fail('VALIDATION_FAILED', 'No valid fields to update', 400);
     // A status change can lock someone out, so invalidate their sessions when they're no longer active.
     const bumpTokens = patch.status !== undefined && patch.status !== 'active';
+    const current = patch.status ? await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, fullName: true, status: true } }) : null;
     const updated = await this.prisma.user.update({ where: { id: targetId }, data: bumpTokens ? { ...patch, tokenVersion: { increment: 1 } } : patch });
     if (patch.status) await this.audit.log('AdminModule', 'account_lifecycle_change', 'info', `Administrator set account ${updated.email} status to ${patch.status}`, caller.id);
     if (patch.role) await this.audit.log('AdminModule', 'account_role_change', 'info', `Administrator set account ${updated.email} role to ${patch.role}`, caller.id);
+    if (patch.status && patch.status !== current?.status) await Promise.resolve(this.email?.sendAccountStatusChange?.(updated.email, updated.fullName ?? current?.fullName ?? 'there', patch.status)).catch(async () => this.audit.log('AdminModule', 'account_status_email_failed', 'warning', `Account-status email could not be delivered to ${updated.email}`, caller.id));
     return updated;
   }
 

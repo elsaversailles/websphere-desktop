@@ -15,8 +15,12 @@ export class MaintenanceGuard implements CanActivate {
     if (isPublic) return true;
     const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     if (request.user?.role === 'Administrator') return true;
-    const setting = await (this.prisma as any).systemSetting.findUnique({ where: { key: 'maintenanceMode' } }).catch(() => null);
-    const enabled = setting?.value === true || setting?.value?.enabled === true;
+    const [setting, schedule] = await Promise.all([
+      (this.prisma as any).systemSetting.findUnique({ where: { key: 'maintenanceMode' } }).catch(() => null),
+      (this.prisma as any).systemSetting.findUnique({ where: { key: 'maintenanceSchedule' } }).catch(() => null),
+    ]);
+    const scheduledAt = schedule?.value?.startsAt ? new Date(schedule.value.startsAt) : null;
+    const enabled = setting?.value === true || setting?.value?.enabled === true || Boolean(scheduledAt && !Number.isNaN(scheduledAt.getTime()) && scheduledAt <= new Date());
     if (enabled) throw new ServiceUnavailableException({ code: 'MAINTENANCE_MODE', message: 'WebSphere is temporarily unavailable for maintenance. Please try again shortly.' });
     return true;
   }

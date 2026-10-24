@@ -12,11 +12,11 @@ enum Role {
 }
 enum AccountStatus {
   active
+  archived
   suspended
   deactivated
   removed
   locked
-  archived
 }
 enum ProjectRole {
   Project_Leader
@@ -122,6 +122,7 @@ model User {
   tokenVersion Int @default(0)
   failedLogins Int @default(0)
   lockedAt DateTime?
+  lastLoginAt DateTime?
   archivedAt DateTime?
   createdAt DateTime @default(now())
   groupMembers GroupMember[]
@@ -135,6 +136,7 @@ model User {
   aiInteractions AiInteraction[]
   supportTickets SupportTicket[]
   announcements Announcement[]
+  @@index([status, lastLoginAt])
 }
 model Admin {
   id String @id @default(cuid())
@@ -196,7 +198,7 @@ model ChatMessage {
 }
 model Project {
   id String @id @default(cuid())
-  groupId String
+  groupId String?
   ideaId String? @unique
   title String
   description String @db.Text
@@ -205,7 +207,7 @@ model Project {
   status ProjectStatus @default(active)
   createdBy String
   createdAt DateTime @default(now())
-  group Group @relation(fields: [groupId], references: [id])
+  group Group? @relation(fields: [groupId], references: [id])
   idea Idea? @relation(fields: [ideaId], references: [id])
   members ProjectMember[]
   tasks Task[]

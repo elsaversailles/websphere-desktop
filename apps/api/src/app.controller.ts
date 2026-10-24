@@ -13,12 +13,21 @@ import { TurnService } from './turn.service.js';
 // message directly, so "Email is required" reaches the user instead of a generic banner; multiple
 // failures fall back to the generic summary since picking just one would be misleading.
 const parse = <T>(schema: z.ZodType<T>, value: unknown) => { const result = schema.safeParse(value); if (!result.success) { const fields = Object.fromEntries(result.error.issues.map((issue) => [String(issue.path[0] ?? 'body'), issue.message])); const message = result.error.issues.length === 1 ? result.error.issues[0].message : 'One or more fields are invalid'; throw new HttpException({ code: 'VALIDATION_FAILED', message, fields }, 400); } return result.data; };
+const securitySettingsSchema = z.object({
+  sessionTimeoutMinutes: z.number().int().min(5).max(480).optional(),
+  inactiveAccountAlerts: z.object({
+    enabled: z.boolean(),
+    recipientEmail: z.string().trim().max(320),
+    inactivityDays: z.number().int().min(7).max(365),
+  }).superRefine((value, context) => { if (value.enabled && !z.string().email().safeParse(value.recipientEmail).success) context.addIssue({ code: z.ZodIssueCode.custom, path: ['recipientEmail'], message: 'Enter a valid recipient email address' }); }).optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one security setting' });
 
 @Controller()
 export class AppController {
   constructor(private readonly app: AppService, private readonly storage: LocalStorageService, private readonly redis: RedisService, private readonly realtime: RealtimeGateway, private readonly turn: TurnService) {}
   private caller(auth?: string) { return this.app.caller(auth); }
   @Public() @Get('health') async health() { await this.app.prisma.$queryRaw`SELECT 1`; await this.redis.ping(); return { ok: true, database: 'up', redis: 'up', timestamp: new Date().toISOString() }; }
+  @Public() @Get('maintenance') maintenance() { return this.app.maintenanceStatus(); }
   @Public() @Post('auth/registration/otp') registrationOtp(@Body() body: unknown) { return this.app.sendRegistrationOtp(parse(registrationOtpRequestSchema, body).email); }
   @Public() @Post(['users', 'auth/register']) register(@Body() body: unknown) { return this.app.register(parse(verifiedRegisterSchema, body)); }
   @Public() @Post('auth/login') login(@Body() body: unknown) { const input = parse(loginSchema, body); return this.app.login(input.email, input.password); }
@@ -26,6 +35,7 @@ export class AppController {
   @Public() @Post('auth/refresh') refresh(@Body('refresh') refresh: string) { return this.app.refreshToken(refresh); }
   @Post('auth/logout') async logout(@Headers('authorization') auth?: string) { return this.app.logout(await this.caller(auth)); }
   @Public() @Post('auth/password/change') async change(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(passwordChangeSchema, body); return this.app.changePassword(await this.app.caller(auth, { allowLocked: true }), input.oldPassword, input.password, input.confirm); }
+  @Get('auth/session-policy') async sessionPolicy() { return this.app.sessionPolicy(); }
   @Public() @Post('auth/password/forgot') forgot(@Body() body: unknown) { return this.app.forgot(parse(passwordForgotSchema, body).email); }
   @Public() @Post('auth/deactivation-request') deactivationRequest(@Body() body: unknown) { const input = parse(deactivationRequestSchema, body); return this.app.requestAccountDeactivation(input.email, input.reason); }
   @Public() @Post('auth/password/reset') reset(@Body() body: unknown) { const input = parse(passwordResetSchema, body); return this.app.resetPassword(input.token, input.password, input.confirm); }
@@ -77,7 +87,7 @@ export class AppController {
   @Get('tasks/:id') async task(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.task(await this.caller(auth), id); }
   @Patch('tasks/:id') async updateTask(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.updateTask(await this.caller(auth), id, parse(taskSchema.partial(), body)); }
   @Post('tasks/:id/assign') async assign(@Headers('authorization') auth: string, @Param('id') id: string, @Body('assigneeId') assigneeId: string) { const result = await this.app.assignTask(await this.caller(auth), id, assigneeId); const task = await this.app.prisma.task.findUnique({ where: { id }, select: { projectId: true } }); if (task) this.realtime.publishTaskUpdated(task.projectId, await this.app.task(await this.caller(auth), id)); return result; }
-  @Patch('tasks/:id/status') async taskStatus(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { const caller = await this.caller(auth); const updated = await this.app.taskStatus(caller, id, parse(taskStatusSchema, body).status); this.realtime.publishTaskUpdated(updated.projectId, await this.app.task(caller, id)); return updated; }
+  @Patch('tasks/:id/status') async taskStatus(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { const caller = await this.caller(auth); const updated = await this.app.taskStatus(caller, id, parse(taskStatusSchema, body).status); this.realtime.publishTaskUpdated(updated.projectId, updated); return updated; }
 
   @Get('dashboard') async dashboard(@Headers('authorization') auth: string) { const caller = await this.caller(auth); const [projects, tasks, notifications, activity, online, announcements, milestones] = await Promise.all([this.app.projects(caller), this.app.myTasks(caller, {}), this.app.notifications(caller), this.app.activityFeed(caller, 8), this.app.onlineTeammates(caller, 8), this.app.announcements(caller, 4), this.app.milestones(caller, 5)]); return { glance: { activeProjects: projects.filter((p: any) => p.status === 'active').length, pendingTasks: tasks.filter((t: any) => t.status === 'pending').length, ideasSubmitted: await this.app.prisma.idea.count({ where: { authorId: caller.id } }) }, projects, tasks: tasks.slice(0, 8), notifications: notifications.slice(0, 8), activity, online, announcements, milestones }; }
   @GroupScope() @Post('groups/:id/announcements') async createAnnouncement(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.createAnnouncement(await this.caller(auth), id, parse(announcementSchema, body)); }
@@ -113,7 +123,7 @@ export class AppController {
 
   @Get('integrations/catalog') async catalog(@Headers('authorization') auth: string) { return this.app.integrations(await this.caller(auth)); }
   @Get('integrations/:provider/authorize') async authorize(@Headers('authorization') auth: string, @Param('provider') provider: any, @Query('redirectUri') redirectUri: string) { return this.app.oauthAuthorize(await this.caller(auth), provider, redirectUri); }
-  @Public() @Redirect() @Get('integrations/:provider/callback') async callback(@Param('provider') provider: any, @Query('code') code: string, @Query('state') state: string, @Query('redirectUri') redirectUri?: string) { await this.app.oauthCallback(provider, code, state, redirectUri); const destination = new URL('/integrations', process.env.WEB_ORIGIN ?? 'http://localhost:5173'); destination.searchParams.set('connected', String(provider)); return { url: destination.toString(), statusCode: 302 }; }
+  @Public() @Redirect() @Get('integrations/:provider/callback') async callback(@Param('provider') provider: any, @Query('code') code: string, @Query('state') state: string) { const completed = await this.app.oauthCallback(provider, code, state); const destination = new URL(completed.returnUrl); destination.searchParams.set('connected', String(provider)); return { url: destination.toString(), statusCode: 302 }; }
   @Get('integrations/connections') async connections(@Headers('authorization') auth: string) { return this.app.integrationConnections(await this.caller(auth)); }
   @Get('integrations/connections/:id/google-picker-token') async googlePickerToken(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.googlePickerToken(await this.caller(auth), id); }
   @Post('integrations/connections/:id/sync') async sync(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.syncIntegration(await this.caller(auth), id); }
@@ -131,6 +141,8 @@ export class AppController {
   @Roles('Administrator') @Post('admin/users/:id/archive') async archiveUser(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.adminArchiveUser(await this.caller(auth), id); }
   @Roles('Administrator') @Post('admin/users/:id/restore') async restoreUser(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.adminRestoreUser(await this.caller(auth), id); }
   @Roles('Administrator') @Get('admin/logs') async logs(@Headers('authorization') auth: string) { const caller = await this.caller(auth); await this.app.admin(caller); return this.app.prisma.auditLog.findMany({ orderBy: { createdAt: 'desc' } }); }
+  @Roles('Administrator') @Get('admin/security-settings') async securitySettings(@Headers('authorization') auth: string) { return this.app.securitySettings(await this.caller(auth)); }
+  @Roles('Administrator') @Put('admin/security-settings') async updateSecuritySettings(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.updateSecuritySettings(await this.caller(auth), parse(securitySettingsSchema, body)); }
   @Roles('Administrator') @Get('admin/settings') async settings(@Headers('authorization') auth: string) { const caller = await this.caller(auth); await this.app.admin(caller); return this.app.prisma.systemSetting.findMany(); }
-  @Roles('Administrator') @Put('admin/settings') async setSettings(@Headers('authorization') auth: string, @Body() body: Record<string, unknown>) { const caller = await this.caller(auth); await this.app.admin(caller); return Promise.all(Object.entries(body).map(([key, value]) => this.app.prisma.systemSetting.upsert({ where: { key }, update: { value: value as any, updatedBy: caller.id }, create: { key, value: value as any, updatedBy: caller.id } }))); }
+  @Roles('Administrator') @Put('admin/settings') async setSettings(@Headers('authorization') auth: string, @Body() body: Record<string, unknown>) { const caller = await this.caller(auth); await this.app.admin(caller); const settings = body.maintenanceMode === false && !Object.prototype.hasOwnProperty.call(body, 'maintenanceSchedule') ? { ...body, maintenanceSchedule: null } : body; return Promise.all(Object.entries(settings).map(([key, value]) => this.app.prisma.systemSetting.upsert({ where: { key }, update: { value: value as any, updatedBy: caller.id }, create: { key, value: value as any, updatedBy: caller.id } }))); }
 }

@@ -448,9 +448,8 @@ export function IntegrationsPage({ notify }: { notify: Notice }) {
     if (!['google', 'microsoft', 'trello', 'asana', 'canva'].includes(tool.provider)) { notify(`${tool.name} is not available yet.`); return; }
     setConnecting(tool.provider);
     try {
-      const callbackPath = apiUrl(`/integrations/${tool.provider}/callback`);
-      const callbackUrl = callbackPath.startsWith('http') ? callbackPath : new URL(callbackPath, window.location.origin).toString();
-      const { authorizeUrl } = await request<{ authorizeUrl: string }>(`/integrations/${tool.provider}/authorize?redirectUri=${encodeURIComponent(callbackUrl)}`);
+      const returnUrl = new URL('/integrations', window.location.origin).toString();
+      const { authorizeUrl } = await request<{ authorizeUrl: string }>(`/integrations/${tool.provider}/authorize?redirectUri=${encodeURIComponent(returnUrl)}`);
       window.location.assign(authorizeUrl);
     } catch (error) { notify(error instanceof Error ? error.message : `Could not connect ${tool.name}.`); setConnecting(null); }
   }
@@ -460,16 +459,27 @@ export function IntegrationsPage({ notify }: { notify: Notice }) {
 }
 
 type AuditLogEntry = { id: string; actorId: string | null; module: string; activity: string; severity: string; description: string; createdAt: string };
+type InactiveAccountAlerts = { enabled: boolean; recipientEmail: string; inactivityDays: number };
+type AdminSecuritySettings = { sessionTimeoutMinutes: number; inactiveAccountAlerts: InactiveAccountAlerts };
+const defaultAdminSecuritySettings: AdminSecuritySettings = { sessionTimeoutMinutes: 30, inactiveAccountAlerts: { enabled: false, recipientEmail: '', inactivityDays: 30 } };
 
-export function AdminSettingsPage({ notify }: { notify: Notice }) {
+export function AdminSettingsPage({ notify, onSessionInvalidated }: { notify: Notice; onSessionInvalidated: () => void }) {
   const [maintenance, setMaintenance] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [security, setSecurity] = useState<AdminSecuritySettings>(defaultAdminSecuritySettings);
+  const [securityDialog, setSecurityDialog] = useState<'password' | 'timeout' | 'email' | null>(null);
+  const [timeoutDraft, setTimeoutDraft] = useState(String(defaultAdminSecuritySettings.sessionTimeoutMinutes));
+  const [emailDraft, setEmailDraft] = useState<InactiveAccountAlerts>(defaultAdminSecuritySettings.inactiveAccountAlerts);
+  const [securitySaving, setSecuritySaving] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logs, setLogs] = useState<AuditLogEntry[] | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
   const latestRelease = RELEASE_NOTES[0];
-  useEffect(() => { void request<Array<{ key: string; value: unknown }>>('/admin/settings').then((rows) => setMaintenance(Boolean(rows.find((row) => row.key === 'maintenanceMode')?.value))).catch(() => undefined); }, []);
+  useEffect(() => {
+    void request<Array<{ key: string; value: unknown }>>('/admin/settings').then((rows) => setMaintenance(Boolean(rows.find((row) => row.key === 'maintenanceMode')?.value))).catch(() => undefined);
+    void request<AdminSecuritySettings>('/admin/security-settings').then(setSecurity).catch((error: Error) => notify(error.message));
+  }, [notify]);
   async function toggleMaintenance() {
     const next = !maintenance;
     setSaving(true);
@@ -484,7 +494,48 @@ export function AdminSettingsPage({ notify }: { notify: Notice }) {
     catch (error) { notify(error instanceof Error ? error.message : 'Could not load system logs.'); setLogs([]); }
     finally { setLogsLoading(false); }
   }
-  return <section className="sp on"><Head title="System Settings" /><div className="g2 settings-top"><div className="cc"><div className="cc-head"><h3>General Configuration</h3></div><div className="lbl">System Name</div><div className="ifield"><span>WebSphere</span></div><div className="lbl">Max Ideas per AI Search</div><div className="ifield"><span>10 ideas (maximum)</span></div><button className="btn" onClick={() => notify('Settings saved!')}>Save Settings</button></div><div className="cc"><div className="cc-head"><h3>Security & Access</h3></div><Security title="Admin Password" description="Change admin credentials" action="Change" onClick={() => notify('Password change instructions sent.')} /><Security title="Session Timeout" description="Currently: 30 minutes" action="Edit" onClick={() => notify('Session settings are ready to edit.')} /><Security title="Email Notifications" description="Inactive account alerts" action="Configure" onClick={() => notify('Email settings are ready to configure.')} /><Security title="System Logs" description="View recent activity" action="View Logs" onClick={() => void openLogs()} /></div></div><div className="cc maintenance-card"><div className="cc-head"><h3>Maintenance & Updates</h3></div><div className="g3"><Security title="Software Update" description={`Version ${latestRelease.version} · released ${latestRelease.releaseDate}`} action="View details" onClick={() => setUpdateOpen(true)} /><Security title="Backup Database" description="Backups use your Linux instance" action="Backup Now" onClick={() => notify('Database backup request received.')} /><Security danger={maintenance} title="Maintenance Mode" description={maintenance ? 'Enabled — only administrators can access WebSphere' : 'Disabled — WebSphere is available to everyone'} action={saving ? 'Saving…' : maintenance ? 'Disable' : 'Enable'} onClick={() => void toggleMaintenance()} /></div></div><div className="cc"><div className="cc-head"><h3>Notifications</h3><button className="btn-o btn-sm">Mark All Read</button></div><Empty>System notifications will appear here.</Empty></div>
+  function openSecurityDialog(dialog: 'password' | 'timeout' | 'email') {
+    if (dialog === 'timeout') setTimeoutDraft(String(security.sessionTimeoutMinutes));
+    if (dialog === 'email') setEmailDraft(security.inactiveAccountAlerts);
+    setSecurityDialog(dialog);
+  }
+  async function saveTimeout(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const sessionTimeoutMinutes = Number(timeoutDraft);
+    if (!Number.isInteger(sessionTimeoutMinutes) || sessionTimeoutMinutes < 5 || sessionTimeoutMinutes > 480) return notify('Choose a whole number from 5 to 480 minutes.');
+    setSecuritySaving(true);
+    try {
+      const updated = await request<AdminSecuritySettings>('/admin/security-settings', { method: 'PUT', body: JSON.stringify({ sessionTimeoutMinutes }) });
+      setSecurity(updated); setSecurityDialog(null); notify('Session timeout updated. New activity is required before the selected timeout expires.');
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not update the session timeout.'); }
+    finally { setSecuritySaving(false); }
+  }
+  async function saveInactiveAccountAlerts(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const recipientEmail = emailDraft.recipientEmail.trim();
+    if (emailDraft.enabled && !recipientEmail) return notify('Enter the email address that should receive inactive-account alerts.');
+    setSecuritySaving(true);
+    try {
+      const updated = await request<AdminSecuritySettings>('/admin/security-settings', { method: 'PUT', body: JSON.stringify({ inactiveAccountAlerts: { ...emailDraft, recipientEmail } }) });
+      setSecurity(updated); setSecurityDialog(null); notify(updated.inactiveAccountAlerts.enabled ? 'Inactive-account email alerts enabled.' : 'Inactive-account email alerts disabled.');
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not save email notification settings.'); }
+    finally { setSecuritySaving(false); }
+  }
+  async function changeAdminPassword(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const values = new FormData(event.currentTarget);
+    if (values.get('password') !== values.get('confirm')) return notify('Your new password and confirmation do not match.');
+    setSecuritySaving(true);
+    try {
+      await request('/auth/password/change', { method: 'POST', body: JSON.stringify({ oldPassword: values.get('oldPassword'), password: values.get('password'), confirm: values.get('confirm') }) });
+      notify('Password changed. Please sign in again.'); onSessionInvalidated();
+    } catch (error) { notify(error instanceof Error ? error.message : 'Password could not be changed.'); }
+    finally { setSecuritySaving(false); }
+  }
+  return <section className="sp on"><Head title="System Settings" /><div className="g2 settings-top"><div className="cc"><div className="cc-head"><h3>General Configuration</h3></div><div className="lbl">System Name</div><div className="ifield"><span>WebSphere</span></div><div className="lbl">Max Ideas per AI Search</div><div className="ifield"><span>10 ideas (maximum)</span></div><button className="btn" onClick={() => notify('Settings saved!')}>Save Settings</button></div><div className="cc"><div className="cc-head"><h3>Security & Access</h3></div><Security title="Admin Password" description="Change this administrator account's password" action="Change" onClick={() => openSecurityDialog('password')} /><Security title="Session Timeout" description={`Currently: ${security.sessionTimeoutMinutes} minutes`} action="Edit" onClick={() => openSecurityDialog('timeout')} /><Security title="Email Notifications" description={security.inactiveAccountAlerts.enabled ? `Inactive account alerts every ${security.inactiveAccountAlerts.inactivityDays} days` : 'Inactive account alerts are disabled'} action="Configure" onClick={() => openSecurityDialog('email')} /><Security title="System Logs" description="View recent activity" action="View Logs" onClick={() => void openLogs()} /></div></div><div className="cc maintenance-card"><div className="cc-head"><h3>Maintenance & Updates</h3></div><div className="g3"><Security title="Software Update" description={`Version ${latestRelease.version} · released ${latestRelease.releaseDate}`} action="View details" onClick={() => setUpdateOpen(true)} /><Security title="Backup Database" description="Backups use your Linux instance" action="Backup Now" onClick={() => notify('Database backup request received.')} /><Security danger={maintenance} title="Maintenance Mode" description={maintenance ? 'Enabled — only administrators can access WebSphere' : 'Disabled — WebSphere is available to everyone'} action={saving ? 'Saving…' : maintenance ? 'Disable' : 'Enable'} onClick={() => void toggleMaintenance()} /></div></div><div className="cc"><div className="cc-head"><h3>Notifications</h3><button className="btn-o btn-sm">Mark All Read</button></div><Empty>System notifications will appear here.</Empty></div>
+    {securityDialog === 'password' ? <SecurityModal title="Change Admin Password" onClose={() => setSecurityDialog(null)}><form onSubmit={(event) => void changeAdminPassword(event)}><p className="security-modal-help">Changing your password signs this administrator account out of every active session.</p><label className="lbl">Current password</label><input className="ifield" name="oldPassword" type="password" autoComplete="current-password" required /><label className="lbl">New password</label><input className="ifield" name="password" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><label className="lbl">Confirm new password</label><input className="ifield" name="confirm" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><div className="modal-acts"><button type="button" className="btn-o" disabled={securitySaving} onClick={() => setSecurityDialog(null)}>Cancel</button><button className="btn" disabled={securitySaving}>{securitySaving ? 'Changing…' : 'Change Password'}</button></div></form></SecurityModal> : null}
+    {securityDialog === 'timeout' ? <SecurityModal title="Edit Session Timeout" onClose={() => setSecurityDialog(null)}><form onSubmit={(event) => void saveTimeout(event)}><p className="security-modal-help">Users are signed out after this amount of inactivity. Choose 5 to 480 minutes.</p><label className="lbl" htmlFor="session-timeout-minutes">Inactivity timeout (minutes)</label><input className="ifield" id="session-timeout-minutes" type="number" min="5" max="480" step="1" required value={timeoutDraft} onChange={(event) => setTimeoutDraft(event.target.value)} /><div className="modal-acts"><button type="button" className="btn-o" disabled={securitySaving} onClick={() => setSecurityDialog(null)}>Cancel</button><button className="btn" disabled={securitySaving}>{securitySaving ? 'Saving…' : 'Save Timeout'}</button></div></form></SecurityModal> : null}
+    {securityDialog === 'email' ? <SecurityModal title="Inactive Account Email Alerts" onClose={() => setSecurityDialog(null)}><form onSubmit={(event) => void saveInactiveAccountAlerts(event)}><label className="security-checkbox"><input type="checkbox" checked={emailDraft.enabled} onChange={(event) => setEmailDraft((current) => ({ ...current, enabled: event.target.checked }))} /> Send a daily digest when inactive accounts are found</label><label className="lbl" htmlFor="inactive-alert-recipient">Recipient email</label><input className="ifield" id="inactive-alert-recipient" type="email" value={emailDraft.recipientEmail} disabled={!emailDraft.enabled} required={emailDraft.enabled} onChange={(event) => setEmailDraft((current) => ({ ...current, recipientEmail: event.target.value }))} placeholder="admin@example.edu" /><label className="lbl" htmlFor="inactive-alert-days">Alert when an account has not signed in for</label><select className="ifield" id="inactive-alert-days" value={emailDraft.inactivityDays} disabled={!emailDraft.enabled} onChange={(event) => setEmailDraft((current) => ({ ...current, inactivityDays: Number(event.target.value) }))}>{[7, 14, 30, 60, 90, 180, 365].map((days) => <option key={days} value={days}>{days} days</option>)}</select><p className="security-modal-help">The daily digest lists active accounts with no sign-in since the selected period, including accounts that have never signed in.</p><div className="modal-acts"><button type="button" className="btn-o" disabled={securitySaving} onClick={() => setSecurityDialog(null)}>Cancel</button><button className="btn" disabled={securitySaving}>{securitySaving ? 'Saving…' : 'Save Alerts'}</button></div></form></SecurityModal> : null}
     {logsOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLogsOpen(false); }}>
       <div className="modal-box logs-modal" role="dialog" aria-modal="true" aria-labelledby="settings-system-logs-title">
         <div className="modal-ttl"><span id="settings-system-logs-title">System Logs</span><button type="button" className="modal-close" aria-label="Close system logs" onClick={() => setLogsOpen(false)}>×</button></div>
@@ -554,6 +605,7 @@ function RiskRing({ score, title }: { score: number; title: string }) { const le
 function SettingsTitle({ children }: { children: React.ReactNode }) { return <div className="settings-label">{children}</div>; }
 function Toggle({ title, description, checked, onChange, disabled = false }: { title: string; description: string; checked: boolean; onChange: () => void; disabled?: boolean }) { return <div className="setting-row"><div><strong>{title}</strong><span>{description}</span></div><button type="button" className={`big-toggle ${checked ? 'on' : ''}`} aria-pressed={checked} disabled={disabled} onClick={onChange}><i /></button></div>; }
 function Security({ title, description, action, onClick, danger = false }: { title: string; description: string; action: string; onClick: () => void; danger?: boolean }) { return <div className={`security-row ${danger ? 'danger' : ''}`}><div><strong>{title}</strong><span>{description}</span></div><button className={danger ? 'btn-red btn-sm' : 'btn-o btn-sm'} onClick={onClick}>{action}</button></div>; }
+function SecurityModal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) { return <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="modal-box security-modal" role="dialog" aria-modal="true" aria-labelledby="security-settings-dialog-title"><div className="modal-ttl"><span id="security-settings-dialog-title">{title}</span><button type="button" className="modal-close" aria-label={`Close ${title}`} onClick={onClose}>×</button></div>{children}</div></div>; }
 function date(value?: string | null) { return value ? new Date(value).toLocaleDateString() : 'Not set'; }
 function relativeDate(value?: string | null) {
   if (!value) return 'not yet';

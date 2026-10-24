@@ -5,6 +5,8 @@ const environmentSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
   WEB_ORIGIN: z.string().min(1).default('http://localhost:5173'),
+  /** Public API base used by OAuth providers, e.g. https://websphere.example/api. */
+  OAUTH_CALLBACK_BASE_URL: z.string().url().optional(),
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().url(),
   JWT_ACCESS_SECRET: z.string().min(32),

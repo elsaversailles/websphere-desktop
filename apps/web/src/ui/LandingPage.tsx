@@ -20,6 +20,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
         <p>Group chat, idea voting, tasks, deadlines, and progress that tracks itself, so your team stops losing the project across five different apps</p>
         <div className="lp-hero-actions">
           <button type="button" className="lp-btn lp-btn-lg" onClick={() => onGetStarted('register')}>Get started free</button>
+          <a className="lp-ghost lp-btn-lg" href="/downloads/websphere-mobile.apk">Download Our App</a>
           <button type="button" className="lp-ghost lp-btn-lg" onClick={() => onGetStarted('login')}>I already have an account</button>
         </div>
       </div>

@@ -9,7 +9,7 @@ const user = { id: 'user-1', role: 'Project_Member' as const, tokenVersion: 0, s
 function sessionService() {
   const records = new Map<string, string>();
   const redis = {
-    set: vi.fn(async (key: string, value: string) => { records.set(key, value); }),
+    set: vi.fn(async (key: string, value: string, _expiresInSeconds?: number) => { records.set(key, value); }),
     take: vi.fn(async (key: string) => { const value = records.get(key) ?? null; records.delete(key); return value; }),
     get: vi.fn(async (key: string) => records.get(key) ?? null),
     addToSet: vi.fn(async () => {}),
@@ -21,7 +21,7 @@ function sessionService() {
     accessSecret: secret,
     redis,
     config: { get: (key: string) => key === 'JWT_REFRESH_TTL' ? '180d' : '15m' },
-    prisma: { user: { findUnique: vi.fn().mockResolvedValue(user) } },
+    prisma: { user: { findUnique: vi.fn().mockResolvedValue(user) }, systemSetting: { findUnique: vi.fn().mockResolvedValue(null) } },
   });
   return { service, redis };
 }
@@ -49,14 +49,28 @@ describe('login session lifetime', () => {
     const original = (await jwtVerify(first.refresh, secret)).payload;
 
     vi.setSystemTime(new Date('2026-03-01T00:00:00Z'));
+    // The user was active before the token rotated; a timeout must not turn a normal refresh
+    // into a new session or shorten its original absolute lifetime.
+    await redis.set(`auth:session:${String(original.sid)}`, String(Date.now()), sixMonthsInSeconds);
     const rotated = await service.refreshToken(first.refresh);
     const next = (await jwtVerify(rotated.refresh, secret)).payload;
 
     expect(next.exp).toBe(original.exp);
     expect(next.sessionStartedAt).toBe(original.iat);
-    expect(redis.set).toHaveBeenLastCalledWith(expect.stringContaining('auth:refresh:'), expect.any(String), original.exp! - Math.floor(Date.now() / 1000));
+    expect(redis.set).toHaveBeenCalledWith(expect.stringContaining('auth:refresh:'), expect.any(String), original.exp! - Math.floor(Date.now() / 1000));
 
     vi.setSystemTime(new Date((original.exp! + 1) * 1000));
     await expect(service.refreshToken(rotated.refresh)).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('does not refresh a session after its configured inactivity timeout', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const { service } = sessionService();
+    (service as any).prisma.systemSetting.findUnique.mockResolvedValue({ value: 5 });
+    const session = await service.issue(user);
+
+    vi.setSystemTime(new Date('2026-01-01T00:06:00Z'));
+    await expect(service.refreshToken(session.refresh)).rejects.toMatchObject({ status: 401 });
   });
 });

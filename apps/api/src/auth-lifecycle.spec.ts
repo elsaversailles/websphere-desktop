@@ -11,6 +11,7 @@ function serviceWith(overrides: Record<string, unknown> = {}) {
     redis: { take: vi.fn(), get: vi.fn(), set: vi.fn(), delete: vi.fn(), setMembers: vi.fn().mockResolvedValue([]) },
     config: { get: vi.fn((key: string) => key === 'PASSWORD_RESET_TTL_SECONDS' ? 3600 : 'test') },
     email: { sendPasswordReset: vi.fn().mockResolvedValue(false) },
+    audit: { log: vi.fn().mockResolvedValue(undefined) },
     ...overrides,
   });
   return service as AppService & any;
