@@ -448,9 +448,8 @@ export function IntegrationsPage({ notify }: { notify: Notice }) {
     if (!['google', 'microsoft', 'trello', 'asana', 'canva'].includes(tool.provider)) { notify(`${tool.name} is not available yet.`); return; }
     setConnecting(tool.provider);
     try {
-      const callbackPath = apiUrl(`/integrations/${tool.provider}/callback`);
-      const callbackUrl = callbackPath.startsWith('http') ? callbackPath : new URL(callbackPath, window.location.origin).toString();
-      const { authorizeUrl } = await request<{ authorizeUrl: string }>(`/integrations/${tool.provider}/authorize?redirectUri=${encodeURIComponent(callbackUrl)}`);
+      const returnUrl = new URL('/integrations', window.location.origin).toString();
+      const { authorizeUrl } = await request<{ authorizeUrl: string }>(`/integrations/${tool.provider}/authorize?redirectUri=${encodeURIComponent(returnUrl)}`);
       window.location.assign(authorizeUrl);
     } catch (error) { notify(error instanceof Error ? error.message : `Could not connect ${tool.name}.`); setConnecting(null); }
   }

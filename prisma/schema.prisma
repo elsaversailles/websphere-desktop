@@ -12,6 +12,7 @@ enum Role {
 }
 enum AccountStatus {
   active
+  archived
   suspended
   deactivated
   removed
@@ -194,7 +195,7 @@ model ChatMessage {
 }
 model Project {
   id String @id @default(cuid())
-  groupId String
+  groupId String?
   ideaId String? @unique
   title String
   description String @db.Text
@@ -203,7 +204,7 @@ model Project {
   status ProjectStatus @default(active)
   createdBy String
   createdAt DateTime @default(now())
-  group Group @relation(fields: [groupId], references: [id])
+  group Group? @relation(fields: [groupId], references: [id])
   idea Idea? @relation(fields: [ideaId], references: [id])
   members ProjectMember[]
   tasks Task[]

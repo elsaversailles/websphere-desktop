@@ -344,7 +344,7 @@ function AdminUserEditModal({ user, onClose, onSaved, notify }: { user: AdminUse
       <label className="lbl" htmlFor="ur-edit-role">Role</label>
       <select id="ur-edit-role" className="ifield" value={role} onChange={(event) => setRole(event.target.value)}><option value="Administrator">Administrator</option><option value="Project_Leader">Project Leader</option><option value="Project_Member">Project Member</option></select>
       <label className="lbl" htmlFor="ur-edit-status">Status</label>
-      <select id="ur-edit-status" className="ifield" value={status} onChange={(event) => setStatus(event.target.value)}><option value="active">Active</option><option value="suspended">Suspended</option><option value="deactivated">Deactivated</option><option value="locked">Locked</option></select>
+      <select id="ur-edit-status" className="ifield" value={status} onChange={(event) => setStatus(event.target.value)}><option value="active">Active</option><option value="archived">Archived</option><option value="suspended">Suspended</option><option value="deactivated">Deactivated</option><option value="locked">Locked</option></select>
       <div className="ur-edit-actions"><button type="button" className="btn-o" disabled={saving} onClick={onClose}>Cancel</button><button type="button" className="btn" disabled={saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save changes'}</button></div>
     </div>
   </div>;

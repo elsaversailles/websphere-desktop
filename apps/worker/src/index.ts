@@ -4,6 +4,8 @@ const prisma: any = new PrismaClient();
 const connection = { url: process.env.REDIS_URL ?? 'redis://localhost:6379' };
 const deadlineScanQueue = new Queue('deadline-scan', { connection });
 void deadlineScanQueue.add('hourly-scan', {}, { repeat: { every: 3_600_000 }, jobId: 'deadline-scan-hourly' });
+const maintenanceScanQueue = new Queue('maintenance-scan', { connection });
+void maintenanceScanQueue.add('five-minute-scan', {}, { repeat: { every: 300_000 }, jobId: 'maintenance-scan-five-minute' });
 const statsFor = (tasks: Array<{ status: string; deadline: Date | null; completedAt: Date | null }>, deadline: Date | null) => {
   const completed = tasks.filter((task) => task.status === 'completed');
   const onTime = completed.filter((task) => !task.deadline || (task.completedAt && task.completedAt <= task.deadline));
@@ -27,26 +29,51 @@ async function notifyOnce(userId: string, type: string, message: string, related
 new Worker('deadline-scan', async () => {
   const now = new Date();
   const soon = new Date(now.getTime() + 24 * 3600000);
+  const dayKey = (date: Date) => date.toISOString().slice(0, 10);
+  const today = dayKey(now);
+  const soonDay = dayKey(soon);
   const tasks = await prisma.task.findMany({ where: { status: { not: 'completed' }, deadline: { not: null } }, include: { assignments: { where: { active: true } } } });
   for (const task of tasks) {
     if (!task.deadline) continue;
-    const overdue = task.deadline < now;
-    const upcoming = !overdue && task.deadline <= soon;
+    const deadlineDay = dayKey(task.deadline);
+    const overdue = deadlineDay < today;
+    const dueToday = deadlineDay === today;
+    const upcoming = !overdue && deadlineDay <= soonDay;
     if (!overdue && !upcoming) continue;
     for (const assignment of task.assignments) {
       if (overdue) await notifyOnce(assignment.assigneeId, 'delay_risk', `Task “${task.title}” is overdue.`, task.id, 'task');
-      else await notifyOnce(assignment.assigneeId, 'deadline_reminder', `Task “${task.title}” is due within 24 hours.`, task.id, 'task');
+      else await notifyOnce(assignment.assigneeId, 'deadline_reminder', dueToday ? `Task “${task.title}” is due today.` : `Task “${task.title}” is due within 24 hours.`, task.id, 'task');
     }
   }
   const projects = await prisma.project.findMany({ where: { status: { not: 'completed' }, deadline: { not: null } }, include: { members: true } });
   for (const project of projects) {
     if (!project.deadline) continue;
-    const overdue = project.deadline < now;
-    const upcoming = !overdue && project.deadline <= soon;
+    const deadlineDay = dayKey(project.deadline);
+    const overdue = deadlineDay < today;
+    const upcoming = !overdue && deadlineDay <= soonDay;
     if (!overdue && !upcoming) continue;
     for (const member of project.members) {
       if (overdue) await notifyOnce(member.userId, 'delay_risk', `Project “${project.title}” has passed its deadline.`, project.id, 'project');
       else await notifyOnce(member.userId, 'deadline_reminder', `Project “${project.title}” is due within 24 hours.`, project.id, 'project');
     }
+  }
+}, { connection });
+
+/** Activate due maintenance windows and create one advance notice per active user. */
+new Worker('maintenance-scan', async () => {
+  const setting = await prisma.systemSetting.findUnique({ where: { key: 'maintenanceSchedule' } });
+  const schedule = setting?.value as { startsAt?: string; notifiedAt?: string } | null;
+  if (!schedule?.startsAt) return;
+  const startsAt = new Date(schedule.startsAt);
+  if (Number.isNaN(startsAt.getTime())) return;
+  const now = new Date();
+  if (startsAt <= now) {
+    await prisma.systemSetting.upsert({ where: { key: 'maintenanceMode' }, update: { value: true }, create: { key: 'maintenanceMode', value: true } });
+    return;
+  }
+  if (!schedule.notifiedAt && startsAt.getTime() - now.getTime() <= 24 * 3600000) {
+    const users = await prisma.user.findMany({ where: { status: 'active' }, select: { id: true } });
+    await prisma.notification.createMany({ data: users.map((user: { id: string }) => ({ userId: user.id, type: 'announcement', message: `Scheduled maintenance starts ${startsAt.toLocaleString()}. WebSphere will be unavailable while it is in progress.`, relatedId: 'maintenance', relatedType: 'system' })) });
+    await prisma.systemSetting.update({ where: { key: 'maintenanceSchedule' }, data: { value: { ...schedule, notifiedAt: now.toISOString() } } });
   }
 }, { connection });

@@ -57,6 +57,24 @@ export class EmailService {
     return true;
   }
 
+  /** Sent after every administrator-controlled status transition, including archive and restore. */
+  async sendAccountStatusChange(email: string, fullName: string, status: string) {
+    const restored = status === 'active';
+    const archived = status === 'archived';
+    const subject = restored ? 'Your WebSphere account has been restored' : `Your WebSphere account status is now ${status}`;
+    const message = restored
+      ? `Hi ${fullName}, your WebSphere account has been successfully restored. You can access the system again.`
+      : archived
+        ? `Hi ${fullName}, your WebSphere account has been archived. Please contact our admin if you need help.`
+        : `Hi ${fullName}, an administrator changed your WebSphere account status to ${status}.`;
+    await this.send({
+      from: this.config.get('SES_FROM'), to: email, subject,
+      text: message,
+      html: `<p>${message.replace(/[&<>]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[char] ?? char))}</p>`,
+    }, 'Account-status email could not be delivered. Verify the SES sender and recipient configuration, then try again.');
+    return true;
+  }
+
   // Routed to the support inbox rather than the requester: a signed-out user is asking the team to
   // close their account, so the support staff needs the details and a reply-to that reaches them.
   async sendDeactivationRequest(requesterEmail: string, reason: string) {

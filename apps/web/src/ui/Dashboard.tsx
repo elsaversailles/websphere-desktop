@@ -4,7 +4,7 @@ import { getAccessToken, request, socketBaseUrl } from '../api';
 import type { GroupHub as GroupHubData, GroupSummary } from './types';
 import { type Tone, avatarTone, dateKey, deadlineCountdown, deadlineHealth, initials, priorityHealth, projectHealth, relativeTime, worstTone } from './health';
 
-type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string }; tasks: Array<{ status: string }>; _count?: { members: number } };
+type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string } | null; tasks: Array<{ status: string }>; _count?: { members: number } };
 type DashboardTask = { id: string; title: string; status: string; priority?: string | null; deadline?: string | null; project?: { id: string; title: string } | null };
 type DashboardNotification = { id: string; message: string; read: boolean; createdAt?: string; relatedId?: string | null; relatedType?: string | null };
 type DashboardActivity = { id: string; type: string; fromValue?: string | null; toValue?: string | null; createdAt: string; taskTitle?: string | null; projectTitle: string; actor?: { id: string; fullName: string; avatarUrl?: string | null } | null };
@@ -114,11 +114,10 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
   }
   async function createProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!createGroupId) return notify('Choose a group for this project.');
     const values = new FormData(event.currentTarget);
     setSaving(true);
     try {
-      const project = await request<{ id: string }>('/projects', { method: 'POST', body: JSON.stringify({ groupId: createGroupId, title: values.get('title'), description: values.get('description'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, memberIds: selectedMemberIds }) });
+      const project = await request<{ id: string }>('/projects', { method: 'POST', body: JSON.stringify({ ...(createGroupId ? { groupId: createGroupId } : {}), title: values.get('title'), description: values.get('description'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, memberIds: selectedMemberIds }) });
       await Promise.all(selectedMemberIds.map(async (userId) => {
         const responsibility = String(values.get(`responsibility-${userId}`) ?? '').trim();
         if (responsibility) await request(`/projects/${project.id}/team/${userId}`, { method: 'PATCH', body: JSON.stringify({ responsibility }) });
@@ -159,7 +158,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
     <div className="ph"><div><h2>Dashboard</h2><div className="ph-sub dashboard-welcome">Welcome, {name}!</div></div><div className="ph-acts"><button className="ai-head-btn" title="WebSphere AI" onClick={() => onPage('assistant')}>✦</button><button className="new-btn" title="Create new project" onClick={() => void openCreateDialog()}>+</button><div className="notif-popover-wrap" ref={notificationsRef}><button className="notif-head-btn" title="Notifications" aria-label="Notifications" aria-haspopup="dialog" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen((open) => !open)}><BellIcon />{unread ? <span className="notif-head-dot">{unread > 9 ? '9+' : unread}</span> : null}</button>{notificationsOpen ? <section className="notif-popover" role="dialog" aria-label="Notifications"><header className="notif-popover-header"><h3>Notifications</h3><button type="button" onClick={() => { setNotificationsOpen(false); onPage('notifications'); }}>View All</button></header><div className="notif-popover-list">{data.notifications.length ? data.notifications.slice(0, 4).map((item) => <button type="button" className={`notif-popover-item ${item.read ? 'read' : ''}`} key={item.id} onClick={() => activateNotification(item)}><span className="notif-popover-dot" /><span><strong>{item.message}</strong><small>{item.createdAt ? relativeTime(item.createdAt) : item.read ? 'Read' : 'New'}</small></span></button>) : <p className="notif-popover-empty">You have no notifications yet.</p>}</div></section> : null}</div></div></div>
     {createOpen ? <div className="modal-ov open project-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setCreateOpen(false); }}><div className="modal-box project-modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title"><div className="modal-ttl"><div><span id="project-modal-title">Create New Project</span><small>New Project Details</small></div><button type="button" className="modal-close" onClick={() => setCreateOpen(false)} aria-label="Close new project form">×</button></div><form className="project-create-form" onSubmit={createProject}>
       <label className="lbl" htmlFor="project-title">Project Name</label><input className="ifield" id="project-title" name="title" required minLength={2} maxLength={180} placeholder="Enter project name" />
-      <label className="lbl" htmlFor="project-group">Project Group</label><select className="ifield" id="project-group" value={createGroupId} onChange={(event) => void pickCreateGroup(event.target.value)} required><option value="">Select project group</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select>
+      <label className="lbl" htmlFor="project-group">Project Group</label><select className="ifield" id="project-group" value={createGroupId} onChange={(event) => void pickCreateGroup(event.target.value)}><option value="">No group — independent project</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select>
       <label className="lbl">Team Members</label><fieldset className="project-member-picker" disabled={!createGroupHub}><legend className="sr-only">Team Members</legend>{createGroupHub ? createGroupHub.group.members.map((member) => <label className="project-member-option" key={member.userId}><input type="checkbox" checked={selectedMemberIds.includes(member.userId)} onChange={() => toggleProjectMember(member.userId)} /><span>{member.user.fullName}</span></label>) : <span>Add members by selecting a project group first.</span>}</fieldset>
       <label className="lbl">Task Assignment Per Member</label><div className={`project-responsibilities ${selectedMemberIds.length ? '' : 'empty'}`}>{selectedMemberIds.length ? createGroupHub?.group.members.filter((member) => selectedMemberIds.includes(member.userId)).map((member) => <label key={member.userId}><span>{member.user.fullName}</span><input className="ifield" name={`responsibility-${member.userId}`} placeholder={`Assign ${member.user.fullName} a responsibility`} /></label>) : <span>Add members first, then assign responsibilities here.</span>}</div>
       <label className="lbl" htmlFor="external-tools">External Tools Will Be Used</label><select className="ifield project-tools-select" id="external-tools" name="externalTools" defaultValue="" aria-label="External tools used for this project"><option value="" disabled>Select external tools</option><option value="google">Google Workspace</option><option value="microsoft">Microsoft 365</option><option value="trello">Trello</option><option value="asana">Asana</option></select>
@@ -183,7 +182,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
             const health = projectHealth(progress, project.status);
             return <tr key={project.id}>
               <td className="table-title">{project.title}</td>
-              <td className="table-sub">{project.group.name}</td>
+              <td className="table-sub">{project.group?.name ?? 'Independent'}</td>
               <td><div className="progress-cell"><div className="pb-wrap"><div className={`pb ${health.tone}`} style={{ width: `${progress}%` }} /></div><span className={`pb-val ${health.tone}`}>{progress}%</span></div></td>
               <td><span className={`bdg ${health.tone}`}>{health.label}</span></td>
             </tr>;
@@ -246,7 +245,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
           const members = project._count?.members ?? 0;
           return <div className="progress-item" key={project.id}>
             <div className="progress-item-head">
-              <span className="progress-item-copy"><strong>{project.title}</strong><small>{[project.group.name, members ? `${members} member${members === 1 ? '' : 's'}` : null, project.deadline ? `Due ${new Date(project.deadline).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : null].filter(Boolean).join(' · ')}</small></span>
+              <span className="progress-item-copy"><strong>{project.title}</strong><small>{[project.group?.name ?? 'Independent', members ? `${members} member${members === 1 ? '' : 's'}` : null, project.deadline ? `Due ${new Date(project.deadline).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : null].filter(Boolean).join(' · ')}</small></span>
               <strong className={`pb-val ${health.tone}`}>{progress}%</strong>
             </div>
             <div className="pb-wrap"><div className={`pb ${health.tone}`} style={{ width: `${progress}%` }} /></div>
