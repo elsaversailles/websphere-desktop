@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import type { CallKind, TicketStatus } from '@websphere/shared';
 import { clearSession, getAccessToken, request, saveSession, socketBaseUrl, type Session, type User } from '../api';
-import { AiAssistantModal } from './AiAssistantModal';
+import { AiAssistantModal, useAiAssistant } from './AiAssistantModal';
 import { Dashboard } from './Dashboard';
 import { avatarTone } from './health';
 import { GroupChatPage } from './GroupChatPage';
@@ -13,7 +13,7 @@ import { SupportRequestsPage } from './SupportRequestsPage';
 import { categoryLabel, statusLabel, ticketStatusOptions, type SupportTicketRecord } from './ticketStatus';
 import { AdminSettingsPage, CalendarPage, IntegrationsPage, NotificationsPage, ProfilePage, ProjectsAnalyticsPage, TasksPage, TrackerPage } from './LegacyPages';
 
-type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tools' | 'tracker' | 'notifications' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'settings' | 'support';
+type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tools' | 'tracker' | 'notifications' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'archive' | 'settings' | 'support';
 type WorkspaceProps = { session: Session; onSessionChange: (session: Session) => void; onLogout: () => void; notify: (message: string) => void };
 type Link = { id: Page; label: string; icon: string };
 type NotificationEntry = { id: string; read: boolean; relatedId?: string | null; relatedType?: string | null };
@@ -27,21 +27,63 @@ const userSections: Array<{ title: string; links: Link[] }> = [
   { title: 'Account', links: [{ id: 'profile', label: 'Profile & Settings', icon: '♙' }, { id: 'support', label: 'My Support Requests', icon: '?' }] },
 ];
 const adminSections: Array<{ title: string; links: Link[] }> = [
-  { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
+  { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'archive', label: 'Archive Accounts', icon: '🗄' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
 ];
+
+// The sidebar sections are the source of truth for which pages a role may land on, so a restored
+// page can never put a user somewhere their role has no nav entry for.
+const allowedPagesFor = (admin: boolean): Set<Page> => new Set((admin ? adminSections : userSections).flatMap((section) => section.links.map((link) => link.id)));
+const defaultPageFor = (admin: boolean): Page => (admin ? 'admin' : 'dashboard');
+
+type NavState = { page: Page; selectedGroupId: string; selectedTaskId: string; selectedTicketId: string };
+const navStorageKey = (userId: string) => `ws_nav:${userId}`;
+
+/**
+ * Restores the page the user was last on (per account), falling back to the role's default when the
+ * stored page is missing, malformed, or not one this role is allowed to open. Authentication is
+ * handled upstream in App/restoreSession; this only decides which in-app page to show once signed in.
+ */
+function loadNavState(userId: string, admin: boolean): NavState {
+  const fallback: NavState = { page: defaultPageFor(admin), selectedGroupId: '', selectedTaskId: '', selectedTicketId: '' };
+  try {
+    const raw = window.localStorage.getItem(navStorageKey(userId));
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<NavState>;
+    const page = typeof parsed.page === 'string' && allowedPagesFor(admin).has(parsed.page as Page) ? (parsed.page as Page) : fallback.page;
+    return {
+      page,
+      selectedGroupId: typeof parsed.selectedGroupId === 'string' ? parsed.selectedGroupId : '',
+      selectedTaskId: typeof parsed.selectedTaskId === 'string' ? parsed.selectedTaskId : '',
+      selectedTicketId: typeof parsed.selectedTicketId === 'string' ? parsed.selectedTicketId : '',
+    };
+  } catch { return fallback; }
+}
 
 export function Workspace({ session, onSessionChange, onLogout, notify }: WorkspaceProps) {
   const administrator = session.role === 'Administrator';
-  const [page, setPage] = useState<Page>(administrator ? 'admin' : 'dashboard');
-  const [selectedGroupId, setSelectedGroupId] = useState('');
-  const [selectedTaskId, setSelectedTaskId] = useState('');
-  const [selectedTicketId, setSelectedTicketId] = useState('');
+  const userId = session.user.id;
+  // Restore where this account left off so a refresh (or reopening a tab) returns to the same page
+  // and selection instead of bouncing to the Dashboard.
+  const initialNav = useState(() => loadNavState(userId, administrator))[0];
+  const [page, setPage] = useState<Page>(initialNav.page);
+  const [selectedGroupId, setSelectedGroupId] = useState(initialNav.selectedGroupId);
+  const [selectedTaskId, setSelectedTaskId] = useState(initialNav.selectedTaskId);
+  const [selectedTicketId, setSelectedTicketId] = useState(initialNav.selectedTicketId);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [incomingCall, setIncomingCall] = useState<{ groupId: string; kind: CallKind } | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantMinimized, setAssistantMinimized] = useState(false);
+  // Lives at Workspace level (which stays mounted across page navigation) so an in-flight request
+  // keeps running and its reply is captured even while the panel is minimized.
+  const assistant = useAiAssistant(notify);
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const sections = administrator ? adminSections : userSections;
+
+  // Persist the current page + selections per account so a refresh resumes exactly here.
+  useEffect(() => {
+    try { window.localStorage.setItem(navStorageKey(userId), JSON.stringify({ page, selectedGroupId, selectedTaskId, selectedTicketId })); } catch { /* storage unavailable; navigation still works in-session */ }
+  }, [userId, page, selectedGroupId, selectedTaskId, selectedTicketId]);
 
   useEffect(() => {
     if (!logoutOpen) return;
@@ -84,7 +126,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   useEffect(() => { if (sidebarCollapsed) setFlyoutTitle(null); }, [sidebarCollapsed]);
 
   function navigate(target: Page) {
-    if (target === 'assistant') setAssistantOpen(true);
+    if (target === 'assistant') { setAssistantOpen(true); setAssistantMinimized(false); }
     else setPage(target);
   }
 
@@ -169,6 +211,8 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   async function logout() {
     setLoggingOut(true);
     try { await request('/auth/logout', { method: 'POST' }); } catch { /* local session is always cleared */ }
+    // Explicit sign-out starts fresh next time; a plain refresh keeps the saved page.
+    try { window.localStorage.removeItem(navStorageKey(userId)); } catch { /* ignore */ }
     clearSession(); onLogout();
   }
 
@@ -222,6 +266,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'projects' ? <ProjectsPage notify={notify} /> : null}
       {page === 'admin' ? <AdminPage notify={notify} /> : null}
       {page === 'accounts' ? <AdminAccounts notify={notify} /> : null}
+      {page === 'archive' ? <AdminArchive notify={notify} /> : null}
       {page === 'chat' ? <GroupChatPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onIdeas={() => setPage('ideas')} notify={notify} incomingCall={incomingCall?.groupId === selectedGroupId ? incomingCall : null} onIncomingCallHandled={() => setIncomingCall(null)} /> : null}
       {page === 'tasks' ? <TasksPage notify={notify} focusedTaskId={selectedTaskId} /> : null}
       {page === 'workflow' ? <ProjectsAnalyticsPage kind="workflow" notify={notify} /> : null}
@@ -235,7 +280,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'support' ? <SupportRequestsPage notify={notify} focusedTicketId={selectedTicketId} /> : null}
     </div></div>
   </div>
-  <AiAssistantModal open={assistantOpen} onClose={() => setAssistantOpen(false)} notify={notify} />
+  <AiAssistantModal open={assistantOpen} minimized={assistantMinimized} assistant={assistant} onClose={() => { setAssistantOpen(false); setAssistantMinimized(false); }} onMinimize={() => setAssistantMinimized(true)} onRestore={() => setAssistantMinimized(false)} />
   {logoutOpen ? <div className="logout-ov" onMouseDown={(event) => { if (event.target === event.currentTarget && !loggingOut) setLogoutOpen(false); }}>
     <div className="logout-box" role="dialog" aria-modal="true" aria-labelledby="logout-confirm-title">
       <span className="logout-mark" aria-hidden="true"><LogoutIcon /></span>
@@ -290,7 +335,7 @@ function AdminTicketCard({ ticket, notify, onSaved }: { ticket: AdminSupportTick
   </article>;
 }
 
-type AdminUser = { id: string; fullName: string; email: string; role: string; status: string };
+type AdminUser = { id: string; fullName: string; email: string; role: string; status: string; archivedAt?: string | null };
 type AdminUsersPage = { users: AdminUser[]; total: number; page: number; pageSize: number; totalPages: number };
 const USERS_PAGE_SIZE = 10;
 
@@ -303,7 +348,7 @@ function AdminAccounts({ notify }: { notify: (message: string) => void }) {
   const [term, setTerm] = useState('');
   const [reloadToken, setReloadToken] = useState(0);
   const [editing, setEditing] = useState<AdminUser | null>(null);
-  const [deleting, setDeleting] = useState<AdminUser | null>(null);
+  const [archiving, setArchiving] = useState<AdminUser | null>(null);
   const refreshUsers = () => setReloadToken((token) => token + 1);
   async function refreshSupportRequests() {
     try {
@@ -338,13 +383,53 @@ function AdminAccounts({ notify }: { notify: (message: string) => void }) {
       refreshUsers();
     } catch (error) { notify((error as Error).message); }
   }
-  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div></div><section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{tickets?.length ?? 0} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => void refreshSupportRequests()}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <div className="support-ticket-list">{tickets.map((ticket) => <AdminTicketCard key={`${ticket.id}-${ticket.updatedAt}`} ticket={ticket} notify={notify} onSaved={() => void refreshSupportRequests()} />)}</div> : <div className="empty-message">New support requests will appear here.</div>}</section><div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <AdminUserRow key={user.id} user={user} onEdit={() => setEditing(user)} onDelete={() => setDeleting(user)} onDeactivate={() => setStatus(user, 'suspended', `${user.fullName} has been deactivated.`)} onActivate={() => setStatus(user, 'active', `${user.fullName} has been reactivated.`)} />) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div>
+  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div></div><section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{tickets?.length ?? 0} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => void refreshSupportRequests()}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <div className="support-ticket-list">{tickets.map((ticket) => <AdminTicketCard key={`${ticket.id}-${ticket.updatedAt}`} ticket={ticket} notify={notify} onSaved={() => void refreshSupportRequests()} />)}</div> : <div className="empty-message">New support requests will appear here.</div>}</section><div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <AdminUserRow key={user.id} user={user} onEdit={() => setEditing(user)} onArchive={() => setArchiving(user)} onDeactivate={() => setStatus(user, 'suspended', `${user.fullName} has been deactivated.`)} onActivate={() => setStatus(user, 'active', `${user.fullName} has been reactivated.`)} />) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div>
     {editing ? <AdminUserEditModal user={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refreshUsers(); }} notify={notify} /> : null}
-    {deleting ? <AdminUserDeleteModal user={deleting} onClose={() => setDeleting(null)} onDeleted={() => { setDeleting(null); refreshUsers(); }} notify={notify} /> : null}
+    {archiving ? <AdminUserArchiveModal user={archiving} onClose={() => setArchiving(null)} onArchived={() => { setArchiving(null); refreshUsers(); }} notify={notify} /> : null}
   </section>;
 }
 
-function AdminUserRow({ user, onEdit, onDelete, onDeactivate, onActivate }: { user: AdminUser; onEdit: () => void; onDelete: () => void; onDeactivate: () => void; onActivate: () => void }) {
+function AdminArchive({ notify }: { notify: (message: string) => void }) {
+  const [data, setData] = useState<AdminUsersPage | null>(null);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [term, setTerm] = useState('');
+  const [reloadToken, setReloadToken] = useState(0);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  const refresh = () => setReloadToken((token) => token + 1);
+  useEffect(() => {
+    const handle = setTimeout(() => { setTerm(search.trim()); setPage(1); }, 300);
+    return () => clearTimeout(handle);
+  }, [search]);
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    const qs = `/admin/users/archived?page=${page}&pageSize=${USERS_PAGE_SIZE}${term ? `&q=${encodeURIComponent(term)}` : ''}`;
+    void request<AdminUsersPage>(qs)
+      .then((next) => { if (active) setData(next); })
+      .catch((error: Error) => { if (active) notify(error.message); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [page, term, notify, reloadToken]);
+  const users = data?.users ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = data?.totalPages ?? 1;
+  const rangeStart = total ? (page - 1) * USERS_PAGE_SIZE + 1 : 0;
+  const rangeEnd = (page - 1) * USERS_PAGE_SIZE + users.length;
+  async function restore(user: AdminUser) {
+    setRestoringId(user.id);
+    try {
+      await request(`/admin/users/${user.id}/restore`, { method: 'POST' });
+      notify(`${user.fullName}'s account was restored.`);
+      refresh();
+    } catch (error) { notify((error as Error).message); }
+    finally { setRestoringId(null); }
+  }
+  return <section className="sp on"><div className="ph"><div><h2>Archive Accounts</h2><p className="ph-sub">Archived accounts are hidden from Account Management but their records are kept. Restore an account to return it to the active list.</p></div></div><div className="cc"><div className="cc-head"><h3>Archived Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search archived by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search archived accounts by name or email" /></div>{users.length ? users.map((user) => <div className="urow" key={user.id}><span className={`ava tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}{user.archivedAt ? ` · archived ${new Date(user.archivedAt).toLocaleDateString()}` : ''}</small></span><button type="button" className="btn-o btn-sm" disabled={restoringId === user.id} onClick={() => void restore(user)}>{restoringId === user.id ? 'Restoring…' : 'Restore'}</button></div>) : <div className="empty-message">{loading ? 'Loading archived accounts…' : term ? `No archived accounts match “${term}”.` : 'No accounts have been archived yet.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div></section>;
+}
+
+function AdminUserRow({ user, onEdit, onArchive, onDeactivate, onActivate }: { user: AdminUser; onEdit: () => void; onArchive: () => void; onDeactivate: () => void; onActivate: () => void }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -357,7 +442,7 @@ function AdminUserRow({ user, onEdit, onDelete, onDeactivate, onActivate }: { us
   }, [open]);
   const suspended = user.status !== 'active';
   const run = (action: () => void) => { setOpen(false); action(); };
-  return <div className="urow"><span className={`ava tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}</small></span><span className={`bdg ${user.status === 'active' ? 'g' : 'y'}`}>{user.status}</span><div className="ur-menu" ref={menuRef}><button type="button" className="ur-menu-btn" aria-haspopup="menu" aria-expanded={open} aria-label={`Actions for ${user.fullName}`} onClick={() => setOpen((value) => !value)}><DotsIcon /></button>{open ? <div className="ur-menu-pop" role="menu"><button type="button" role="menuitem" onClick={() => run(onEdit)}>Edit</button>{suspended ? <button type="button" role="menuitem" onClick={() => run(onActivate)}>Activate</button> : <button type="button" role="menuitem" onClick={() => run(onDeactivate)}>Deactivate</button>}<button type="button" role="menuitem" className="danger" onClick={() => run(onDelete)}>Delete</button></div> : null}</div></div>;
+  return <div className="urow"><span className={`ava tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}</small></span><span className={`bdg ${user.status === 'active' ? 'g' : 'y'}`}>{user.status}</span><div className="ur-menu" ref={menuRef}><button type="button" className="ur-menu-btn" aria-haspopup="menu" aria-expanded={open} aria-label={`Actions for ${user.fullName}`} onClick={() => setOpen((value) => !value)}><DotsIcon /></button>{open ? <div className="ur-menu-pop" role="menu"><button type="button" role="menuitem" onClick={() => run(onEdit)}>Edit</button>{suspended ? <button type="button" role="menuitem" onClick={() => run(onActivate)}>Activate</button> : <button type="button" role="menuitem" onClick={() => run(onDeactivate)}>Deactivate</button>}<button type="button" role="menuitem" className="danger" onClick={() => run(onArchive)}>Archive</button></div> : null}</div></div>;
 }
 
 function AdminUserEditModal({ user, onClose, onSaved, notify }: { user: AdminUser; onClose: () => void; onSaved: () => void; notify: (message: string) => void }) {
@@ -390,22 +475,22 @@ function AdminUserEditModal({ user, onClose, onSaved, notify }: { user: AdminUse
   </div>;
 }
 
-function AdminUserDeleteModal({ user, onClose, onDeleted, notify }: { user: AdminUser; onClose: () => void; onDeleted: () => void; notify: (message: string) => void }) {
+function AdminUserArchiveModal({ user, onClose, onArchived, notify }: { user: AdminUser; onClose: () => void; onArchived: () => void; notify: (message: string) => void }) {
   const [working, setWorking] = useState(false);
-  async function confirmDelete() {
+  async function confirmArchive() {
     setWorking(true);
     try {
-      await request(`/admin/users/${user.id}`, { method: 'DELETE' });
-      notify(`${user.fullName}'s account was deleted.`);
-      onDeleted();
+      await request(`/admin/users/${user.id}/archive`, { method: 'POST' });
+      notify(`${user.fullName}'s account was archived.`);
+      onArchived();
     } catch (error) { notify((error as Error).message); }
     finally { setWorking(false); }
   }
   return <div className="logout-ov" onMouseDown={(event) => { if (event.target === event.currentTarget && !working) onClose(); }}>
-    <div className="logout-box" role="dialog" aria-modal="true" aria-labelledby="ur-del-title">
-      <h3 id="ur-del-title" className="ur-edit-title">Delete account?</h3>
-      <p className="muted">This permanently removes <strong>{user.fullName}</strong> ({user.email}) and signs them out of every device. This can't be undone.</p>
-      <div className="ur-edit-actions"><button type="button" className="btn-o" disabled={working} onClick={onClose}>Cancel</button><button type="button" className="btn btn-red" disabled={working} onClick={() => void confirmDelete()}>{working ? 'Deleting…' : 'Delete account'}</button></div>
+    <div className="logout-box" role="dialog" aria-modal="true" aria-labelledby="ur-arch-title">
+      <h3 id="ur-arch-title" className="ur-edit-title">Archive account?</h3>
+      <p className="muted">This moves <strong>{user.fullName}</strong> ({user.email}) to Archive Accounts and signs them out of every device. Their records are kept, and you can restore the account later.</p>
+      <div className="ur-edit-actions"><button type="button" className="btn-o" disabled={working} onClick={onClose}>Cancel</button><button type="button" className="btn btn-red" disabled={working} onClick={() => void confirmArchive()}>{working ? 'Archiving…' : 'Archive account'}</button></div>
     </div>
   </div>;
 }
@@ -430,6 +515,7 @@ function NavIcon({ page }: { page: Page }) {
   if (page === 'notifications') return <svg {...common}><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></svg>;
   if (page === 'profile') return <svg {...common}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>;
   if (page === 'admin') return <svg {...common}><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>;
+  if (page === 'archive') return <svg {...common}><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>;
   if (page === 'support') return <svg {...common}><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><path d="m4.93 4.93 4.24 4.24M14.83 9.17l4.24-4.24M14.83 14.83l4.24 4.24M9.17 14.83l-4.24 4.24"/></svg>;
   if (page === 'ideas') return <svg {...common}><path d="M9 18h6M10 22h4M8.5 14.5A6 6 0 1 1 15.5 14.5C14.5 15.3 14 16 14 18h-4c0-2-.5-2.7-1.5-3.5z"/></svg>;
   return <svg {...common}><circle cx="12" cy="12" r="9"/></svg>;

@@ -89,6 +89,15 @@
 .ai-modal-inputrow button{width:38px;height:38px;flex-shrink:0;border:0;border-radius:50%;background:var(--acc);color:#fff;display:grid;place-items:center}
 .ai-modal-inputrow button:disabled{opacity:.5;cursor:not-allowed}
 @media(max-width:640px){.ai-modal-box{height:92vh}.ai-modal-quick{overflow-x:auto;flex-wrap:nowrap}}
+/* Minimized assistant: a floating pill that keeps the request visible without blocking the page. */
+.ai-mini-pill{position:fixed;right:24px;bottom:22px;z-index:40;display:flex;align-items:center;gap:10px;padding:10px 16px;border:0;border-radius:26px;background:linear-gradient(135deg,#0F5FD1,#0EA0D0);color:#fff;font-size:13px;font-weight:700;box-shadow:0 10px 26px rgba(15,95,209,.4)}
+.ai-mini-pill:hover{filter:brightness(1.05)}
+.ai-mini-icon{display:grid;place-items:center;width:22px;height:22px;flex-shrink:0;border-radius:50%;background:rgba(255,255,255,.2);font-size:13px}
+.ai-mini-text{white-space:nowrap}
+.ai-mini-spinner{width:14px;height:14px;flex-shrink:0;border:2px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;animation:ai-mini-spin .7s linear infinite}
+.ai-mini-dot{width:9px;height:9px;flex-shrink:0;border-radius:50%;background:#7CFFB2;box-shadow:0 0 0 3px rgba(124,255,178,.3)}
+@keyframes ai-mini-spin{to{transform:rotate(360deg)}}
+@media(max-width:640px){.ai-mini-pill{right:16px;bottom:16px}}
 
 /* My Tasks status control — progress remains derived from status. */
 .task-status-select{min-width:126px;padding:6px 28px 6px 10px;border:1px solid rgba(0,56,168,.34);border-radius:18px;background:rgba(14,160,208,.12);color:var(--acc);font:700 11px Outfit,sans-serif;outline:none}.task-status-select:focus{border-color:var(--acc);box-shadow:0 0 0 2px rgba(0,56,168,.12)}.task-status-select:disabled{opacity:.58}

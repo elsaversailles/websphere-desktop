@@ -60,9 +60,11 @@ const taskPrediction = (task: any, now: Date) => {
 
 // Fields an administrator may change from Account Management, kept as explicit allowlists so the
 // update path can never set anything the console doesn't offer (e.g. passwordHash or tokenVersion).
-type AdminAccountStatus = 'active' | 'archived' | 'suspended' | 'deactivated' | 'removed' | 'locked';
+type AdminAccountStatus = 'active' | 'suspended' | 'deactivated' | 'removed' | 'locked' | 'archived';
 const ADMIN_EDITABLE_ROLES: Role[] = [Role.Administrator, Role.Project_Leader, Role.Project_Member];
-const ADMIN_EDITABLE_STATUSES: AdminAccountStatus[] = ['active', 'archived', 'suspended', 'deactivated', 'removed', 'locked'];
+// 'archived' is intentionally absent: archiving goes through the dedicated archive endpoint so it
+// also stamps archivedAt and invalidates sessions, rather than being set via the free-form editor.
+const ADMIN_EDITABLE_STATUSES: AdminAccountStatus[] = ['active', 'suspended', 'deactivated', 'removed', 'locked'];
 
 @Injectable()
 export class AppService implements OnModuleInit, OnApplicationShutdown {
@@ -1082,9 +1084,27 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const skip = (safePage - 1) * take;
     const term = (q ?? '').trim();
     // Case-insensitive match on name or email (MySQL's default collation makes `contains` case-insensitive).
-    const where = term ? { OR: [{ fullName: { contains: term } }, { email: { contains: term } }] } : {};
+    // Archived accounts live in their own section, so the active Account Management list excludes them.
+    const search = term ? [{ OR: [{ fullName: { contains: term } }, { email: { contains: term } }] }] : [];
+    const where = { AND: [{ status: { not: 'archived' as const } }, ...search] };
     const [users, total] = await this.prisma.$transaction([
       this.prisma.user.findMany({ where, select: { id: true, email: true, fullName: true, role: true, status: true, createdAt: true }, orderBy: { createdAt: 'asc' }, skip, take }),
+      this.prisma.user.count({ where }),
+    ]);
+    return { users, total, page: safePage, pageSize: take, totalPages: Math.max(1, Math.ceil(total / take)) };
+  }
+
+  /** Paginated list of archived accounts for the Archive Accounts section, newest archive first. */
+  async adminArchivedUsers(caller: Caller, page = 1, pageSize = 10, q?: string) {
+    await this.admin(caller);
+    const take = Math.min(Math.max(Math.trunc(pageSize) || 10, 1), 100);
+    const safePage = Math.max(Math.trunc(page) || 1, 1);
+    const skip = (safePage - 1) * take;
+    const term = (q ?? '').trim();
+    const search = term ? [{ OR: [{ fullName: { contains: term } }, { email: { contains: term } }] }] : [];
+    const where = { AND: [{ status: 'archived' as const }, ...search] };
+    const [users, total] = await this.prisma.$transaction([
+      this.prisma.user.findMany({ where, select: { id: true, email: true, fullName: true, role: true, status: true, archivedAt: true }, orderBy: { archivedAt: 'desc' }, skip, take }),
       this.prisma.user.count({ where }),
     ]);
     return { users, total, page: safePage, pageSize: take, totalPages: Math.max(1, Math.ceil(total / take)) };
@@ -1120,17 +1140,30 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
 
   /**
-   * Soft-deletes an account: flags it `removed` and bumps tokenVersion so every live session is
-   * invalidated. We don't hard-delete the row because the user authors group history (chat, ideas,
-   * announcements, votes) that other members still rely on, and none of those relations cascade.
+   * Archives an account instead of deleting it: flags it `archived`, timestamps the archive, and
+   * bumps tokenVersion so every live session is invalidated. The row is retained in full — the user
+   * authors group history (chat, ideas, announcements, votes) that other members still rely on, and
+   * none of those relations cascade — so the account can later be restored.
    */
-  async adminDeleteUser(caller: Caller, targetId: string) {
+  async adminArchiveUser(caller: Caller, targetId: string) {
     await this.admin(caller);
-    if (caller.id === targetId) fail('INVALID_OPERATION', 'You cannot delete your own account', 400);
-    const target = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true } });
+    if (caller.id === targetId) fail('INVALID_OPERATION', 'You cannot archive your own account', 400);
+    const target = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, status: true } });
     if (!target) fail('NOT_FOUND', 'Account not found', 404);
-    await this.prisma.user.update({ where: { id: targetId }, data: { status: 'removed', tokenVersion: { increment: 1 } } });
-    await this.audit.log('AdminModule', 'account_removed', 'warning', `Administrator removed account ${target.email}`, caller.id);
+    if (target!.status === 'archived') fail('INVALID_OPERATION', 'That account is already archived', 409);
+    await this.prisma.user.update({ where: { id: targetId }, data: { status: 'archived', archivedAt: new Date(), tokenVersion: { increment: 1 } } });
+    await this.audit.log('AdminModule', 'account_archived', 'warning', `Administrator archived account ${target!.email}`, caller.id);
+    return { ok: true };
+  }
+
+  /** Restores an archived account back to the active list; it reauthenticates under its existing permissions. */
+  async adminRestoreUser(caller: Caller, targetId: string) {
+    await this.admin(caller);
+    const target = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, status: true } });
+    if (!target) fail('NOT_FOUND', 'Account not found', 404);
+    if (target!.status !== 'archived') fail('INVALID_OPERATION', 'That account is not archived', 409);
+    await this.prisma.user.update({ where: { id: targetId }, data: { status: 'active', archivedAt: null } });
+    await this.audit.log('AdminModule', 'account_restored', 'info', `Administrator restored account ${target!.email}`, caller.id);
     return { ok: true };
   }
   async monitoring(caller: Caller) {
