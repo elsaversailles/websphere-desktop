@@ -294,6 +294,8 @@ model Idea {
   authorId String
   title String
   body String @db.Text
+  category String @default("Academic Project")
+  readinessScore Int @default(0)
   status IdeaStatus @default(submitted)
   createdAt DateTime @default(now())
   group Group @relation(fields: [groupId], references: [id])
@@ -369,6 +371,8 @@ model NotificationPreference {
   deadlines Boolean @default(true)
   groupActivity Boolean @default(true)
   aiSuggestions Boolean @default(true)
+  profileVisibility Boolean @default(true)
+  activityStatus Boolean @default(true)
   emailEnabled Boolean @default(true)
   pushEnabled Boolean @default(true)
   user User @relation(fields: [userId], references: [id])
@@ -440,6 +444,23 @@ model ToolUsage {
   action String
   createdAt DateTime @default(now())
   connection ToolConnection @relation(fields: [connectionId], references: [id])
+}
+model SystemNotice {
+  id String @id @default(cuid())
+  title String
+  message String @db.Text
+  type String @default("system")
+  read Boolean @default(false)
+  createdAt DateTime @default(now())
+  @@index([read, createdAt])
+}
+model SystemBackup {
+  id String @id @default(cuid())
+  fileName String @unique
+  bytes Int
+  createdBy String
+  createdAt DateTime @default(now())
+  @@index([createdAt])
 }
 model AiInteraction {
   id String @id @default(cuid())

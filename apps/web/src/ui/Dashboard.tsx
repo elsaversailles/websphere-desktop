@@ -2,6 +2,8 @@ import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } fro
 import { io } from 'socket.io-client';
 import { getAccessToken, request, socketBaseUrl } from '../api';
 import type { GroupHub as GroupHubData, GroupSummary } from './types';
+import { DateField } from './DateField';
+import { dateOnlyKey, formatDateOnly, localDateFromKey } from './dates';
 import { type Tone, avatarTone, dateKey, deadlineCountdown, deadlineHealth, initials, priorityHealth, projectHealth, relativeTime, worstTone } from './health';
 
 type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string } | null; tasks: Array<{ status: string }>; _count?: { members: number } };
@@ -74,7 +76,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
     function mark(date: string | null | undefined, label: string) {
       const health = deadlineHealth(date);
       if (!health || !date) return;
-      const key = dateKey(date);
+      const key = dateOnlyKey(date);
       const current = markers.get(key);
       markers.set(key, { tone: worstTone(current?.tone, health.tone), items: [...(current?.items ?? []), label] });
     }
@@ -162,7 +164,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
       <label className="lbl">Team Members</label><fieldset className="project-member-picker" disabled={!createGroupHub}><legend className="sr-only">Team Members</legend>{createGroupHub ? createGroupHub.group.members.map((member) => <label className="project-member-option" key={member.userId}><input type="checkbox" checked={selectedMemberIds.includes(member.userId)} onChange={() => toggleProjectMember(member.userId)} /><span>{member.user.fullName}</span></label>) : <span>Add members by selecting a project group first.</span>}</fieldset>
       <label className="lbl">Task Assignment Per Member</label><div className={`project-responsibilities ${selectedMemberIds.length ? '' : 'empty'}`}>{selectedMemberIds.length ? createGroupHub?.group.members.filter((member) => selectedMemberIds.includes(member.userId)).map((member) => <label key={member.userId}><span>{member.user.fullName}</span><input className="ifield" name={`responsibility-${member.userId}`} placeholder={`Assign ${member.user.fullName} a responsibility`} /></label>) : <span>Add members first, then assign responsibilities here.</span>}</div>
       <label className="lbl" htmlFor="external-tools">External Tools Will Be Used</label><select className="ifield project-tools-select" id="external-tools" name="externalTools" defaultValue="" aria-label="External tools used for this project"><option value="" disabled>Select external tools</option><option value="google">Google Workspace</option><option value="microsoft">Microsoft 365</option><option value="trello">Trello</option><option value="asana">Asana</option></select>
-      <div className="project-date-grid"><div><label className="lbl" htmlFor="project-start-date">Start Date</label><input className="ifield" id="project-start-date" name="startDate" type="date" /></div><div><label className="lbl" htmlFor="project-deadline">End Date / Deadline</label><input className="ifield" id="project-deadline" name="deadline" type="date" /></div></div>
+      <div className="project-date-grid"><div><label className="lbl" htmlFor="project-start-date">Start Date</label><DateField id="project-start-date" name="startDate" label="Project start date" /></div><div><label className="lbl" htmlFor="project-deadline">End Date / Deadline</label><DateField id="project-deadline" name="deadline" label="Project due date" /></div></div>
       <label className="lbl" htmlFor="project-description">Project Description</label><textarea className="ifield project-description" id="project-description" name="description" required placeholder="Describe the project goals and scope…" />
       <div className="modal-acts project-modal-actions"><button type="button" className="btn-o" onClick={() => setCreateOpen(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Creating…' : 'Create Project'}</button></div>
     </form></div></div> : null}
@@ -195,14 +197,14 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
             return <tr key={task.id}>
               <td className="table-title">{task.title}</td>
               <td className="table-sub">{task.project?.title ?? '—'}</td>
-              <td className={`table-sub ${due ? `due-${due.tone}` : ''}`}>{task.deadline ? new Date(task.deadline).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Not set'}</td>
+              <td className={`table-sub ${due ? `due-${due.tone}` : ''}`}>{formatDateOnly(task.deadline, { month: 'short', day: 'numeric' })}</td>
               <td><span className={`bdg ${priority.tone}`}>{priority.label}</span></td>
             </tr>;
           })}</tbody></table> : <Empty text="Tasks assigned to you will appear here." />}
         </DataCard>
       </div>
       <aside className="cc calendar-card">
-        <div className="cc-head"><h3>{new Date(monthCursor.year, monthCursor.month, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</h3><span className="calendar-arrows"><button type="button" onClick={() => shiftMonth(-1)} aria-label="Previous month">‹</button><button type="button" onClick={() => shiftMonth(1)} aria-label="Next month">›</button></span></div>
+        <div className="cc-head"><h3>Calendar</h3><span className="calendar-arrows"><button type="button" onClick={() => shiftMonth(-1)} aria-label="Previous month">‹</button><select className="legacy-select calendar-jump" value={monthCursor.month} aria-label="Dashboard calendar month" onChange={(event) => setMonthCursor((current) => ({ ...current, month: Number(event.target.value) }))}>{Array.from({ length: 12 }, (_, month) => <option key={month} value={month}>{new Date(2024, month, 1).toLocaleDateString(undefined, { month: 'long' })}</option>)}</select><select className="legacy-select calendar-jump year" value={monthCursor.year} aria-label="Dashboard calendar year" onChange={(event) => setMonthCursor((current) => ({ ...current, year: Number(event.target.value) }))}>{Array.from({ length: 101 }, (_, offset) => 2000 + offset).map((year) => <option key={year} value={year}>{year}</option>)}</select><button type="button" onClick={() => shiftMonth(1)} aria-label="Next month">›</button></span></div>
         <div className="calendar-week">{WEEKDAYS.map((day) => <span key={day}>{day}</span>)}</div>
         <div className="calendar-grid">{monthCells.map((cell) => {
           const key = dateKey(cell.date);
@@ -221,7 +223,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
     <div className="g2">
       <DataCard title="Upcoming Deadlines" note="Next 14 days">
         {upcoming.length ? upcoming.map(({ task, health }) => <div className={`deadline-row tone-${health.tone}`} key={task.id}>
-          <span className={`deadline-date ${health.tone}`}><strong>{new Date(task.deadline!).getDate()}</strong><small>{new Date(task.deadline!).toLocaleDateString(undefined, { month: 'short' }).toUpperCase()}</small></span>
+          <span className={`deadline-date ${health.tone}`}><strong>{localDateFromKey(dateOnlyKey(task.deadline!)).getDate()}</strong><small>{formatDateOnly(task.deadline, { month: 'short' }).toUpperCase()}</small></span>
           <span className="deadline-copy"><strong>{task.title}</strong><small>{task.project?.title ?? 'Unassigned project'} · {deadlineCountdown(health.days)}</small></span>
           <span className={`bdg ${health.tone}`}>{health.label}</span>
         </div>) : <Empty text="Nothing is due in the next 14 days. Add tasks with due dates to see them here." />}
@@ -245,7 +247,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
           const members = project._count?.members ?? 0;
           return <div className="progress-item" key={project.id}>
             <div className="progress-item-head">
-              <span className="progress-item-copy"><strong>{project.title}</strong><small>{[project.group?.name ?? 'Independent', members ? `${members} member${members === 1 ? '' : 's'}` : null, project.deadline ? `Due ${new Date(project.deadline).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : null].filter(Boolean).join(' · ')}</small></span>
+              <span className="progress-item-copy"><strong>{project.title}</strong><small>{[project.group?.name ?? 'Independent', members ? `${members} member${members === 1 ? '' : 's'}` : null, project.deadline ? `Due ${formatDateOnly(project.deadline, { month: 'short', day: 'numeric' })}` : null].filter(Boolean).join(' · ')}</small></span>
               <strong className={`pb-val ${health.tone}`}>{progress}%</strong>
             </div>
             <div className="pb-wrap"><div className={`pb ${health.tone}`} style={{ width: `${progress}%` }} /></div>

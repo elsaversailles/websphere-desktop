@@ -7,6 +7,7 @@
  * so the same token can drive badges, progress bars, date chips and calendar dots.
  */
 export type Tone = 'g' | 'ac' | 'y' | 'r';
+import { dateOnlyKey, daysBetweenCalendarDates, localDateKey } from './dates';
 
 export type Health = { tone: Tone; label: string };
 
@@ -52,11 +53,7 @@ export function taskStatusHealth(status?: string | null): Health {
 
 /** Whole days from today until `date`. Negative means the date has passed. */
 export function daysUntil(date: string | Date): number {
-  const target = new Date(date);
-  target.setHours(0, 0, 0, 0);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return Math.round((target.getTime() - today.getTime()) / 86_400_000);
+  return daysBetweenCalendarDates(localDateKey(), dateOnlyKey(date));
 }
 
 export type DeadlineHealth = Health & { days: number };

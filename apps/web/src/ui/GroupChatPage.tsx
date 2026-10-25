@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { type CSSProperties, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import type { CallHostAction, CallKind, CallParticipant, CallSignal } from '@websphere/shared';
 import { getAccessToken, request, socketBaseUrl } from '../api';
@@ -11,6 +11,7 @@ type Props = { userId: string; selectedGroupId: string; onSelectGroup: (id: stri
 type ActiveCall = { groupId: string; kind: CallKind };
 type RemoteStream = { socketId: string; userId: string; stream: MediaStream };
 type ChatSearchGroup = GroupSummary & { messageMatch?: string | null };
+type UpcomingEvent = { id: string; title: string; startAt: string; endAt?: string | null; type: string };
 
 function mediaDeviceErrorMessage(error: unknown, kind: CallKind) {
   const name = error instanceof DOMException ? error.name : '';
@@ -64,7 +65,7 @@ function IdeaVoteCard({ option, totalVotes, viewerOptionId, viewerId, votingOpen
   const voters = option.voters.map((voter) => voter.userId === viewerId ? 'You' : voter.fullName);
   return <article className={`gc-poll-option ${chosen ? 'chosen' : ''}`}>
     <div className="gc-poll-option-heading"><strong>{option.label}</strong><span>{option.votes} vote{option.votes === 1 ? '' : 's'}</span></div>
-    <div className="gc-vote-meter" aria-label={`${option.votes} votes`}><span style={{ width: `${percentage}%` }} /></div>
+    <div className="gc-vote-meter" aria-label={`${option.votes} votes`}><span style={{ '--meter-progress': percentage / 100 } as CSSProperties} /></div>
     <p className="gc-voter-list">{voters.length ? voters.join(', ') : 'No votes yet'}</p>
     <button type="button" aria-pressed={chosen} className={chosen ? 'voted' : ''} disabled={!votingOpen} onClick={() => onVote(option.optionId)}>{chosen ? 'Voted' : votingOpen ? 'Vote' : 'Voting closed'}</button>
   </article>;
@@ -76,6 +77,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const [searchQuery, setSearchQuery] = useState('');
   const [searchedGroups, setSearchedGroups] = useState<ChatSearchGroup[] | null>(null);
   const [matchingMessages, setMatchingMessages] = useState<GroupHub['messages'] | null>(null);
+  const [nextEvent, setNextEvent] = useState<UpcomingEvent | null>(null);
   const [call, setCall] = useState<ActiveCall | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
   const [muted, setMuted] = useState(false);
@@ -104,6 +106,15 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const iceServersRef = useRef<RTCIceServer[]>([]);
 
   useEffect(() => { void request<GroupSummary[]>('/groups').then((next) => { setGroups(next); if (!selectedGroupId && next[0]) onSelectGroup(next[0].id); }).catch((error: Error) => notify(error.message)); }, [selectedGroupId, onSelectGroup, notify]);
+  useEffect(() => {
+    let cancelled = false;
+    void request<{ events: UpcomingEvent[] }>('/calendar').then((calendar) => {
+      if (cancelled) return;
+      const now = Date.now();
+      setNextEvent(calendar.events.filter((event) => new Date(event.startAt).getTime() >= now).sort((a, b) => new Date(a.startAt).getTime() - new Date(b.startAt).getTime())[0] ?? null);
+    }).catch(() => { if (!cancelled) setNextEvent(null); });
+    return () => { cancelled = true; };
+  }, []);
   useEffect(() => { setManageOpen(false); if (!selectedGroupId) { setHub(null); return; } void request<GroupHub>(`/groups/${selectedGroupId}/hub`).then(setHub).catch((error: Error) => notify(error.message)); }, [selectedGroupId, notify]);
   useEffect(() => {
     const term = searchQuery.trim();
@@ -433,7 +444,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     <div className="ph"><h2>Group Chat</h2></div>
     {incomingCall ? <div className="call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => void joinCall(incomingCall.kind)}>Join call</button><button className="btn-o btn-sm" onClick={onIncomingCallHandled}>Dismiss</button></div> : null}
     <div className="gc-teams-layout">
-      <aside className="gc-left-panel"><div className="gc-left-head"><h3>Chats</h3></div><div className="gc-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search chats or messages..." aria-label="Search group chats and messages" /></div><div className="gc-chat-list">{visibleGroups.length ? visibleGroups.map((group) => <button className={`gc-chat-item ${group.id === selectedGroupId ? 'active' : ''}`} key={group.id} onClick={() => onSelectGroup(group.id)}><GroupAvatar name={group.name} className="gc-list-avatar" /><span><strong>{group.name}</strong><small>{group.messageMatch ? `Message: ${group.messageMatch}` : `${group._count.projects} projects · ${group._count.ideas} ideas`}</small></span></button>) : <div className="gc-panel-empty">{searchTerm ? 'No chats or messages match your search.' : 'Your groups will appear here.'}</div>}</div><div className="gc-mini-calendar"><strong>{new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</strong><span>{searchTerm ? 'Matching messages are shown in the selected chat.' : 'Your scheduled events will appear here.'}</span></div></aside>
+      <aside className="gc-left-panel"><div className="gc-left-head"><h3>Chats</h3></div><div className="gc-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search chats or messages..." aria-label="Search group chats and messages" /></div><div className="gc-chat-list">{visibleGroups.length ? visibleGroups.map((group) => <button className={`gc-chat-item ${group.id === selectedGroupId ? 'active' : ''}`} key={group.id} onClick={() => onSelectGroup(group.id)}><GroupAvatar name={group.name} className="gc-list-avatar" /><span><strong>{group.name}</strong><small>{group.messageMatch ? `Message: ${group.messageMatch}` : `${group._count.projects} projects · ${group._count.ideas} ideas`}</small></span></button>) : <div className="gc-panel-empty">{searchTerm ? 'No chats or messages match your search.' : 'Your groups will appear here.'}</div>}</div><div className="gc-mini-calendar"><strong>{new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</strong><span>{searchTerm ? 'Matching messages are shown in the selected chat.' : nextEvent ? `${nextEvent.title} · ${new Date(nextEvent.startAt).toLocaleString()}` : 'No upcoming scheduled events.'}</span></div></aside>
       {hub ? <>
         <main className="gc-main-chat">
           <header className="gc-chat-header"><GroupAvatar name={hub.group.name} className="gc-list-avatar large" /><div><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => setManageOpen(true)}>Add Members</button><button className="gc-leave-btn" disabled={leaving} onClick={() => void leaveGroup()}>{leaving ? 'Leaving…' : 'Leave'}</button></div></header>

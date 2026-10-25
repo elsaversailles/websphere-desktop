@@ -3,11 +3,12 @@ export type GroupRole = 'Project_Leader' | 'Project_Member';
 export type GroupSummary = {
   id: string;
   name: string;
+  messageMatch?: string;
   members: Array<{ role: GroupRole }>;
   _count: { projects: number; ideas: number };
 };
 
-export type Idea = { id: string; authorId: string; title: string; body: string; status: 'submitted' | 'refined' | 'selected'; createdAt: string };
+export type Idea = { id: string; authorId: string; title: string; body: string; category: string; readinessScore: number; status: 'submitted' | 'refined' | 'selected'; createdAt: string };
 export type Poll = {
   pollId: string;
   groupId: string;
