@@ -3,7 +3,7 @@ import { io } from 'socket.io-client';
 import { getAccessToken, request, socketBaseUrl } from '../api';
 import { DateField } from './DateField';
 import { dateOnlyKey, formatDateOnly } from './dates';
-import { deadlineHealth } from './health';
+import { deadlineHealth, priorityHealth, taskStatusHealth } from './health';
 
 type Project = { id: string; title: string; description: string; status: string; deadline?: string | null; group: { name: string } | null; members?: Array<{ role: string }>; tasks: Array<{ id: string; status: string }> };
 type ProjectTask = { id: string; title: string; description: string; deadline?: string | null; priority: string; status: string; assignments: Array<{ assigneeId: string }>; risk?: { level: 'high' | 'medium' | 'low' } };
@@ -102,16 +102,6 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
     finally { setSaving(false); }
   }
 
-  async function saveResponsibility(event: FormEvent<HTMLFormElement>, userId: string) {
-    event.preventDefault();
-    if (!detail) return;
-    const responsibility = String(new FormData(event.currentTarget).get('responsibility') ?? '').trim();
-    setSaving(true);
-    try { await request(`/projects/${detail.id}/team/${userId}`, { method: 'PATCH', body: JSON.stringify({ responsibility }) }); await refreshTasks(); notify('Responsibility updated.'); }
-    catch (error) { notify(error instanceof Error ? error.message : 'Could not update responsibility.'); }
-    finally { setSaving(false); }
-  }
-
   async function deleteProject(project: Project) {
     if (!window.confirm(`Delete “${project.title}” and all its tasks? This cannot be undone.`)) return;
     setSaving(true);
@@ -179,13 +169,15 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
           <thead><tr><th>Task</th><th>Assignee</th><th>Due Date</th><th>Priority</th><th>Status</th>{leader ? <th>Actions</th> : null}</tr></thead>
           <tbody>{detail.tasks.map((task) => {
             const due = deadlineHealth(task.deadline);
+            const priority = priorityHealth(task.priority);
+            const status = taskStatusHealth(task.status);
             const needsReassignment = task.status !== 'completed' && (task.risk?.level === 'high' || (due?.days ?? 0) < 0);
             const currentAssignee = task.assignments[0]?.assigneeId;
             const replacementAvailable = detail.members.some((member) => member.userId !== currentAssignee);
             return <tr key={task.id}>
               <td><strong>{task.title}</strong><span className="task-description">{task.description}</span></td>
               <td>{memberName(currentAssignee)}</td><td>{formatDateOnly(task.deadline)}</td>
-              <td><span className="bdg ac">{task.priority}</span></td><td><div className="task-actions"><span className="bdg g">{task.status.replaceAll('_', ' ')}</span>{needsReassignment ? <span className="bdg r">{due && due.days < 0 ? 'Overdue' : 'At Risk'}</span> : null}</div></td>
+              <td><span className={`bdg ${priority.tone}`}>{priority.label}</span></td><td><div className="task-actions"><span className={`bdg ${status.tone}`}>{status.label}</span>{needsReassignment ? <span className="bdg r">{due && due.days < 0 ? 'Overdue' : 'At Risk'}</span> : null}</div></td>
               {leader ? <td><div className="task-actions">
                 <button type="button" className="btn-o btn-sm" disabled={saving} onClick={() => setEditingTask({ task, mode: 'edit' })}>Edit Task</button>
                 {needsReassignment ? <button type="button" className="btn-o btn-sm" disabled={saving || !replacementAvailable} title={replacementAvailable ? undefined : 'No other project member is available'} onClick={() => setEditingTask({ task, mode: 'reassign' })}>Reassign Task</button> : null}
@@ -194,8 +186,6 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
             </tr>;
           })}</tbody>
         </table> : <div className="legacy-empty">No tasks yet.{leader ? ' Create the first one above.' : ''}</div>}
-        <div className="cc-head"><h3>Team Responsibilities</h3></div>
-        <table className="tbl"><thead><tr><th>Member</th><th>Role</th><th>Responsibility</th></tr></thead><tbody>{detail.members.map((member) => <tr key={member.userId}><td>{member.user.fullName}</td><td><span className="bdg ac">{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</span></td><td>{leader ? <form className="task-assign-form" onSubmit={(event) => void saveResponsibility(event, member.userId)}><input className="ifield" name="responsibility" defaultValue={member.responsibility ?? ''} placeholder="Assign a responsibility" /><button className="btn-o btn-sm" disabled={saving}>Save</button></form> : member.responsibility || '—'}</td></tr>)}</tbody></table>
       </> : null}
     </section> : null}
     {editingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setEditingTask(null); }}><div className="modal-box task-edit-modal" role="dialog" aria-modal="true" aria-label={editingTask.mode === 'reassign' ? 'Reassign task' : 'Edit task'}>

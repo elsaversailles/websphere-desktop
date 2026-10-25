@@ -39,7 +39,7 @@ export function projectHealth(progress: number, status?: string | null): Health 
 /** Task priority → health. High priority is the thing most likely to hurt you. */
 export function priorityHealth(priority?: string | null): Health {
   if (priority === 'high') return { tone: 'r', label: 'High' };
-  if (priority === 'low') return { tone: 'ac', label: 'Normal' };
+  if (priority === 'low') return { tone: 'g', label: 'Low' };
   return { tone: 'y', label: 'Medium' };
 }
 
@@ -49,6 +49,14 @@ export function taskStatusHealth(status?: string | null): Health {
   if (status === 'for_review') return { tone: 'ac', label: 'For Review' };
   if (status === 'ongoing') return { tone: 'y', label: 'Ongoing' };
   return { tone: 'r', label: 'Pending' };
+}
+
+/** Shared badge tone for task priority, task status, and task-risk labels. */
+export function badgeTone(value?: string | null): Tone {
+  if (value === 'high' || value === 'pending') return 'r';
+  if (value === 'medium' || value === 'ongoing') return 'y';
+  if (value === 'low' || value === 'completed' || value === 'active') return 'g';
+  return 'ac';
 }
 
 /** Whole days from today until `date`. Negative means the date has passed. */
