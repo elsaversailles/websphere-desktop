@@ -1075,9 +1075,14 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   private oauthStateKey(state: string) { return `oauth:state:${state}`; }
   private oauthCallbackUrl(provider: ProviderId) {
-    const base = this.config.get('OAUTH_CALLBACK_BASE_URL');
-    if (!base) fail('OAUTH_NOT_CONFIGURED', 'OAuth callback is not configured. Ask an administrator to set OAUTH_CALLBACK_BASE_URL.', 503);
-    const callbackBase = base as string;
+    const configuredBase = this.config.get('OAUTH_CALLBACK_BASE_URL');
+    // Production web traffic is proxied through the same public origin at /api.
+    // Keep an explicit base available for separate API domains or local development,
+    // but do not make a missing optional deployment variable break every provider.
+    const callbackBase = configuredBase
+      ?? (this.config.get('NODE_ENV') === 'production'
+        ? new URL('/api/', this.config.get('WEB_ORIGIN').split(',')[0].trim()).toString()
+        : `http://localhost:${this.config.get('PORT')}`);
     return new URL(`integrations/${provider}/callback`, `${callbackBase.replace(/\/+$/, '')}/`).toString();
   }
   private oauthReturnUrl(value: string) {
