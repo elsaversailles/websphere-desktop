@@ -17,5 +17,3 @@ export class WebSphereClient {
   dashboard() { return this.request('/dashboard'); }
   askAi(input: unknown) { return this.request('/ai/ask', { method: 'POST', body: JSON.stringify(input) }); }
 }
-
-export const openApiClientPlaceholder = { name: 'WebSphere generated OpenAPI client', version: 'pending-openapi-generation' };

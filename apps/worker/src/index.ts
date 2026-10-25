@@ -23,35 +23,60 @@ new Worker('recompute-analytics', async (job) => {
 }, { connection });
 async function notifyOnce(userId: string, type: string, message: string, relatedId: string, relatedType: string) {
   const preference = await prisma.notificationPreference.findUnique({ where: { userId } });
-  if (preference && preference.deadlines === false) return;
+  const disabled = relatedType === 'task' ? preference?.tasks === false : preference?.deadlines === false;
+  if (disabled) return false;
   const recent = await prisma.notification.findFirst({ where: { userId, type, relatedId, relatedType, createdAt: { gte: new Date(Date.now() - 20 * 3600000) } } });
-  if (recent) return;
+  if (recent) return false;
   await prisma.notification.create({ data: { userId, type, message, relatedId, relatedType } });
+  return true;
+}
+
+async function emailOverdueTask(userId: string, task: { title: string; deadline: Date; project?: { title: string } }) {
+  const { SES_HOST: host, SES_USER: user, SES_PASSWORD: pass, SES_FROM: from } = process.env;
+  if (!host || !user || !pass || !from) return;
+  const recipient = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, fullName: true, status: true, preference: { select: { emailEnabled: true, tasks: true } } } });
+  if (!recipient || recipient.status !== 'active' || recipient.preference?.emailEnabled === false || recipient.preference?.tasks === false) return;
+  const port = Number(process.env.SES_PORT ?? 587);
+  const transport = nodemailer.createTransport({ host, port, secure: port === 465, auth: { user, pass } });
+  const subject = `Overdue task: ${task.title}`;
+  const due = task.deadline.toISOString().slice(0, 10);
+  const body = `Hi ${recipient.fullName},\n\nYour task “${task.title}” in “${task.project?.title ?? 'WebSphere'}” was due on ${due} and is still incomplete. Please review it in WebSphere.`;
+  await transport.sendMail({ from, to: recipient.email, subject, text: body, html: `<p>Hi ${escapeHtml(recipient.fullName)},</p><p>Your task <strong>${escapeHtml(task.title)}</strong> in <strong>${escapeHtml(task.project?.title ?? 'WebSphere')}</strong> was due on ${due} and is still incomplete. Please review it in WebSphere.</p>` });
 }
 
 new Worker('deadline-scan', async () => {
   const now = new Date();
   const soon = new Date(now.getTime() + 24 * 3600000);
-  const dayKey = (date: Date) => date.toISOString().slice(0, 10);
-  const today = dayKey(now);
-  const soonDay = dayKey(soon);
-  const tasks = await prisma.task.findMany({ where: { status: { not: 'completed' }, deadline: { not: null } }, include: { assignments: { where: { active: true } } } });
+  const localDay = (date: Date) => {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: process.env.APP_TIME_ZONE ?? 'Asia/Manila', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+    const part = (type: string) => parts.find((item) => item.type === type)?.value ?? '';
+    return `${part('year')}-${part('month')}-${part('day')}`;
+  };
+  const today = localDay(now);
+  const soonDay = localDay(soon);
+  const administrators = await prisma.user.findMany({ where: { role: 'Administrator', status: 'active' }, select: { id: true } });
+  const tasks = await prisma.task.findMany({ where: { status: { not: 'completed' }, deadline: { not: null } }, include: { assignments: { where: { active: true } }, project: { select: { title: true } } } });
   for (const task of tasks) {
     if (!task.deadline) continue;
-    const deadlineDay = dayKey(task.deadline);
+    const deadlineDay = task.deadline.toISOString().slice(0, 10);
     const overdue = deadlineDay < today;
     const dueToday = deadlineDay === today;
     const upcoming = !overdue && deadlineDay <= soonDay;
     if (!overdue && !upcoming) continue;
     for (const assignment of task.assignments) {
-      if (overdue) await notifyOnce(assignment.assigneeId, 'delay_risk', `Task “${task.title}” is overdue.`, task.id, 'task');
+      if (overdue) {
+        const created = await notifyOnce(assignment.assigneeId, 'delay_risk', `Task “${task.title}” is overdue.`, task.id, 'task');
+        if (created) await emailOverdueTask(assignment.assigneeId, task).catch((error: unknown) => console.error('Overdue task email failed', { taskId: task.id, userId: assignment.assigneeId, error }));
+      }
       else await notifyOnce(assignment.assigneeId, 'deadline_reminder', dueToday ? `Task “${task.title}” is due today.` : `Task “${task.title}” is due within 24 hours.`, task.id, 'task');
     }
+    const adminMessage = overdue ? `Task “${task.title}” in “${task.project.title}” is overdue.` : dueToday ? `Task “${task.title}” in “${task.project.title}” is due today.` : `Task “${task.title}” in “${task.project.title}” is due soon.`;
+    for (const administrator of administrators) await notifyOnce(administrator.id, overdue ? 'delay_risk' : 'deadline_reminder', adminMessage, task.id, 'task');
   }
   const projects = await prisma.project.findMany({ where: { status: { not: 'completed' }, deadline: { not: null } }, include: { members: true } });
   for (const project of projects) {
     if (!project.deadline) continue;
-    const deadlineDay = dayKey(project.deadline);
+    const deadlineDay = project.deadline.toISOString().slice(0, 10);
     const overdue = deadlineDay < today;
     const upcoming = !overdue && deadlineDay <= soonDay;
     if (!overdue && !upcoming) continue;

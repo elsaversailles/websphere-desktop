@@ -13,16 +13,19 @@ import { JobsService } from './jobs.service.js';
 import { DomainEventsService } from './domain-events.service.js';
 import { AuditLogService } from './audit-log.service.js';
 import { PushService } from './push.service.js';
+import { LocalStorageService } from './local-storage.service.js';
 import { passwordRequirements, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const DEFAULT_SESSION_TIMEOUT_MINUTES = 30;
 const DEFAULT_INACTIVE_ACCOUNT_ALERTS = { enabled: false, recipientEmail: '', inactivityDays: 30 };
+const DEFAULT_GENERAL_SETTINGS = { systemName: 'WebSphere', maxIdeasPerSearch: 10, releaseManifestUrl: '' };
 type InactiveAccountAlerts = typeof DEFAULT_INACTIVE_ACCOUNT_ALERTS;
 type SecuritySettings = { sessionTimeoutMinutes: number; inactiveAccountAlerts: InactiveAccountAlerts };
+type GeneralSettings = typeof DEFAULT_GENERAL_SETTINGS;
 const WorkflowEventType = { status_change: 'status_change', task_completed: 'task_completed', assignment_change: 'assignment_change', progress_activity: 'progress_activity' } as const;
-const NotificationType = { task_assignment: 'task_assignment', group_activity: 'group_activity', announcement: 'announcement', ticket_update: 'ticket_update' } as const;
+const NotificationType = { task_assignment: 'task_assignment', task_update: 'task_update', project_change: 'project_change', group_activity: 'group_activity', announcement: 'announcement', deadline_reminder: 'deadline_reminder', delay_risk: 'delay_risk', ai_suggestion: 'ai_suggestion', ticket_update: 'ticket_update', outlook: 'outlook' } as const;
 type Role = (typeof Role)[keyof typeof Role];
 type TaskStatus = 'pending' | 'ongoing' | 'for_review' | 'completed';
 type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva';
@@ -83,8 +86,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   private readonly events: DomainEventsService;
   private readonly audit: AuditLogService;
   private readonly push: PushService;
+  private readonly storage: LocalStorageService;
 
-  constructor(prisma: PrismaService, config: ConfigService, crypto: CryptoService, redis: RedisService, email: EmailService, jobs: JobsService, events: DomainEventsService, audit: AuditLogService, push: PushService) {
+  constructor(prisma: PrismaService, config: ConfigService, crypto: CryptoService, redis: RedisService, email: EmailService, jobs: JobsService, events: DomainEventsService, audit: AuditLogService, push: PushService, storage: LocalStorageService) {
     this.prisma = prisma;
     this.accessSecret = new TextEncoder().encode(config.get('JWT_ACCESS_SECRET'));
     this.refreshSecret = new TextEncoder().encode(config.get('JWT_REFRESH_SECRET'));
@@ -96,6 +100,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     this.events = events;
     this.audit = audit;
     this.push = push;
+    this.storage = storage;
   }
   private refreshKey(jti: string) { return `auth:refresh:${jti}`; }
   private usedRefreshKey(jti: string) { return `auth:refresh:used:${jti}`; }
@@ -159,6 +164,87 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.audit.log('SecuritySettings', 'updated', 'info', 'Administrator updated security and email alert settings', caller.id);
     return next;
   }
+  private generalSettingsFrom(rows: Array<{ key: string; value: unknown }>): GeneralSettings {
+    const get = (key: keyof GeneralSettings) => rows.find((row) => row.key === key)?.value;
+    const systemName = get('systemName');
+    const maxIdeasPerSearch = get('maxIdeasPerSearch');
+    const releaseManifestUrl = get('releaseManifestUrl');
+    return {
+      systemName: typeof systemName === 'string' && systemName.trim().length >= 2 ? systemName.trim() : DEFAULT_GENERAL_SETTINGS.systemName,
+      maxIdeasPerSearch: typeof maxIdeasPerSearch === 'number' && Number.isInteger(maxIdeasPerSearch) && maxIdeasPerSearch >= 2 && maxIdeasPerSearch <= 50 ? maxIdeasPerSearch : DEFAULT_GENERAL_SETTINGS.maxIdeasPerSearch,
+      releaseManifestUrl: typeof releaseManifestUrl === 'string' ? releaseManifestUrl.trim() : DEFAULT_GENERAL_SETTINGS.releaseManifestUrl,
+    };
+  }
+  async generalSettings(caller?: Caller): Promise<GeneralSettings> {
+    if (caller) await this.admin(caller);
+    const rows = await this.prisma.systemSetting.findMany({ where: { key: { in: ['systemName', 'maxIdeasPerSearch', 'releaseManifestUrl'] } } });
+    return this.generalSettingsFrom(rows);
+  }
+  async updateGeneralSettings(caller: Caller, input: GeneralSettings): Promise<GeneralSettings> {
+    await this.admin(caller);
+    const next = { ...input, systemName: input.systemName.trim(), releaseManifestUrl: input.releaseManifestUrl.trim() };
+    await Promise.all(Object.entries(next).map(([key, value]) => this.prisma.systemSetting.upsert({ where: { key }, update: { value, updatedBy: caller.id }, create: { key, value, updatedBy: caller.id } })));
+    await this.audit.log('SystemSettings', 'general_settings_updated', 'info', 'Administrator updated general system settings', caller.id);
+    return next;
+  }
+  async systemNotices(caller: Caller) { await this.admin(caller); return this.prisma.systemNotice.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }); }
+  async markSystemNoticesRead(caller: Caller) { await this.admin(caller); return this.prisma.systemNotice.updateMany({ where: { read: false }, data: { read: true } }); }
+  private async systemNotice(title: string, message: string, type = 'system') { return this.prisma.systemNotice.create({ data: { title, message, type } }); }
+  private versionCompare(left: string, right: string) {
+    const parts = (value: string) => value.replace(/^v/i, '').split(/[.+-]/).slice(0, 3).map((part) => Number.parseInt(part, 10) || 0);
+    const a = parts(left), b = parts(right);
+    for (let index = 0; index < Math.max(a.length, b.length); index += 1) { if ((a[index] ?? 0) !== (b[index] ?? 0)) return (a[index] ?? 0) > (b[index] ?? 0) ? 1 : -1; }
+    return 0;
+  }
+  async checkForUpdates(caller: Caller) {
+    await this.admin(caller);
+    const { releaseManifestUrl } = await this.generalSettings(caller);
+    if (!releaseManifestUrl) fail('UPDATE_SOURCE_NOT_CONFIGURED', 'Add a release manifest URL in General Configuration before checking for updates.', 400);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const response = await fetch(releaseManifestUrl, { signal: controller.signal, headers: { accept: 'application/json' } });
+      if (!response.ok) fail('UPDATE_CHECK_FAILED', `The release manifest returned HTTP ${response.status}.`, 502);
+      const manifest: any = await response.json().catch(() => null);
+      if (!manifest || typeof manifest.version !== 'string' || !/^v?\d+(\.\d+){0,2}(?:[-+][\w.-]+)?$/.test(manifest.version)) fail('UPDATE_MANIFEST_INVALID', 'The release manifest must provide a semantic version.', 502);
+      const currentVersion = process.env.APP_VERSION?.trim() || '0.1.0';
+      const updateAvailable = this.versionCompare(manifest.version, currentVersion) > 0;
+      const release = {
+        currentVersion,
+        latestVersion: manifest.version,
+        updateAvailable,
+        releaseDate: typeof manifest.releaseDate === 'string' ? manifest.releaseDate : null,
+        summary: typeof manifest.summary === 'string' ? manifest.summary : '',
+        features: Array.isArray(manifest.features) ? manifest.features.filter((item: unknown) => typeof item === 'string').slice(0, 20) : [],
+        fixes: Array.isArray(manifest.fixes) ? manifest.fixes.filter((item: unknown) => typeof item === 'string').slice(0, 20) : [],
+        enhancements: Array.isArray(manifest.enhancements) ? manifest.enhancements.filter((item: unknown) => typeof item === 'string').slice(0, 20) : [],
+        downloadUrl: typeof manifest.downloadUrl === 'string' ? manifest.downloadUrl : null,
+        checkedAt: new Date().toISOString(),
+      };
+      await this.systemNotice('Software update checked', updateAvailable ? `Version ${release.latestVersion} is available (current ${currentVersion}).` : `WebSphere is current at version ${currentVersion}.`, 'release');
+      await this.audit.log('SystemSettings', 'software_update_checked', 'info', `Checked release manifest; latest ${release.latestVersion}`, caller.id);
+      return release;
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      fail('UPDATE_CHECK_FAILED', error instanceof Error && error.name === 'AbortError' ? 'The release manifest did not respond in time.' : 'Could not retrieve the release manifest.', 502);
+    } finally { clearTimeout(timer); }
+  }
+  async createDatabaseBackup(caller: Caller) {
+    await this.admin(caller);
+    const [users, admins, groups, announcements, groupMembers, joinCodes, messages, projects, projectMembers, tasks, dependencies, assignments, comments, workflow, ideas, polls, pollOptions, votes, calendarEvents, notifications, preferences, pushSubscriptions, mobileTokens, tools, connections, resources, usage, aiInteractions, embeddings, snapshots, tickets, settings, auditLogs, systemNotices, backups] = await this.prisma.$transaction([
+      this.prisma.user.findMany(), this.prisma.admin.findMany(), this.prisma.group.findMany(), this.prisma.announcement.findMany(), this.prisma.groupMember.findMany(), this.prisma.joinCode.findMany(), this.prisma.chatMessage.findMany(), this.prisma.project.findMany(), this.prisma.projectMember.findMany(), this.prisma.task.findMany(), this.prisma.taskDependency.findMany(), this.prisma.taskAssignment.findMany(), this.prisma.taskComment.findMany(), this.prisma.workflowEvent.findMany(), this.prisma.idea.findMany(), this.prisma.ideaPoll.findMany(), this.prisma.pollOption.findMany(), this.prisma.vote.findMany(), this.prisma.calendarEvent.findMany(), this.prisma.notification.findMany(), this.prisma.notificationPreference.findMany(), this.prisma.pushSubscription.findMany(), this.prisma.mobilePushToken.findMany(), this.prisma.connectedTool.findMany(), this.prisma.toolConnection.findMany(), this.prisma.linkedResource.findMany(), this.prisma.toolUsage.findMany(), this.prisma.aiInteraction.findMany(), this.prisma.embedding.findMany(), this.prisma.analyticsSnapshot.findMany(), this.prisma.supportTicket.findMany(), this.prisma.systemSetting.findMany(), this.prisma.auditLog.findMany(), this.prisma.systemNotice.findMany(), this.prisma.systemBackup.findMany(),
+    ]);
+    const now = new Date();
+    const fileName = `websphere-backup-${now.toISOString().replace(/[:.]/g, '-')}-${randomBytes(4).toString('hex')}.json`;
+    const snapshot = JSON.stringify({ format: 'websphere-database-backup', version: 1, generatedAt: now.toISOString(), data: { users, admins, groups, announcements, groupMembers, joinCodes, messages, projects, projectMembers, tasks, dependencies, assignments, comments, workflow, ideas, polls, pollOptions, votes, calendarEvents, notifications, preferences, pushSubscriptions, mobileTokens, tools, connections, resources, usage, aiInteractions, embeddings, snapshots, tickets, settings, auditLogs, systemNotices, backups } });
+    const bytes = await this.storage.saveBackup(fileName, snapshot);
+    const backup = await this.prisma.systemBackup.create({ data: { fileName, bytes, createdBy: caller.id } });
+    await this.systemNotice('Database backup created', `${fileName} was created successfully.`, 'backup');
+    await this.audit.log('SystemSettings', 'database_backup_created', 'info', `Created database backup ${fileName}`, caller.id);
+    return { ...backup, downloadPath: `/admin/backups/${fileName}/download` };
+  }
+  async databaseBackups(caller: Caller) { await this.admin(caller); return this.prisma.systemBackup.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }); }
+  async databaseBackupFile(caller: Caller, fileName: string) { await this.admin(caller); const backup = await this.prisma.systemBackup.findUnique({ where: { fileName } }); if (!backup) fail('NOT_FOUND', 'Backup not found', 404); return { backup, content: await this.storage.readBackup(fileName) }; }
   async sessionPolicy() {
     const setting = await this.prisma.systemSetting.findUnique({ where: { key: 'sessionTimeoutMinutes' } });
     return { idleTimeoutMinutes: this.sessionTimeoutMinutes(setting?.value) };
@@ -303,6 +389,43 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   publicUser(user: any) { const { passwordHash, ...safe } = user; return safe; }
   async me(caller: Caller) { return this.publicUser(await this.prisma.user.findUniqueOrThrow({ where: { id: caller.id } })); }
   async updateMe(caller: Caller, input: any) { if (input.email) { const duplicate = await this.prisma.user.findFirst({ where: { email: input.email, NOT: { id: caller.id } } }); if (duplicate) fail('EMAIL_IN_USE', 'Email is already in use', 409, { email: 'already in use' }); } return this.publicUser(await this.prisma.user.update({ where: { id: caller.id }, data: input })); }
+  /** Erases personal data while retaining an anonymized author row so shared project history remains intact. */
+  async deleteMyAccount(caller: Caller, password: string) {
+    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: caller.id }, select: { id: true, role: true, passwordHash: true } });
+    if (!await verify(user.passwordHash, password)) fail('AUTH_INVALID_CREDENTIALS', 'Current password is incorrect.', 401, { password: 'incorrect' });
+    const [ledGroups, ledProjects, connections] = await Promise.all([
+      this.prisma.groupMember.findMany({ where: { userId: user.id, role: ProjectRole.Project_Leader }, select: { groupId: true } }),
+      this.prisma.projectMember.findMany({ where: { userId: user.id, role: ProjectRole.Project_Leader }, select: { projectId: true } }),
+      this.prisma.toolConnection.findMany({ where: { userId: user.id }, select: { id: true } }),
+    ]);
+    for (const membership of ledGroups) {
+      const successor = await this.prisma.groupMember.findFirst({ where: { groupId: membership.groupId, userId: { not: user.id } }, orderBy: { joinedAt: 'asc' } });
+      if (successor) await this.prisma.groupMember.update({ where: { id: successor.id }, data: { role: ProjectRole.Project_Leader } });
+    }
+    for (const membership of ledProjects) {
+      const successor = await this.prisma.projectMember.findFirst({ where: { projectId: membership.projectId, userId: { not: user.id } }, orderBy: { id: 'asc' } });
+      if (successor) await this.prisma.projectMember.update({ where: { id: successor.id }, data: { role: ProjectRole.Project_Leader } });
+    }
+    const connectionIds = connections.map((connection: any) => connection.id);
+    await this.removeRefreshSessions(user.id);
+    await this.prisma.$transaction([
+      ...(connectionIds.length ? [this.prisma.toolUsage.deleteMany({ where: { connectionId: { in: connectionIds } } }), this.prisma.linkedResource.deleteMany({ where: { connectionId: { in: connectionIds } } }), this.prisma.toolConnection.deleteMany({ where: { id: { in: connectionIds } } })] : []),
+      this.prisma.notification.deleteMany({ where: { userId: user.id } }),
+      this.prisma.pushSubscription.deleteMany({ where: { userId: user.id } }),
+      this.prisma.mobilePushToken.deleteMany({ where: { userId: user.id } }),
+      this.prisma.notificationPreference.deleteMany({ where: { userId: user.id } }),
+      this.prisma.vote.deleteMany({ where: { voterId: user.id } }),
+      this.prisma.aiInteraction.deleteMany({ where: { userId: user.id } }),
+      this.prisma.supportTicket.deleteMany({ where: { userId: user.id } }),
+      this.prisma.announcement.deleteMany({ where: { authorId: user.id } }),
+      this.prisma.groupMember.deleteMany({ where: { userId: user.id } }),
+      this.prisma.projectMember.deleteMany({ where: { userId: user.id } }),
+      this.prisma.admin.deleteMany({ where: { userId: user.id } }),
+      this.prisma.user.update({ where: { id: user.id }, data: { email: `deleted-${user.id}@invalid.local`, fullName: 'Deleted user', passwordHash: await hash(randomBytes(32).toString('hex')), institution: null, course: null, avatarUrl: null, status: 'removed', failedLogins: 0, lockedAt: null, archivedAt: null, tokenVersion: { increment: 1 } } }),
+    ]);
+    await this.audit.log('Privacy', 'account_deleted', 'info', 'User removed their account and personal data was anonymized', user.id);
+    return { ok: true };
+  }
   async member(groupId: string, userId: string, leader = false) { const membership = await this.prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId } } }); if (!membership || (leader && membership.role !== ProjectRole.Project_Leader)) fail('RBAC_FORBIDDEN', 'Group membership does not grant this action', 403); return membership; }
   async projectMember(projectId: string, userId: string, leader = false) { const membership = await this.prisma.projectMember.findUnique({ where: { projectId_userId: { projectId, userId } } }); if (!membership || (leader && membership.role !== ProjectRole.Project_Leader)) fail('RBAC_FORBIDDEN', 'Project membership does not grant this action', 403); return membership; }
   code() { return `${randomBytes(3).toString('hex').slice(0, 3)}-${randomBytes(3).toString('hex').slice(0, 3)}-${randomBytes(3).toString('hex').slice(0, 3)}`; }
@@ -321,14 +444,23 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     });
     return groups.map((group: any) => ({ id: group.id, name: group.name, members: group.members, _count: group._count, messageMatch: group.messages[0]?.body ?? null }));
   }
+  private redactPrivateMemberProfiles(group: any) {
+    return {
+      ...group,
+      members: group.members.map((member: any) => {
+        const { preference, ...user } = member.user;
+        return { ...member, user: { ...user, avatarUrl: preference?.profileVisibility === false ? null : user.avatarUrl } };
+      }),
+    };
+  }
   async group(caller: Caller, id: string) {
     await this.member(id, caller.id);
     const activeCode = { active: true, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] };
-    const include = { members: { include: { user: { select: { id: true, fullName: true, avatarUrl: true } } } }, joinCodes: { where: activeCode, orderBy: { id: 'desc' as const }, take: 1 }, projects: true, ideas: true };
+    const include = { members: { include: { user: { select: { id: true, fullName: true, avatarUrl: true, preference: { select: { profileVisibility: true } } } } } }, joinCodes: { where: activeCode, orderBy: { id: 'desc' as const }, take: 1 }, projects: true, ideas: true };
     const group = await this.prisma.group.findUniqueOrThrow({ where: { id }, include });
     // Self-heal: a group whose only join code has expired (or never had one) always gets a fresh active code.
-    if (!group.joinCodes.length) { await this.issueJoinCode(id); return this.prisma.group.findUniqueOrThrow({ where: { id }, include }); }
-    return group;
+    if (!group.joinCodes.length) { await this.issueJoinCode(id); return this.redactPrivateMemberProfiles(await this.prisma.group.findUniqueOrThrow({ where: { id }, include })); }
+    return this.redactPrivateMemberProfiles(group);
   }
   async addGroupMember(caller: Caller, groupId: string, userId: string) {
     await this.member(groupId, caller.id);
@@ -364,21 +496,96 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   // means it is always present and would otherwise always be rejected by Prisma.
   async createProject(caller: Caller, input: any) { const { memberIds: requested, groupId, ...data } = input; if (groupId) await this.member(groupId, caller.id); const memberIds = [...new Set([caller.id, ...(requested ?? [])])]; if (groupId) for (const userId of memberIds) await this.member(groupId, userId); else if (memberIds.length > 1) fail('VALIDATION_FAILED', 'Add collaborators after connecting this project to a group.', 400, { memberIds: 'Independent projects start with their creator only' }); return this.prisma.project.create({ data: { ...data, ...(groupId ? { groupId } : {}), createdBy: caller.id, members: { create: memberIds.map((userId) => ({ userId, role: userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } }, include: { members: true } }); }
   async projects(caller: Caller) { return this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } } }, include: { group: true, members: { where: { userId: caller.id } }, tasks: true, _count: { select: { members: true } } } }); }
-  async project(caller: Caller, id: string) { await this.projectMember(id, caller.id); return this.prisma.project.findUniqueOrThrow({ where: { id }, include: { group: { include: { members: { include: { user: { select: { id: true, fullName: true } } } } } }, members: { include: { user: { select: { id: true, fullName: true } } } }, tasks: { include: { assignments: { where: { active: true } } } } } }); }
+  async project(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { group: { include: { members: { include: { user: { select: { id: true, fullName: true } } } } } }, members: { include: { user: { select: { id: true, fullName: true } } } }, tasks: { include: { assignments: { where: { active: true } } } } } }); return { ...project, tasks: project.tasks.map((task: any) => ({ ...task, risk: taskPrediction(task, new Date()) })) }; }
   async updateProject(caller: Caller, id: string, input: any) { await this.projectMember(id, caller.id, true); const { memberIds, ...data } = input; return this.prisma.project.update({ where: { id }, data }); }
+  async deleteProject(caller: Caller, id: string) {
+    await this.projectMember(id, caller.id, true);
+    await this.prisma.$transaction(async (tx: any) => {
+      const tasks = await tx.task.findMany({ where: { projectId: id }, select: { id: true } });
+      const taskIds = tasks.map((task: { id: string }) => task.id);
+      if (taskIds.length) {
+        await tx.notification.deleteMany({ where: { relatedType: 'task', relatedId: { in: taskIds } } });
+        await tx.taskDependency.deleteMany({ where: { OR: [{ prerequisiteId: { in: taskIds } }, { dependentId: { in: taskIds } }] } });
+        await tx.taskAssignment.deleteMany({ where: { taskId: { in: taskIds } } });
+        await tx.taskComment.deleteMany({ where: { taskId: { in: taskIds } } });
+        await tx.embedding.deleteMany({ where: { sourceType: 'task', sourceId: { in: taskIds } } });
+      }
+      await tx.notification.deleteMany({ where: { relatedType: 'project', relatedId: id } });
+      await tx.linkedResource.deleteMany({ where: { OR: [{ projectId: id }, ...(taskIds.length ? [{ taskId: { in: taskIds } }] : [])] } });
+      await tx.workflowEvent.deleteMany({ where: { projectId: id } });
+      await tx.task.deleteMany({ where: { projectId: id } });
+      await tx.calendarEvent.updateMany({ where: { projectId: id }, data: { projectId: null } });
+      await tx.analyticsSnapshot.deleteMany({ where: { projectId: id } });
+      await tx.embedding.deleteMany({ where: { OR: [{ projectId: id }, { sourceType: 'project', sourceId: id }] } });
+      await tx.projectMember.deleteMany({ where: { projectId: id } });
+      await tx.project.delete({ where: { id } });
+    });
+    return { ok: true };
+  }
   async addProjectMember(caller: Caller, projectId: string, userId: string) { await this.projectMember(projectId, caller.id, true); const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } }); if (!project.groupId) fail('INVALID_OPERATION', 'Connect this independent project to a group before adding members.', 400); await this.member(project.groupId, userId); return this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: ProjectRole.Project_Member } }); }
   async updateResponsibility(caller: Caller, projectId: string, userId: string, responsibility: string) { await this.projectMember(projectId, caller.id, true); await this.projectMember(projectId, userId); return this.prisma.projectMember.update({ where: { projectId_userId: { projectId, userId } }, data: { responsibility } }); }
   async projectProgress(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { tasks: true } }); const analytics = projectAnalytics(project.tasks, project.deadline); return { progress: completionRate(project.tasks.filter((t) => t.status === 'completed').length, project.tasks.length), onTrack: analytics.riskLevel === 'on_track', ...analytics }; }
   async createTask(caller: Caller, projectId: string, input: any) { await this.projectMember(projectId, caller.id, true); return this.prisma.task.create({ data: { ...input, projectId, createdBy: caller.id } }); }
   async task(caller: Caller, id: string) {
     const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, include: { assignments: { where: { active: true } }, project: true } });
-    await this.projectMember(task.projectId, caller.id);
+    if (!task.assignments.some((assignment: { assigneeId: string }) => assignment.assigneeId === caller.id)) await this.projectMember(task.projectId, caller.id);
     const assignment = task.assignments[0];
     const [assignee, assigner] = assignment ? await Promise.all([this.prisma.user.findUnique({ where: { id: assignment.assigneeId }, select: { id: true, fullName: true } }), this.prisma.user.findUnique({ where: { id: assignment.assignerId }, select: { id: true, fullName: true } })]) : [null, null];
     return { ...task, assignee, assigner, progress: taskProgress(task.status) };
   }
-  async updateTask(caller: Caller, id: string, input: any) { const task = await this.task(caller, id); await this.projectMember(task.projectId, caller.id, true); return this.prisma.task.update({ where: { id }, data: input }); }
-  async assignTask(caller: Caller, id: string, assigneeId: string) { const task = await this.task(caller, id); await this.projectMember(task.projectId, caller.id, true); await this.projectMember(task.projectId, assigneeId); await this.prisma.$transaction([this.prisma.taskAssignment.updateMany({ where: { taskId: id, active: true }, data: { active: false } }), this.prisma.taskAssignment.create({ data: { taskId: id, assigneeId, assignerId: caller.id } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: WorkflowEventType.assignment_change, toValue: assigneeId } })]); await this.jobs.enqueueAnalyticsRecompute(task.projectId); return this.notify([assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}”`, id, 'task'); }
+  async updateTask(caller: Caller, id: string, input: any) {
+    const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, include: { assignments: { where: { active: true } }, project: { select: { title: true } } } });
+    await this.projectMember(task.projectId, caller.id, true);
+    const { assigneeId, status, ...details } = input;
+    if (assigneeId) await this.projectMember(task.projectId, assigneeId);
+    const previousAssigneeId = task.assignments[0]?.assigneeId ?? null;
+    const reassigned = assigneeId !== undefined && assigneeId !== previousAssigneeId;
+    const statusChanged = status !== undefined && status !== task.status;
+    const now = new Date();
+    const updated = await this.prisma.$transaction(async (tx: any) => {
+      const saved = await tx.task.update({ where: { id }, data: {
+        ...details,
+        ...(statusChanged ? { status, ...(status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: status === 'completed' ? now : null } : {}),
+      } });
+      if (reassigned) {
+        await tx.taskAssignment.updateMany({ where: { taskId: id, active: true }, data: { active: false } });
+        if (assigneeId) await tx.taskAssignment.create({ data: { taskId: id, assigneeId, assignerId: caller.id } });
+        await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: WorkflowEventType.assignment_change, fromValue: previousAssigneeId, toValue: assigneeId } });
+      }
+      if (statusChanged) await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: status } });
+      return saved;
+    });
+    if (reassigned && assigneeId) await this.notify([assigneeId], NotificationType.task_assignment, `You were assigned “${updated.title}” in “${task.project.title}”`, id, 'task').catch(() => undefined);
+    if (reassigned && previousAssigneeId) await this.notify([previousAssigneeId], NotificationType.task_update, `You were unassigned from “${updated.title}”`, id, 'task').catch(() => undefined);
+    if (statusChanged && (assigneeId ?? previousAssigneeId) && (assigneeId ?? previousAssigneeId) !== caller.id) await this.notify([assigneeId ?? previousAssigneeId], NotificationType.task_update, `Task “${updated.title}” changed status to ${status}.`, id, 'task').catch(() => undefined);
+    if (statusChanged || reassigned) await this.notifyTaskAdmins(id, `Task “${updated.title}” in “${task.project.title}” ${reassigned ? 'was reassigned' : `changed status to ${status}`}.`, caller.id);
+    await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
+    return updated;
+  }
+  async deleteTask(caller: Caller, id: string) {
+    const task = await this.prisma.task.findUnique({ where: { id }, select: { projectId: true } });
+    if (!task) fail('NOT_FOUND', 'Task not found', 404);
+    await this.projectMember(task.projectId, caller.id, true);
+    await this.prisma.$transaction(async (tx: any) => {
+      await tx.notification.deleteMany({ where: { relatedType: 'task', relatedId: id } });
+      await tx.taskDependency.deleteMany({ where: { OR: [{ prerequisiteId: id }, { dependentId: id }] } });
+      await tx.taskAssignment.deleteMany({ where: { taskId: id } });
+      await tx.taskComment.deleteMany({ where: { taskId: id } });
+      await tx.linkedResource.deleteMany({ where: { taskId: id } });
+      await tx.embedding.deleteMany({ where: { sourceType: 'task', sourceId: id } });
+      await tx.workflowEvent.deleteMany({ where: { taskId: id } });
+      await tx.task.delete({ where: { id } });
+    });
+    await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
+    return { ok: true };
+  }
+  async assignTask(caller: Caller, id: string, assigneeId: string) { return this.updateTask(caller, id, { assigneeId }); }
+  private async notifyTaskAdmins(taskId: string, message: string, actorId?: string) {
+    try {
+      const admins = await this.prisma.user.findMany({ where: { role: Role.Administrator, status: 'active', ...(actorId ? { id: { not: actorId } } : {}) }, select: { id: true } });
+      if (admins.length) await this.notify(admins.map((admin: { id: string }) => admin.id), NotificationType.task_update, message, taskId, 'task');
+    } catch { /* A notification failure must not turn a committed task change into a failed response. */ }
+  }
   /**
    * An active task assignment is the authority for changing its status. Do not
    * call `task()` here: legacy assignments can exist without a ProjectMember
@@ -388,11 +595,15 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async taskStatus(caller: Caller, id: string, status: TaskStatus) {
     const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, select: { id: true, projectId: true, status: true, startedAt: true } });
     const assignment = await this.prisma.taskAssignment.findFirst({ where: { taskId: id, assigneeId: caller.id, active: true } });
-    if (!assignment) fail('RBAC_FORBIDDEN', 'Only the active assignee can change task status', 403);
+    if (!assignment) await this.projectMember(task.projectId, caller.id, true);
+    if (status === task.status) return this.prisma.task.findUniqueOrThrow({ where: { id } });
     const now = new Date();
-    const updated = await this.prisma.task.update({ where: { id }, data: { status, ...(status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), ...(status === 'completed' ? { completedAt: now } : {}) } });
-    await this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: status } });
-    await this.jobs.enqueueAnalyticsRecompute(task.projectId);
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.task.update({ where: { id }, data: { status, ...(status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: status === 'completed' ? now : null } }),
+      this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: status } }),
+    ]);
+    await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
+    await this.notifyTaskAdmins(id, `Task “${updated.title}” changed status to ${status}.`, caller.id);
     return updated;
   }
   async myTasks(caller: Caller, filter: any) {
@@ -485,7 +696,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       ...(changedStatus ? [this.prisma.task.update({ where: { id: task.id }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), ...(input.status === 'completed' ? { completedAt: now } : {}) } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: input.status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: input.status } })] : []),
     ]);
     await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Updated “${input.title}” linked to “${task.title}”` } });
-    if (changedStatus || reassigned) await this.jobs.enqueueAnalyticsRecompute(task.projectId);
+    if (changedStatus || reassigned) await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
+    if (reassigned && input.assigneeId) await this.notify([input.assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}”`, task.id, 'task').catch(() => undefined);
+    if (changedStatus || reassigned) await this.notifyTaskAdmins(task.id, `Task “${task.title}” ${reassigned ? 'was reassigned' : `changed status to ${input.status}`}.`, caller.id);
     return { ok: true, taskId: task.id, projectId: task.projectId };
   }
   async launchResource(caller: Caller, resourceId: string) {
@@ -574,9 +787,29 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const summary = created + updated + cancelled > 0 ? `Outlook calendar: ${created} new, ${updated} updated, ${cancelled} cancelled` : 'Outlook calendar up to date';
     return { summary, created, updated, cancelled };
   }
-  async idea(caller: Caller, groupId: string, input: any) { await this.member(groupId, caller.id); return this.prisma.idea.create({ data: { ...input, groupId, authorId: caller.id } }); }
+  private ideaReadinessScore(title: string, body: string) {
+    const words = body.trim().split(/\s+/).filter(Boolean);
+    let score = 25;
+    if (title.trim().length >= 12) score += 10;
+    if (words.length >= 30) score += 20;
+    if (words.length >= 80) score += 10;
+    if (/\b(problem|challenge|need|issue)\b/i.test(body)) score += 10;
+    if (/\b(user|student|community|team|audience)\b/i.test(body)) score += 10;
+    if (/\b(goal|outcome|measure|impact|result)\b/i.test(body)) score += 10;
+    if (/\b(build|develop|design|create|implement)\b/i.test(body)) score += 5;
+    return Math.min(100, score);
+  }
+  async idea(caller: Caller, groupId: string, input: any) { await this.member(groupId, caller.id); return this.prisma.idea.create({ data: { ...input, readinessScore: this.ideaReadinessScore(input.title, input.body), groupId, authorId: caller.id } }); }
   async ideas(caller: Caller, groupId: string) { await this.member(groupId, caller.id); return this.prisma.idea.findMany({ where: { groupId }, orderBy: { createdAt: 'desc' } }); }
-  async reviseIdea(caller: Caller, id: string, input: any) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can revise an unselected idea', 403); return this.prisma.idea.update({ where: { id }, data: { ...input, status: 'refined' } }); }
+  async reviseIdea(caller: Caller, id: string, input: any) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can revise an unselected idea', 403); return this.prisma.idea.update({ where: { id }, data: { ...input, readinessScore: this.ideaReadinessScore(input.title, input.body), status: 'refined' } }); }
+  async suggestIdea(caller: Caller, id: string) {
+    const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } });
+    if (idea.authorId !== caller.id) fail('RBAC_FORBIDDEN', 'Only the author can request suggestions for this idea.', 403);
+    const prompt = `Improve this academic project idea. Identify concrete gaps, then provide a revised title and a concise revised description. Do not claim any work was completed.\n\nTitle: ${idea.title}\nCategory: ${idea.category}\nDescription: ${idea.body}`;
+    const result = await this.ai(caller, prompt, { scopeType: 'idea', scopeId: id });
+    await this.notify([caller.id], NotificationType.ai_suggestion, `AI suggestion ready for “${this.noticeText(idea.title, 80)}”.`, id, 'idea');
+    return { ideaId: id, ...result };
+  }
   async rejectIdea(caller: Caller, id: string) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can reject an unselected idea', 403); return this.prisma.idea.update({ where: { id }, data: { status: 'rejected' } }); }
   async mergeIdeas(caller: Caller, groupId: string, ideaIds: string[]) {
     await this.member(groupId, caller.id);
@@ -699,8 +932,20 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return this.prisma.mobilePushToken.upsert({ where: { token }, update: { userId: caller.id }, create: { userId: caller.id, token } });
   }
   async unregisterMobilePush(caller: Caller, token: string) { return this.prisma.mobilePushToken.deleteMany({ where: { userId: caller.id, token } }); }
+  private preferenceKeyForNotification(type: NotificationType, relatedType?: string) {
+    if (type === NotificationType.task_assignment || type === NotificationType.task_update || type === NotificationType.project_change) return 'tasks';
+    if (type === NotificationType.deadline_reminder || type === NotificationType.delay_risk) return relatedType === 'task' ? 'tasks' : 'deadlines';
+    if (type === NotificationType.group_activity || type === NotificationType.announcement) return 'groupActivity';
+    if (type === NotificationType.ai_suggestion) return 'aiSuggestions';
+    return null;
+  }
   async notify(userIds: string[], type: NotificationType, message: string, relatedId?: string, relatedType?: string) {
-    const created = await Promise.all(userIds.map((userId) => this.prisma.notification.create({ data: { userId, type, message, relatedId, relatedType } })));
+    const recipients = [...new Set(userIds)];
+    const preferenceKey = this.preferenceKeyForNotification(type, relatedType);
+    const preferences = preferenceKey && recipients.length ? await this.prisma.notificationPreference.findMany({ where: { userId: { in: recipients } }, select: { userId: true, [preferenceKey]: true } }) : [];
+    const enabled = new Map(preferences.map((preference: any) => [preference.userId, preference[preferenceKey!]]));
+    const eligible = preferenceKey ? recipients.filter((userId) => enabled.get(userId) !== false) : recipients;
+    const created = await Promise.all(eligible.map((userId) => this.prisma.notification.create({ data: { userId, type, message, relatedId, relatedType } })));
     for (const notification of created) {
       this.events.emitNotification(notification.userId, notification);
       void this.push.deliver(notification).catch(() => undefined);
@@ -715,7 +960,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async onlineTeammates(caller: Caller, take = 8) {
     const memberships = await this.prisma.groupMember.findMany({
       where: { group: { members: { some: { userId: caller.id } } }, userId: { not: caller.id } },
-      include: { user: { select: { id: true, fullName: true, avatarUrl: true, course: true } }, group: { select: { id: true, name: true } } },
+      include: { user: { select: { id: true, fullName: true, avatarUrl: true, course: true, preference: { select: { profileVisibility: true, activityStatus: true } } } }, group: { select: { id: true, name: true } } },
     });
     const online = new Set(this.events.onlineUserIds());
     const seen = new Set<string>();
@@ -724,10 +969,10 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       .map((membership: any) => ({
         id: membership.user.id,
         fullName: membership.user.fullName,
-        avatarUrl: membership.user.avatarUrl,
+        avatarUrl: membership.user.preference?.profileVisibility === false ? null : membership.user.avatarUrl,
         role: membership.role,
         groupName: membership.group.name,
-        online: online.has(membership.userId),
+        online: membership.user.preference?.activityStatus !== false && online.has(membership.userId),
       }))
       .sort((a: any, b: any) => Number(b.online) - Number(a.online) || a.fullName.localeCompare(b.fullName))
       .slice(0, take);
@@ -781,7 +1026,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       ...selectedIdeas.map((idea: any) => ({ id: `idea-${idea.id}`, kind: 'award' as const, icon: 'star' as const, title: `${idea.title} selected`, detail: `${idea.group.name} · Chosen from group ideas`, at: idea.createdAt })),
     ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()).slice(0, take - 1);
     const next = upcoming[0];
-    if (next) items.push({ id: `next-${next.id}`, kind: 'next' as const, icon: 'target' as const, title: `Next milestone: ${next.title}`, detail: `${next.project.title} · Target: ${new Date(next.deadline!).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })} · ${next.status === 'pending' ? 'Not started' : 'In progress'}`, at: next.deadline! });
+    if (next) items.push({ id: `next-${next.id}`, kind: 'next' as const, icon: 'target' as const, title: `Next milestone: ${next.title}`, detail: `${next.project.title} · Target: ${new Date(next.deadline!).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'UTC' })} · ${next.status === 'pending' ? 'Not started' : 'In progress'}`, at: next.deadline! });
     return items;
   }
   /** Recent workflow events across every project the caller belongs to, shaped for the dashboard activity feed. */
@@ -809,8 +1054,15 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async markRead(caller: Caller, id: string) { return this.prisma.notification.updateMany({ where: { id, userId: caller.id }, data: { read: true } }); }
   async preferences(caller: Caller, data?: any) { if (data) return this.prisma.notificationPreference.upsert({ where: { userId: caller.id }, update: data, create: { userId: caller.id, ...data } }); return this.prisma.notificationPreference.upsert({ where: { userId: caller.id }, update: {}, create: { userId: caller.id } }); }
-  async integrations(caller: Caller) { return this.prisma.connectedTool.findMany({ include: { connections: { where: { userId: caller.id }, select: { id: true, status: true, lastSyncedAt: true } } } }); }
-  async integrationConnections(caller: Caller) { return this.prisma.toolConnection.findMany({ where: { userId: caller.id }, select: { id: true, provider: true, status: true, expiresAt: true, lastSyncedAt: true, syncState: true, tool: { select: { name: true, category: true } } }, orderBy: { lastSyncedAt: 'desc' } }); }
+  async integrations(caller: Caller) { return this.prisma.connectedTool.findMany({ include: { connections: { where: { userId: caller.id }, select: { id: true, status: true, lastSyncedAt: true, _count: { select: { linkedResources: true, usage: true } } } } } }); }
+  async integrationConnections(caller: Caller) { return this.prisma.toolConnection.findMany({ where: { userId: caller.id }, select: { id: true, provider: true, status: true, expiresAt: true, lastSyncedAt: true, syncState: true, _count: { select: { linkedResources: true, usage: true } }, tool: { select: { name: true, category: true } } }, orderBy: { lastSyncedAt: 'desc' } }); }
+  async launchIntegration(caller: Caller, connectionId: string) {
+    const connection = await this.prisma.toolConnection.findFirst({ where: { id: connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } });
+    if (!connection) fail('INTEGRATION_UNAVAILABLE', 'This integration is not connected.', 400);
+    const urls: Record<ProviderId, string> = { google: 'https://drive.google.com/', microsoft: 'https://www.office.com/', trello: 'https://trello.com/', asana: 'https://app.asana.com/', canva: 'https://www.canva.com/' };
+    await this.prisma.toolUsage.create({ data: { connectionId, action: `Opened ${connection.tool.name}` } });
+    return { externalUrl: urls[connection.provider as ProviderId], platform: connection.tool.name };
+  }
   async googlePickerToken(caller: Caller, connectionId: string) {
     const connection = await this.prisma.toolConnection.findFirst({ where: { id: connectionId, userId: caller.id, provider: 'google', status: 'connected' }, include: { tool: true } });
     if (!connection) fail('INTEGRATION_UNAVAILABLE', 'Connect Google Drive before choosing a Google file.', 400);
@@ -851,7 +1103,6 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     try { authorizeUrl = connectors[provider].authorizeUrl(state, callbackUrl, codeChallenge); }
     catch (error) {
       if (error instanceof Error && error.message === 'OAUTH_NOT_CONFIGURED') fail('OAUTH_NOT_CONFIGURED', 'This integration is not configured yet. Ask an administrator to add its OAuth credentials.', 503);
-      if (error instanceof Error && error.message === 'INTEGRATION_NOT_IMPLEMENTED') fail('INTEGRATION_NOT_IMPLEMENTED', 'This integration is not available yet.', 501);
       throw error;
     }
     return { state, authorizeUrl };
@@ -1148,22 +1399,24 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async adminArchiveUser(caller: Caller, targetId: string) {
     await this.admin(caller);
     if (caller.id === targetId) fail('INVALID_OPERATION', 'You cannot archive your own account', 400);
-    const target = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, status: true } });
+    const target = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, fullName: true, status: true } });
     if (!target) fail('NOT_FOUND', 'Account not found', 404);
     if (target!.status === 'archived') fail('INVALID_OPERATION', 'That account is already archived', 409);
     await this.prisma.user.update({ where: { id: targetId }, data: { status: 'archived', archivedAt: new Date(), tokenVersion: { increment: 1 } } });
     await this.audit.log('AdminModule', 'account_archived', 'warning', `Administrator archived account ${target!.email}`, caller.id);
+    await Promise.resolve(this.email?.sendAccountStatusChange?.(target!.email, target!.fullName, 'archived')).catch(async () => this.audit.log('AdminModule', 'account_status_email_failed', 'warning', `Account-status email could not be delivered to ${target!.email}`, caller.id));
     return { ok: true };
   }
 
   /** Restores an archived account back to the active list; it reauthenticates under its existing permissions. */
   async adminRestoreUser(caller: Caller, targetId: string) {
     await this.admin(caller);
-    const target = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, status: true } });
+    const target = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, fullName: true, status: true } });
     if (!target) fail('NOT_FOUND', 'Account not found', 404);
     if (target!.status !== 'archived') fail('INVALID_OPERATION', 'That account is not archived', 409);
     await this.prisma.user.update({ where: { id: targetId }, data: { status: 'active', archivedAt: null } });
     await this.audit.log('AdminModule', 'account_restored', 'info', `Administrator restored account ${target!.email}`, caller.id);
+    await Promise.resolve(this.email?.sendAccountStatusChange?.(target!.email, target!.fullName, 'active')).catch(async () => this.audit.log('AdminModule', 'account_status_email_failed', 'warning', `Account-status email could not be delivered to ${target!.email}`, caller.id));
     return { ok: true };
   }
   async monitoring(caller: Caller) {

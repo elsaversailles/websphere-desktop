@@ -113,6 +113,10 @@ export const passwordResetSchema = z.object({
   password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
   confirm: z.string().min(1),
 });
+export const accountDeleteSchema = z.object({
+  confirmation: z.literal('DELETE', { errorMap: () => ({ message: 'Type DELETE to confirm account removal' }) }),
+  password: z.string().min(1, 'Current password is required'),
+});
 export const profileUpdateSchema = z.object({
   fullName: z.string().trim().min(2).max(120).optional(),
   email: newAccountEmail.optional(),
@@ -124,11 +128,20 @@ export const projectSchema = z.object({
   groupId: z.string().cuid().optional(), title: z.string().trim().min(2).max(180), description: z.string().trim().min(1),
   startDate: z.coerce.date().optional(), deadline: z.coerce.date().optional(), memberIds: z.array(z.string().cuid()).default([]),
 });
+export const projectUpdateSchema = z.object({
+  title: z.string().trim().min(2).max(180).optional(), description: z.string().trim().min(1).optional(),
+  startDate: z.coerce.date().nullable().optional(), deadline: z.coerce.date().nullable().optional(),
+  status: z.enum(['active', 'completed', 'archived', 'on_hold']).optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one project change' });
 export const taskSchema = z.object({
   title: z.string().trim().min(2).max(180), description: z.string().trim().min(1), deadline: z.coerce.date().nullable().optional(),
   priority: z.enum(['low', 'medium', 'high']).default('medium'), expectedDurationHrs: z.number().positive().optional(),
 });
 export const taskStatusSchema = z.object({ status: z.enum(['pending', 'ongoing', 'for_review', 'completed']) });
+export const taskEditSchema = taskSchema.partial().extend({
+  assigneeId: z.string().cuid().nullable().optional(),
+  status: taskStatusSchema.shape.status.optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one task change' });
 export const resourceLinkSchema = z.object({
   connectionId: z.string().cuid(),
   title: z.string().trim().min(2).max(180),
@@ -139,7 +152,7 @@ export const resourceUpdateSchema = resourceLinkSchema.extend({
   assigneeId: z.string().cuid().optional(),
   status: z.enum(['pending', 'ongoing', 'for_review', 'completed']).optional(),
 });
-export const ideaSchema = z.object({ title: z.string().trim().min(2).max(180), body: z.string().trim().min(1) });
+export const ideaSchema = z.object({ title: z.string().trim().min(2).max(180), body: z.string().trim().min(1), category: z.string().trim().min(2).max(120).default('Academic Project') });
 export const calendarEventSchema = z.object({ title: z.string().trim().min(2), type: z.enum(['meeting','work_session','presentation','activity']), startAt: z.coerce.date(), endAt: z.coerce.date().optional(), projectId: z.string().cuid().optional() });
 /** `durationHours` is how long members may vote; null/omitted means no time limit (the leader closes it by hand). Up to 30 days. */
 export const pollCreateSchema = z.object({ ideaIds: z.array(z.string().min(1)).min(2), durationHours: z.number().positive().max(720).nullable().optional() });
@@ -151,6 +164,15 @@ export const ticketStatusLabels: Record<TicketStatus, string> = { pending: 'Ongo
 export const ticketUpdateSchema = z.object({ status: z.enum(ticketStatuses), response: z.string().trim().max(2000).optional() });
 export const aiAskSchema = z.object({ prompt: z.string().trim().min(1).max(12000), scopeType: z.enum(['project','group','idea']).optional(), scopeId: z.string().cuid().optional(), parts: z.array(z.object({ type: z.string() })).optional() });
 export const announcementSchema = z.object({ title: z.string().trim().min(2).max(180), body: z.string().trim().min(1), priority: z.enum(['normal','important','urgent']).default('normal') });
+export const notificationPreferencesSchema = z.object({
+  tasks: z.boolean().optional(), deadlines: z.boolean().optional(), groupActivity: z.boolean().optional(), aiSuggestions: z.boolean().optional(),
+  profileVisibility: z.boolean().optional(), activityStatus: z.boolean().optional(), pushEnabled: z.boolean().optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one preference' });
+export const adminGeneralSettingsSchema = z.object({
+  systemName: z.string().trim().min(2).max(80),
+  maxIdeasPerSearch: z.number().int().min(2).max(50),
+  releaseManifestUrl: z.string().trim().url().max(2000).or(z.literal('')),
+}).strict();
 
 export type RegisterDto = z.infer<typeof registerSchema>;
 export type VerifiedRegisterDto = z.infer<typeof verifiedRegisterSchema>;

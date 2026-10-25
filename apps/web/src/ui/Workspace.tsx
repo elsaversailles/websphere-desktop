@@ -27,7 +27,7 @@ const userSections: Array<{ title: string; links: Link[] }> = [
   { title: 'Account', links: [{ id: 'profile', label: 'Profile & Settings', icon: '♙' }, { id: 'support', label: 'My Support Requests', icon: '?' }] },
 ];
 const adminSections: Array<{ title: string; links: Link[] }> = [
-  { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'archive', label: 'Archive Accounts', icon: '🗄' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
+  { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'archive', label: 'Archive Accounts', icon: '🗄' }, { id: 'notifications', label: 'Notifications', icon: '♧' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
 ];
 
 // The sidebar sections are the source of truth for which pages a role may land on, so a restored
@@ -73,12 +73,21 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const [incomingCall, setIncomingCall] = useState<{ groupId: string; kind: CallKind } | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantMinimized, setAssistantMinimized] = useState(false);
+  const [systemName, setSystemName] = useState('WebSphere');
   // Lives at Workspace level (which stays mounted across page navigation) so an in-flight request
   // keeps running and its reply is captured even while the panel is minimized.
   const assistant = useAiAssistant(notify);
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const sections = administrator ? adminSections : userSections;
+
+  useEffect(() => {
+    let cancelled = false;
+    void request<{ systemName: string }>('/settings/general').then((settings) => {
+      if (!cancelled && settings.systemName) { setSystemName(settings.systemName); document.title = settings.systemName; }
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
 
   // Persist the current page + selections per account so a refresh resumes exactly here.
   useEffect(() => {
@@ -139,16 +148,16 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
         if (notification.relatedId) setSelectedGroupId(notification.relatedId);
         setPage('chat');
         break;
-      case 'project': setPage('projects'); break;
+      case 'project': setPage(administrator ? 'notifications' : 'projects'); break;
       case 'task':
+        if (administrator) { setPage('notifications'); break; }
         setSelectedTaskId(notification.relatedId ?? '');
         setPage('tasks');
         break;
       case 'idea': setPage('ideas'); break;
       case 'ticket':
-        if (administrator) { setPage('accounts'); break; }
         setSelectedTicketId(notification.relatedId ?? '');
-        setPage('support');
+        setPage(administrator ? 'accounts' : 'support');
         break;
       case 'calendar':
       case 'event': setPage('calendar'); break;
@@ -165,14 +174,14 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       if (event.initiatorUserId !== session.user.id) setIncomingCall({ groupId: event.groupId, kind: event.kind });
     });
     socket.on('notification:new', (notification: { message?: string }) => { if (notification?.message) notify(notification.message); });
-    return () => socket.disconnect();
+    return () => { socket.disconnect(); };
   }, [session.access, session.user.id, notify]);
 
   // The API enforces the same policy on every authenticated request. This timer gives an idle user
   // a clear sign-out even when they leave a tab open without making another request.
   useEffect(() => {
     let idleTimeoutMinutes = 30;
-    let inactivityTimer: ReturnType<typeof window.setTimeout> | undefined;
+    let inactivityTimer: number | undefined;
     let lastServerTouch = 0;
     let signedOut = false;
     const signOutForInactivity = async () => {
@@ -224,7 +233,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
 
   return <main className="page on">{incomingCall && (page !== 'chat' || incomingCall.groupId !== selectedGroupId) ? <div className="workspace-call-invite call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => { setSelectedGroupId(incomingCall.groupId); setPage('chat'); }}>Join call</button><button className="btn-o btn-sm" onClick={() => setIncomingCall(null)}>Dismiss</button></div> : null}<div className="layout">
     <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
-      <div className="sb-head"><button className="sb-brand" onClick={() => setPage(administrator ? 'admin' : 'dashboard')}><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">WebSphere</span></button><button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'} title={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'}><BurgerIcon /></button></div>
+      <div className="sb-head"><button className="sb-brand" onClick={() => setPage(administrator ? 'admin' : 'dashboard')}><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">{systemName}</span></button><button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'} title={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'}><BurgerIcon /></button></div>
       <nav aria-label="Main navigation">{administrator
         // Admins get the menu pinned inline in the sidebar (no hover flyout) so every item is one click away.
         ? sections.map((section) => <div className="sb-inline-sec" key={section.title}><div className="sb-sec-label">{section.title}</div>{section.links.map((link) => <button type="button" className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => setPage(link.id)}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>)
@@ -259,13 +268,13 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       <div className="sb-bot"><div className="uchip">{session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className="ava">{initials(session.user.fullName)}</span>}<span className="user-detail"><strong className="u-name">{session.user.fullName}</strong><small className="u-role">{administrator ? 'Administrator' : 'Member'}</small></span></div><button className="logout-btn" onClick={() => setLogoutOpen(true)} title={sidebarCollapsed ? 'Log out' : undefined}><span aria-hidden="true">↪</span><span className="logout-label">Logout</span></button></div>
     </aside>
     {sidebarCollapsed ? <button className="sidebar-reopen" type="button" onClick={() => setSidebarCollapsed(false)} aria-label="Show sidebar navigation" title="Show sidebar navigation"><BurgerIcon /></button> : null}
-    <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">WebSphere</span></span><select value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}</select></div><div className="main">
+    <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">{systemName}</span></span><select value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}</select></div><div className="main">
       {page === 'dashboard' ? <Dashboard name={session.user.fullName} notify={notify} onPage={navigate} onNotificationClick={openNotification} /> : null}
       {page === 'groups' ? <GroupsPage selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onChat={() => setPage('chat')} notify={notify} /> : null}
       {page === 'ideas' ? <IdeasPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} /> : null}
       {page === 'projects' ? <ProjectsPage notify={notify} /> : null}
       {page === 'admin' ? <AdminPage notify={notify} /> : null}
-      {page === 'accounts' ? <AdminAccounts notify={notify} /> : null}
+      {page === 'accounts' ? <AdminAccounts notify={notify} focusedTicketId={selectedTicketId} /> : null}
       {page === 'archive' ? <AdminArchive notify={notify} /> : null}
       {page === 'chat' ? <GroupChatPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onIdeas={() => setPage('ideas')} notify={notify} incomingCall={incomingCall?.groupId === selectedGroupId ? incomingCall : null} onIncomingCallHandled={() => setIncomingCall(null)} /> : null}
       {page === 'tasks' ? <TasksPage notify={notify} focusedTaskId={selectedTaskId} /> : null}
@@ -310,7 +319,7 @@ function AdminPage({ notify }: { notify: (message: string) => void }) {
   </section>;
 }
 
-function AdminTicketCard({ ticket, notify, onSaved }: { ticket: AdminSupportTicket; notify: (message: string) => void; onSaved: () => void }) {
+function AdminTicketCard({ ticket, notify, onSaved, focused }: { ticket: AdminSupportTicket; notify: (message: string) => void; onSaved: () => void; focused: boolean }) {
   const [status, setStatus] = useState<TicketStatus>(ticket.status);
   const [response, setResponse] = useState(ticket.response ?? '');
   const [saving, setSaving] = useState(false);
@@ -323,7 +332,7 @@ function AdminTicketCard({ ticket, notify, onSaved }: { ticket: AdminSupportTick
       onSaved();
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not update the support request.'); } finally { setSaving(false); }
   }
-  return <article className="support-ticket">
+  return <article id={`admin-ticket-${ticket.id}`} className={`support-ticket ${focused ? 'focused' : ''}`}>
     <div className="support-ticket-top"><div><strong>{ticket.subject}</strong><span>{ticket.user.fullName} · {ticket.user.email}</span></div><span className={`support-ticket-status ${ticket.status}`}>{statusLabel(ticket.status)}</span></div>
     <p>{ticket.body}</p>
     <div className="support-ticket-controls">
@@ -339,7 +348,7 @@ type AdminUser = { id: string; fullName: string; email: string; role: string; st
 type AdminUsersPage = { users: AdminUser[]; total: number; page: number; pageSize: number; totalPages: number };
 const USERS_PAGE_SIZE = 10;
 
-function AdminAccounts({ notify }: { notify: (message: string) => void }) {
+function AdminAccounts({ notify, focusedTicketId }: { notify: (message: string) => void; focusedTicketId?: string }) {
   const [data, setData] = useState<AdminUsersPage | null>(null);
   const [tickets, setTickets] = useState<AdminSupportTicket[] | null>(null);
   const [page, setPage] = useState(1);
@@ -371,6 +380,11 @@ function AdminAccounts({ notify }: { notify: (message: string) => void }) {
     return () => { active = false; };
   }, [page, term, notify, reloadToken]);
   useEffect(() => { void refreshSupportRequests(); }, [notify]);
+  useEffect(() => {
+    if (!focusedTicketId || !tickets?.some((ticket) => ticket.id === focusedTicketId)) return;
+    const frame = requestAnimationFrame(() => document.getElementById(`admin-ticket-${focusedTicketId}`)?.scrollIntoView({ block: 'center' }));
+    return () => cancelAnimationFrame(frame);
+  }, [focusedTicketId, tickets]);
   const users = data?.users ?? [];
   const total = data?.total ?? 0;
   const totalPages = data?.totalPages ?? 1;
@@ -383,7 +397,7 @@ function AdminAccounts({ notify }: { notify: (message: string) => void }) {
       refreshUsers();
     } catch (error) { notify((error as Error).message); }
   }
-  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div></div><section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{tickets?.length ?? 0} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => void refreshSupportRequests()}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <div className="support-ticket-list">{tickets.map((ticket) => <AdminTicketCard key={`${ticket.id}-${ticket.updatedAt}`} ticket={ticket} notify={notify} onSaved={() => void refreshSupportRequests()} />)}</div> : <div className="empty-message">New support requests will appear here.</div>}</section><div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <AdminUserRow key={user.id} user={user} onEdit={() => setEditing(user)} onArchive={() => setArchiving(user)} onDeactivate={() => setStatus(user, 'suspended', `${user.fullName} has been deactivated.`)} onActivate={() => setStatus(user, 'active', `${user.fullName} has been reactivated.`)} />) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div>
+  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div></div><section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{tickets?.length ?? 0} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => void refreshSupportRequests()}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <div className="support-ticket-list">{tickets.map((ticket) => <AdminTicketCard key={`${ticket.id}-${ticket.updatedAt}`} ticket={ticket} focused={ticket.id === focusedTicketId} notify={notify} onSaved={() => void refreshSupportRequests()} />)}</div> : <div className="empty-message">New support requests will appear here.</div>}</section><div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <AdminUserRow key={user.id} user={user} onEdit={() => setEditing(user)} onArchive={() => setArchiving(user)} onDeactivate={() => setStatus(user, 'suspended', `${user.fullName} has been deactivated.`)} onActivate={() => setStatus(user, 'active', `${user.fullName} has been reactivated.`)} />) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div>
     {editing ? <AdminUserEditModal user={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refreshUsers(); }} notify={notify} /> : null}
     {archiving ? <AdminUserArchiveModal user={archiving} onClose={() => setArchiving(null)} onArchived={() => { setArchiving(null); refreshUsers(); }} notify={notify} /> : null}
   </section>;

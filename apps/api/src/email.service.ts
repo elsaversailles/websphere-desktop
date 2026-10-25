@@ -61,9 +61,9 @@ export class EmailService {
   async sendAccountStatusChange(email: string, fullName: string, status: string) {
     const restored = status === 'active';
     const archived = status === 'archived';
-    const subject = restored ? 'Your WebSphere account has been restored' : `Your WebSphere account status is now ${status}`;
+    const subject = restored ? 'Your WebSphere account has been reactivated' : archived ? 'Your WebSphere account has been archived' : `Your WebSphere account status is now ${status}`;
     const message = restored
-      ? `Hi ${fullName}, your WebSphere account has been successfully restored. You can access the system again.`
+      ? `Hi ${fullName}, your WebSphere account has been reactivated. You can access the system again.`
       : archived
         ? `Hi ${fullName}, your WebSphere account has been archived. Please contact our admin if you need help.`
         : `Hi ${fullName}, an administrator changed your WebSphere account status to ${status}.`;

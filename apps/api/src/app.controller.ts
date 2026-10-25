@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, Redirect, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { z } from 'zod';
-import { aiAskSchema, announcementSchema, calendarEventSchema, deactivationRequestSchema, ideaSchema, loginSchema, mobilePushTokenSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, pollCreateSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskSchema, ticketUpdateSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
+import { accountDeleteSchema, adminGeneralSettingsSchema, aiAskSchema, announcementSchema, calendarEventSchema, deactivationRequestSchema, ideaSchema, loginSchema, mobilePushTokenSchema, notificationPreferencesSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, pollCreateSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, projectUpdateSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskEditSchema, taskSchema, ticketUpdateSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
 import { AppService } from './app.service.js';
 import { LocalStorageService } from './local-storage.service.js';
 import { RedisService } from './redis.service.js';
@@ -28,6 +28,7 @@ export class AppController {
   private caller(auth?: string) { return this.app.caller(auth); }
   @Public() @Get('health') async health() { await this.app.prisma.$queryRaw`SELECT 1`; await this.redis.ping(); return { ok: true, database: 'up', redis: 'up', timestamp: new Date().toISOString() }; }
   @Public() @Get('maintenance') maintenance() { return this.app.maintenanceStatus(); }
+  @Public() @Get('settings/general') generalSettings() { return this.app.generalSettings(); }
   @Public() @Post('auth/registration/otp') registrationOtp(@Body() body: unknown) { return this.app.sendRegistrationOtp(parse(registrationOtpRequestSchema, body).email); }
   @Public() @Post(['users', 'auth/register']) register(@Body() body: unknown) { return this.app.register(parse(verifiedRegisterSchema, body)); }
   @Public() @Post('auth/login') login(@Body() body: unknown) { const input = parse(loginSchema, body); return this.app.login(input.email, input.password); }
@@ -41,6 +42,7 @@ export class AppController {
   @Public() @Post('auth/password/reset') reset(@Body() body: unknown) { const input = parse(passwordResetSchema, body); return this.app.resetPassword(input.token, input.password, input.confirm); }
   @Get('users/me') async me(@Headers('authorization') auth: string) { return this.app.me(await this.caller(auth)); }
   @Patch('users/me') async updateMe(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.updateMe(await this.caller(auth), parse(profileUpdateSchema, body)); }
+  @Delete('users/me') async deleteMe(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(accountDeleteSchema, body); return this.app.deleteMyAccount(await this.caller(auth), input.password); }
   @Post('users/me/avatar') @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024, files: 1 } }))
   async avatar(@Headers('authorization') auth: string, @UploadedFile() file?: { originalname: string; mimetype: string; buffer: Buffer }) { if (!file) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Choose an avatar image', fields: { file: 'required' } }, 400); const avatarUrl = await this.storage.saveAvatar(file); return this.app.updateMe(await this.caller(auth), { avatarUrl }); }
   @Public() @Get('uploads/:fileName') async upload(@Param('fileName') fileName: string) { return new StreamableFile(await this.storage.readPublicFile(fileName)); }
@@ -67,12 +69,13 @@ export class AppController {
   @Post('polls/:id/vote') async vote(@Headers('authorization') auth: string, @Param('id') id: string, @Body('optionId') optionId: string) { const tally = await this.app.vote(await this.caller(auth), id, optionId); this.realtime.publishPollTally(tally.groupId, tally); return tally; }
   @Get('polls/:id/results') async results(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.pollResults(await this.caller(auth), id); }
   @GroupScope('groupId') @Post('groups/:groupId/ideas/:ideaId/begin') async begin(@Headers('authorization') auth: string, @Param() params: any) { return this.app.begin(await this.caller(auth), params.groupId, params.ideaId); }
-  @Post('ideas/:id/ai/suggest') async ideaSuggestion(@Headers('authorization') auth: string, @Param('id') id: string) { const caller = await this.caller(auth); const idea = await this.app.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id) throw new Error('RBAC_FORBIDDEN'); return { ideaId: id, suggestions: [{ action: 'revise', title: idea.title, body: `${idea.body}\n\nConsider adding measurable objectives and intended users.` }] }; }
+  @Post('ideas/:id/ai/suggest') async ideaSuggestion(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.suggestIdea(await this.caller(auth), id); }
 
   @Post('projects') async createProject(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.createProject(await this.caller(auth), parse(projectSchema, body)); }
   @Get('projects') async projects(@Headers('authorization') auth: string) { return this.app.projects(await this.caller(auth)); }
   @ProjectScope() @Get('projects/:id') async project(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.project(await this.caller(auth), id); }
-  @ProjectScope() @Patch('projects/:id') async updateProject(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.updateProject(await this.caller(auth), id, body); }
+  @ProjectScope() @Patch('projects/:id') async updateProject(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.updateProject(await this.caller(auth), id, parse(projectUpdateSchema, body)); }
+  @ProjectScope() @Delete('projects/:id') async deleteProject(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.deleteProject(await this.caller(auth), id); }
   @ProjectScope() @Patch('projects/:id/status') async statusProject(@Headers('authorization') auth: string, @Param('id') id: string, @Body('status') status: string) { return this.app.updateProject(await this.caller(auth), id, { status }); }
   @ProjectScope() @Get('projects/:id/team') async team(@Headers('authorization') auth: string, @Param('id') id: string) { const project = await this.app.project(await this.caller(auth), id); return project.members; }
   @ProjectScope() @Patch('projects/:id/team/:userId') async updateResponsibility(@Headers('authorization') auth: string, @Param('id') id: string, @Param('userId') userId: string, @Body('responsibility') responsibility: string) { return this.app.updateResponsibility(await this.caller(auth), id, userId, responsibility); }
@@ -85,7 +88,8 @@ export class AppController {
   @Get('tasks/tracker') async taskTracker(@Headers('authorization') auth: string) { return this.app.taskTracker(await this.caller(auth)); }
   @Post('tasks/:id/resources') async linkTaskResource(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.linkTaskResource(await this.caller(auth), id, parse(resourceLinkSchema, body)); }
   @Get('tasks/:id') async task(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.task(await this.caller(auth), id); }
-  @Patch('tasks/:id') async updateTask(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.updateTask(await this.caller(auth), id, parse(taskSchema.partial(), body)); }
+  @Patch('tasks/:id') async updateTask(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { const caller = await this.caller(auth); const updated = await this.app.updateTask(caller, id, parse(taskEditSchema, body)); this.realtime.publishTaskUpdated(updated.projectId, updated); return updated; }
+  @Delete('tasks/:id') async deleteTask(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.deleteTask(await this.caller(auth), id); }
   @Post('tasks/:id/assign') async assign(@Headers('authorization') auth: string, @Param('id') id: string, @Body('assigneeId') assigneeId: string) { const result = await this.app.assignTask(await this.caller(auth), id, assigneeId); const task = await this.app.prisma.task.findUnique({ where: { id }, select: { projectId: true } }); if (task) this.realtime.publishTaskUpdated(task.projectId, await this.app.task(await this.caller(auth), id)); return result; }
   @Patch('tasks/:id/status') async taskStatus(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { const caller = await this.caller(auth); const updated = await this.app.taskStatus(caller, id, parse(taskStatusSchema, body).status); this.realtime.publishTaskUpdated(updated.projectId, updated); return updated; }
 
@@ -101,7 +105,7 @@ export class AppController {
   @Get('notifications') async notifications(@Headers('authorization') auth: string) { return this.app.notifications(await this.caller(auth)); }
   @Patch('notifications/:id/read') async read(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.markRead(await this.caller(auth), id); }
   @Get('notifications/preferences') async preference(@Headers('authorization') auth: string) { return this.app.preferences(await this.caller(auth)); }
-  @Put('notifications/preferences') async setPreference(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.preferences(await this.caller(auth), body); }
+  @Put('notifications/preferences') async setPreference(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.preferences(await this.caller(auth), parse(notificationPreferencesSchema, body)); }
   @Public() @Get('push/config') pushConfig() { return this.app.pushConfig(); }
   @Post('push/subscribe') async subscribe(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.subscribePush(await this.caller(auth), parse(pushSubscriptionSchema, body)); }
   @Delete('push/subscribe') async unsubscribe(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.unsubscribePush(await this.caller(auth), parse(pushUnsubscribeSchema, body).endpoint); }
@@ -127,6 +131,7 @@ export class AppController {
   @Get('integrations/connections') async connections(@Headers('authorization') auth: string) { return this.app.integrationConnections(await this.caller(auth)); }
   @Get('integrations/connections/:id/google-picker-token') async googlePickerToken(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.googlePickerToken(await this.caller(auth), id); }
   @Post('integrations/connections/:id/sync') async sync(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.syncIntegration(await this.caller(auth), id); }
+  @Post('integrations/connections/:id/launch') async launchIntegration(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.launchIntegration(await this.caller(auth), id); }
   @Delete('integrations/connections/:id') async disconnect(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.disconnectIntegration(await this.caller(auth), id); }
   @Post('resources/:id/launch') async launchResource(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.launchResource(await this.caller(auth), id); }
   @Patch('resources/:id') async updateResource(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { const caller = await this.caller(auth); const updated = await this.app.updateLinkedResource(caller, id, parse(resourceUpdateSchema, body)); this.realtime.publishTaskUpdated(updated.projectId, await this.app.task(caller, updated.taskId)); return updated; }
@@ -143,6 +148,14 @@ export class AppController {
   @Roles('Administrator') @Get('admin/logs') async logs(@Headers('authorization') auth: string) { const caller = await this.caller(auth); await this.app.admin(caller); return this.app.prisma.auditLog.findMany({ orderBy: { createdAt: 'desc' } }); }
   @Roles('Administrator') @Get('admin/security-settings') async securitySettings(@Headers('authorization') auth: string) { return this.app.securitySettings(await this.caller(auth)); }
   @Roles('Administrator') @Put('admin/security-settings') async updateSecuritySettings(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.updateSecuritySettings(await this.caller(auth), parse(securitySettingsSchema, body)); }
+  @Roles('Administrator') @Get('admin/general-settings') async adminGeneralSettings(@Headers('authorization') auth: string) { return this.app.generalSettings(await this.caller(auth)); }
+  @Roles('Administrator') @Put('admin/general-settings') async updateGeneralSettings(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.updateGeneralSettings(await this.caller(auth), parse(adminGeneralSettingsSchema, body)); }
+  @Roles('Administrator') @Post('admin/release/check') async checkRelease(@Headers('authorization') auth: string) { return this.app.checkForUpdates(await this.caller(auth)); }
+  @Roles('Administrator') @Get('admin/system-notices') async systemNotices(@Headers('authorization') auth: string) { return this.app.systemNotices(await this.caller(auth)); }
+  @Roles('Administrator') @Post('admin/system-notices/read') async readSystemNotices(@Headers('authorization') auth: string) { return this.app.markSystemNoticesRead(await this.caller(auth)); }
+  @Roles('Administrator') @Get('admin/backups') async backups(@Headers('authorization') auth: string) { return this.app.databaseBackups(await this.caller(auth)); }
+  @Roles('Administrator') @Post('admin/backups') async backup(@Headers('authorization') auth: string) { return this.app.createDatabaseBackup(await this.caller(auth)); }
+  @Roles('Administrator') @Get('admin/backups/:fileName/download') async downloadBackup(@Headers('authorization') auth: string, @Param('fileName') fileName: string) { const { backup, content } = await this.app.databaseBackupFile(await this.caller(auth), fileName); return new StreamableFile(content, { type: 'application/json', disposition: `attachment; filename="${backup.fileName}"` }); }
   @Roles('Administrator') @Get('admin/settings') async settings(@Headers('authorization') auth: string) { const caller = await this.caller(auth); await this.app.admin(caller); return this.app.prisma.systemSetting.findMany(); }
   @Roles('Administrator') @Put('admin/settings') async setSettings(@Headers('authorization') auth: string, @Body() body: Record<string, unknown>) { const caller = await this.caller(auth); await this.app.admin(caller); const settings = body.maintenanceMode === false && !Object.prototype.hasOwnProperty.call(body, 'maintenanceSchedule') ? { ...body, maintenanceSchedule: null } : body; return Promise.all(Object.entries(settings).map(([key, value]) => this.app.prisma.systemSetting.upsert({ where: { key }, update: { value: value as any, updatedBy: caller.id }, create: { key, value: value as any, updatedBy: caller.id } }))); }
 }

@@ -31,6 +31,7 @@ const environmentSchema = z.object({
   CRYPTO_KEY_BASE64: z.string().refine((value) => Buffer.from(value, 'base64').length === 32, 'must decode to exactly 32 bytes'),
   UPLOAD_DIR: z.string().min(1).default('/var/lib/websphere/uploads'),
   UPLOAD_PUBLIC_PATH: z.string().startsWith('/').default('/uploads'),
+  BACKUP_DIR: z.string().min(1).default('/var/lib/websphere/backups'),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-4.1-mini'),
   TURN_HOST: z.string().min(1).optional(),

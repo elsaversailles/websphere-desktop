@@ -7,10 +7,12 @@ import { ConfigService } from './config.service.js';
 @Injectable()
 export class LocalStorageService {
   private readonly uploadDir: string;
+  private readonly backupDir: string;
   private readonly publicPath: string;
 
   constructor(config: ConfigService) {
     this.uploadDir = resolve(config.get('UPLOAD_DIR'));
+    this.backupDir = resolve(config.get('BACKUP_DIR'));
     this.publicPath = config.get('UPLOAD_PUBLIC_PATH').replace(/\/$/, '');
   }
 
@@ -35,5 +37,16 @@ export class LocalStorageService {
   readPublicFile(fileName: string) {
     if (basename(fileName) !== fileName || !/^[a-f0-9-]+\.(jpg|jpeg|png|webp)$/i.test(fileName)) throw new BadRequestException({ code: 'VALIDATION_FAILED', message: 'Invalid upload path' });
     return readFile(join(this.uploadDir, fileName));
+  }
+  async saveBackup(fileName: string, content: string) {
+    if (!/^websphere-backup-[a-z0-9-]+\.json$/i.test(fileName)) throw new BadRequestException({ code: 'VALIDATION_FAILED', message: 'Invalid backup file name' });
+    await mkdir(this.backupDir, { recursive: true });
+    const payload = Buffer.from(content, 'utf8');
+    await writeFile(join(this.backupDir, fileName), payload, { flag: 'wx', mode: 0o600 });
+    return payload.byteLength;
+  }
+  readBackup(fileName: string) {
+    if (basename(fileName) !== fileName || !/^websphere-backup-[a-z0-9-]+\.json$/i.test(fileName)) throw new BadRequestException({ code: 'VALIDATION_FAILED', message: 'Invalid backup path' });
+    return readFile(join(this.backupDir, fileName));
   }
 }

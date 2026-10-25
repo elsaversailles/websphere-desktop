@@ -228,14 +228,6 @@ class CanvaConnector implements Connector {
   }
   async launchUrl(target: LinkTarget) { return target.externalUrl; }
 }
-class UnavailableConnector implements Connector {
-  constructor(readonly provider: ProviderId) {}
-  authorizeUrl(_state: string, _redirectUri: string): string { throw new Error('INTEGRATION_NOT_IMPLEMENTED'); }
-  async exchangeCode(_code: string, _redirectUri: string): Promise<OAuthTokens> { throw new Error('INTEGRATION_NOT_IMPLEMENTED'); }
-  async refresh(_tokens: OAuthTokens): Promise<OAuthTokens> { throw new Error('INTEGRATION_NOT_IMPLEMENTED'); }
-  async sync(_tokens: OAuthTokens, _targets?: SyncTarget[]): Promise<SyncResult> { throw new Error('INTEGRATION_NOT_IMPLEMENTED'); }
-  async launchUrl(target: LinkTarget) { return target.externalUrl; }
-}
 export const connectors: Record<ProviderId, Connector> = {
   google: new GoogleConnector(), microsoft: new MicrosoftConnector(),
   trello: new TrelloConnector(), asana: new AsanaConnector(), canva: new CanvaConnector(),

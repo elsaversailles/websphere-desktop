@@ -69,6 +69,12 @@ describe('adminUpdateUser', () => {
 });
 
 describe('adminArchiveUser', () => {
+  it('emails the account owner after archiving', async () => {
+    const sendAccountStatusChange = vi.fn().mockResolvedValue(true);
+    const { service } = serviceWith({ email: { sendAccountStatusChange }, prisma: { user: { update: vi.fn(), findUnique: vi.fn().mockResolvedValue({ email: 'target@websphere.fun', fullName: 'Target User', status: 'active' }) } } });
+    await service.adminArchiveUser(admin, 'user-9');
+    expect(sendAccountStatusChange).toHaveBeenCalledWith('target@websphere.fun', 'Target User', 'archived');
+  });
   it('archives the account, stamps the archive time, and invalidates its sessions', async () => {
     const { service, update, log } = serviceWith();
 
@@ -100,6 +106,12 @@ describe('adminArchiveUser', () => {
 });
 
 describe('adminRestoreUser', () => {
+  it('emails the account owner after reactivation', async () => {
+    const sendAccountStatusChange = vi.fn().mockResolvedValue(true);
+    const { service } = serviceWith({ email: { sendAccountStatusChange }, prisma: { user: { update: vi.fn(), findUnique: vi.fn().mockResolvedValue({ email: 'target@websphere.fun', fullName: 'Target User', status: 'archived' }) } } });
+    await service.adminRestoreUser(admin, 'user-9');
+    expect(sendAccountStatusChange).toHaveBeenCalledWith('target@websphere.fun', 'Target User', 'active');
+  });
   it('restores an archived account to active and clears the archive time', async () => {
     const update = vi.fn().mockResolvedValue({ id: 'user-9', email: 'a@b.c' });
     const log = vi.fn().mockResolvedValue(undefined);
