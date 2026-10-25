@@ -23,6 +23,9 @@ Start from `example.env`, then set production values. In particular:
 ```dotenv
 NODE_ENV=production
 WEB_ORIGIN=https://your-domain.example
+# Optional when API traffic is served at https://your-domain.example/api.
+# Set this only when OAuth callbacks use another public API base.
+OAUTH_CALLBACK_BASE_URL=https://your-domain.example/api
 DATABASE_URL_DOCKER=mysql://websphere:strong-url-encoded-password@mysql:3306/websphere
 REDIS_URL_DOCKER=redis://redis:6379
 MYSQL_DATABASE=websphere

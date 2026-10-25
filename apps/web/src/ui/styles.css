@@ -465,3 +465,10 @@
 /* Direct month and year navigation for scheduling fields and calendars. */
 .date-field{display:grid;gap:6px;min-width:0}.date-field-jump{display:grid;grid-template-columns:minmax(0,1fr) minmax(64px,.7fr);gap:6px}.date-field-jump .legacy-select{width:100%;min-width:0;padding:6px}.date-field>.ifield{margin-bottom:0}.calendar-jump{min-width:0;width:auto;max-width:135px}.calendar-jump.year{max-width:86px}.task-actions{display:flex;flex-wrap:wrap;gap:6px}.task-edit-modal{width:min(92vw,560px);max-height:90vh;overflow-y:auto}.task-edit-modal .ifield{margin-bottom:12px}.task-edit-modal .date-field{margin-bottom:12px}.task-edit-modal .date-field>.ifield{margin-bottom:0}.task-edit-modal .muted{margin-bottom:14px}
 @media(max-width:780px){.calendar-card .cc-head{align-items:flex-start;flex-direction:column;gap:8px}.calendar-jump{max-width:110px}.calendar-jump.year{max-width:75px}}
+
+/* Keep the dashboard calendar compact; date controls belong on the full scheduling page. */
+.calendar-card .cc-head{align-items:center}.calendar-card .calendar-arrows{display:inline-flex;gap:6px;letter-spacing:normal}
+
+/* The Calendar workspace keeps its heading and all navigation controls on a centered axis. */
+.cal-page-header{align-items:center;flex-direction:column;gap:14px}.cal-page-header>div:first-child{text-align:center}.cal-header-controls{justify-content:center;flex-wrap:wrap;width:100%}
+@media(max-width:780px){.cal-page-header{align-items:center}.cal-page-header>div:first-child{text-align:center}.cal-header-controls{justify-content:center}.calendar-card .cc-head{align-items:center;flex-direction:row}}

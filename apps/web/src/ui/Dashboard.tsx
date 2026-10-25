@@ -204,7 +204,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
         </DataCard>
       </div>
       <aside className="cc calendar-card">
-        <div className="cc-head"><h3>Calendar</h3><span className="calendar-arrows"><button type="button" onClick={() => shiftMonth(-1)} aria-label="Previous month">‹</button><select className="legacy-select calendar-jump" value={monthCursor.month} aria-label="Dashboard calendar month" onChange={(event) => setMonthCursor((current) => ({ ...current, month: Number(event.target.value) }))}>{Array.from({ length: 12 }, (_, month) => <option key={month} value={month}>{new Date(2024, month, 1).toLocaleDateString(undefined, { month: 'long' })}</option>)}</select><select className="legacy-select calendar-jump year" value={monthCursor.year} aria-label="Dashboard calendar year" onChange={(event) => setMonthCursor((current) => ({ ...current, year: Number(event.target.value) }))}>{Array.from({ length: 101 }, (_, offset) => 2000 + offset).map((year) => <option key={year} value={year}>{year}</option>)}</select><button type="button" onClick={() => shiftMonth(1)} aria-label="Next month">›</button></span></div>
+        <div className="cc-head"><h3>{new Date(monthCursor.year, monthCursor.month, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</h3><span className="calendar-arrows"><button type="button" onClick={() => shiftMonth(-1)} aria-label="Previous month">‹</button><button type="button" onClick={() => shiftMonth(1)} aria-label="Next month">›</button></span></div>
         <div className="calendar-week">{WEEKDAYS.map((day) => <span key={day}>{day}</span>)}</div>
         <div className="calendar-grid">{monthCells.map((cell) => {
           const key = dateKey(cell.date);
