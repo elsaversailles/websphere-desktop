@@ -1,4 +1,4 @@
-import { Injectable, HttpException, HttpStatus, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, HttpException, HttpStatus, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { hash, verify } from 'argon2';
 import { SignJWT, jwtVerify } from 'jose';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
@@ -71,6 +71,7 @@ const ADMIN_EDITABLE_STATUSES: AdminAccountStatus[] = ['active', 'suspended', 'd
 
 @Injectable()
 export class AppService implements OnModuleInit, OnApplicationShutdown {
+  private readonly logger = new Logger(AppService.name);
   readonly prisma: any;
   private pollSweep?: ReturnType<typeof setInterval>;
   private outlookSweep?: ReturnType<typeof setInterval>;
@@ -917,6 +918,21 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const scheduledActive = Boolean(startsAt && startsAt <= new Date());
     return { active: manuallyEnabled || scheduledActive, scheduledStart: startsAt?.toISOString() ?? null };
   }
+  async announceMaintenance(caller: Caller, input: { startsAt: string; message: string }) {
+    await this.admin(caller);
+    const startsAt = new Date(input.startsAt);
+    if (!Number.isFinite(startsAt.getTime()) || startsAt <= new Date()) fail('VALIDATION_FAILED', 'Choose a future maintenance start time.');
+    if ((await this.maintenanceStatus()).active) fail('INVALID_OPERATION', 'Maintenance is already active. End it before scheduling another window.', 409);
+    const users = await this.prisma.user.findMany({ where: { status: 'active' }, select: { id: true } });
+    await this.notify(users.map((user: { id: string }) => user.id), NotificationType.announcement, input.message, 'maintenance', 'system');
+    await this.prisma.systemSetting.upsert({
+      where: { key: 'maintenanceSchedule' },
+      update: { value: { startsAt: startsAt.toISOString(), notifiedAt: new Date().toISOString() }, updatedBy: caller.id },
+      create: { key: 'maintenanceSchedule', value: { startsAt: startsAt.toISOString(), notifiedAt: new Date().toISOString() }, updatedBy: caller.id },
+    });
+    await this.audit.log('AdminModule', 'maintenance_announced', 'info', `Announced maintenance starting ${startsAt.toISOString()} to ${users.length} active account(s)`, caller.id);
+    return { startsAt: startsAt.toISOString(), notified: users.length };
+  }
   async calendar(caller: Caller, from?: string, to?: string) { const events = await this.prisma.calendarEvent.findMany({ where: { OR: [{ ownerId: caller.id }, { project: { members: { some: { userId: caller.id } } } }], ...(from || to ? { startAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}) }, orderBy: { startAt: 'asc' } }); const projects = await this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, deadline: { not: null } }, select: { id: true, title: true, deadline: true } }); const tasks = await this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, deadline: { not: null }, status: { not: 'completed' } }, select: { id: true, title: true, deadline: true } }); return { events, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))] }; }
   async createCalendarEvent(caller: Caller, input: any) { if (input.projectId) await this.projectMember(input.projectId, caller.id); return this.prisma.calendarEvent.create({ data: { ...input, ownerId: caller.id } }); }
   private async calendarEventAccess(caller: Caller, id: string) { const event = await this.prisma.calendarEvent.findUniqueOrThrow({ where: { id } }); if (event.projectId) await this.projectMember(event.projectId, caller.id); else if (event.ownerId !== caller.id) fail('RBAC_FORBIDDEN', 'Only the event owner or project members can modify this event', 403); return event; }
@@ -933,6 +949,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async unregisterMobilePush(caller: Caller, token: string) { return this.prisma.mobilePushToken.deleteMany({ where: { userId: caller.id, token } }); }
   private preferenceKeyForNotification(type: NotificationType, relatedType?: string) {
+    if (type === NotificationType.announcement && relatedType === 'system') return null;
     if (type === NotificationType.task_assignment || type === NotificationType.task_update || type === NotificationType.project_change) return 'tasks';
     if (type === NotificationType.deadline_reminder || type === NotificationType.delay_risk) return relatedType === 'task' ? 'tasks' : 'deadlines';
     if (type === NotificationType.group_activity || type === NotificationType.announcement) return 'groupActivity';
@@ -950,6 +967,11 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       this.events.emitNotification(notification.userId, notification);
       void this.push.deliver(notification).catch(() => undefined);
     }
+    await Promise.all(created.map((notification) =>
+      this.jobs.enqueueNotificationEmail(notification.id).catch((error: unknown) => {
+        this.logger.error(`Could not queue email for notification ${notification.id}`, error);
+      }),
+    ));
     return { ok: true, delivered: created.length };
   }
   async notifications(caller: Caller) { return this.prisma.notification.findMany({ where: { userId: caller.id }, orderBy: { createdAt: 'desc' } }); }

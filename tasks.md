@@ -382,6 +382,7 @@ Checklist status: `[x]` verified implementation, `[-]` partially implemented / s
     - _Requirements: US-062.1, 62.2, US-063.1, 63.2; Design: NotificationsModule (pipeline)_
   - [-] 19.2 Email + web push channels, fan-out, and deadline/predictive alerts
     - Implemented SMTP email delivery for registration verification OTPs and password-reset links; registration now requires a valid OTP before an account is created, and email failures are returned in the active modal.
+    - General in-app notifications now enqueue SES SMTP email jobs with three retry attempts. The worker respects the recipient's email toggle and active account status; the profile settings screen exposes the email toggle.
     - Implemented browser push configuration, service-worker subscriptions, VAPID delivery, and stale (`410 Gone`) subscription cleanup. Unit tests cover VAPID delivery and pruning.
     - Remaining: configure and verify production SES SMTP credentials/sender identity; perform a real browser push delivery test; add BullMQ fan-out/retry coverage for deadline and predictive alerts.
     - _Requirements: US-064.1, 64.2, US-065.1, 65.2, NFR 8; Design: NotificationsModule (channels), Error Handling (notification delivery)_

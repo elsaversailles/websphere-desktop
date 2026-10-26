@@ -166,8 +166,12 @@ export const aiAskSchema = z.object({ prompt: z.string().trim().min(1).max(12000
 export const announcementSchema = z.object({ title: z.string().trim().min(2).max(180), body: z.string().trim().min(1), priority: z.enum(['normal','important','urgent']).default('normal') });
 export const notificationPreferencesSchema = z.object({
   tasks: z.boolean().optional(), deadlines: z.boolean().optional(), groupActivity: z.boolean().optional(), aiSuggestions: z.boolean().optional(),
-  profileVisibility: z.boolean().optional(), activityStatus: z.boolean().optional(), pushEnabled: z.boolean().optional(),
+  profileVisibility: z.boolean().optional(), activityStatus: z.boolean().optional(), emailEnabled: z.boolean().optional(), pushEnabled: z.boolean().optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one preference' });
+export const maintenanceAnnouncementSchema = z.object({
+  startsAt: z.string().datetime(),
+  message: z.string().trim().min(10).max(500),
+}).strict();
 export const adminGeneralSettingsSchema = z.object({
   systemName: z.string().trim().min(2).max(80),
   maxIdeasPerSearch: z.number().int().min(2).max(50),
