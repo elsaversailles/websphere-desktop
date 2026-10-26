@@ -413,6 +413,7 @@
 
 /* Administrator security settings dialogs */
 .modal-box.security-modal{width:min(92vw,500px);min-width:0;padding:26px;background:linear-gradient(180deg,#EAF6FC 0%,#D5ECF8 100%);border-color:rgba(0,56,168,.28);border-radius:14px;box-shadow:0 28px 70px rgba(11,58,82,.25)}.security-modal .ifield{width:100%;margin:0 0 14px;background:rgba(255,255,255,.85)}.security-modal .modal-acts{margin-top:18px}.security-modal-help{margin:0 0 16px;color:var(--sub);font-size:12.5px;line-height:1.5}.security-checkbox{display:flex;align-items:flex-start;gap:9px;margin:0 0 17px;color:var(--ink);font-size:13px;font-weight:700;line-height:1.4}.security-checkbox input{margin-top:2px;accent-color:var(--acc)}
+.maintenance-cancel{margin-top:14px}
 
 /* Software Update release-notes modal */
 .modal-box.release-modal{width:min(92vw,640px);max-height:84vh;display:flex;flex-direction:column;padding:26px;background:linear-gradient(180deg,#EAF6FC 0%,#D5ECF8 100%);border-color:rgba(0,56,168,.28);border-radius:14px;box-shadow:0 28px 70px rgba(11,58,82,.25)}

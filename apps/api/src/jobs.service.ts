@@ -5,9 +5,11 @@ import { ConfigService } from './config.service.js';
 @Injectable()
 export class JobsService implements OnApplicationShutdown {
   private readonly recomputeAnalytics: Queue;
+  private readonly notificationEmail: Queue;
 
   constructor(config: ConfigService) {
     this.recomputeAnalytics = new Queue('recompute-analytics', { connection: { url: config.get('REDIS_URL') } });
+    this.notificationEmail = new Queue('notification-email', { connection: { url: config.get('REDIS_URL') } });
   }
 
   async enqueueAnalyticsRecompute(projectId: string) {
@@ -16,7 +18,18 @@ export class JobsService implements OnApplicationShutdown {
     await this.recomputeAnalytics.add('recompute', { projectId }, { jobId: `analytics:${projectId}:${window}` });
   }
 
+  async enqueueNotificationEmail(notificationId: string) {
+    await this.notificationEmail.add('deliver', { notificationId }, {
+      jobId: notificationId,
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 30_000 },
+      removeOnComplete: true,
+      removeOnFail: 1000,
+    });
+  }
+
   async onApplicationShutdown() {
     await this.recomputeAnalytics.close();
+    await this.notificationEmail.close();
   }
 }

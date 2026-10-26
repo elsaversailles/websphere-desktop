@@ -1,6 +1,7 @@
 import { Queue, Worker } from 'bullmq';
 import { PrismaClient } from '@prisma/client';
 import nodemailer from 'nodemailer';
+import { deliverNotificationEmail } from './notification-email.js';
 const prisma: any = new PrismaClient();
 const connection = { url: process.env.REDIS_URL ?? 'redis://localhost:6379' };
 const deadlineScanQueue = new Queue('deadline-scan', { connection });
@@ -9,6 +10,7 @@ const maintenanceScanQueue = new Queue('maintenance-scan', { connection });
 void maintenanceScanQueue.add('five-minute-scan', {}, { repeat: { every: 300_000 }, jobId: 'maintenance-scan-five-minute' });
 const inactiveAccountScanQueue = new Queue('inactive-account-scan', { connection });
 void inactiveAccountScanQueue.add('daily-scan', {}, { repeat: { every: 86_400_000 }, jobId: 'inactive-account-scan-daily' });
+const notificationEmailQueue = new Queue('notification-email', { connection });
 const statsFor = (tasks: Array<{ status: string; deadline: Date | null; completedAt: Date | null }>, deadline: Date | null) => {
   const completed = tasks.filter((task) => task.status === 'completed');
   const onTime = completed.filter((task) => !task.deadline || (task.completedAt && task.completedAt <= task.deadline));
@@ -27,21 +29,19 @@ async function notifyOnce(userId: string, type: string, message: string, related
   if (disabled) return false;
   const recent = await prisma.notification.findFirst({ where: { userId, type, relatedId, relatedType, createdAt: { gte: new Date(Date.now() - 20 * 3600000) } } });
   if (recent) return false;
-  await prisma.notification.create({ data: { userId, type, message, relatedId, relatedType } });
+  const notification = await prisma.notification.create({ data: { userId, type, message, relatedId, relatedType } });
+  try {
+    await notificationEmailQueue.add('deliver', { notificationId: notification.id }, {
+      jobId: notification.id,
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 30_000 },
+      removeOnComplete: true,
+      removeOnFail: 1000,
+    });
+  } catch (error) {
+    console.error('Could not queue notification email', { notificationId: notification.id, error });
+  }
   return true;
-}
-
-async function emailOverdueTask(userId: string, task: { title: string; deadline: Date; project?: { title: string } }) {
-  const { SES_HOST: host, SES_USER: user, SES_PASSWORD: pass, SES_FROM: from } = process.env;
-  if (!host || !user || !pass || !from) return;
-  const recipient = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, fullName: true, status: true, preference: { select: { emailEnabled: true, tasks: true } } } });
-  if (!recipient || recipient.status !== 'active' || recipient.preference?.emailEnabled === false || recipient.preference?.tasks === false) return;
-  const port = Number(process.env.SES_PORT ?? 587);
-  const transport = nodemailer.createTransport({ host, port, secure: port === 465, auth: { user, pass } });
-  const subject = `Overdue task: ${task.title}`;
-  const due = task.deadline.toISOString().slice(0, 10);
-  const body = `Hi ${recipient.fullName},\n\nYour task “${task.title}” in “${task.project?.title ?? 'WebSphere'}” was due on ${due} and is still incomplete. Please review it in WebSphere.`;
-  await transport.sendMail({ from, to: recipient.email, subject, text: body, html: `<p>Hi ${escapeHtml(recipient.fullName)},</p><p>Your task <strong>${escapeHtml(task.title)}</strong> in <strong>${escapeHtml(task.project?.title ?? 'WebSphere')}</strong> was due on ${due} and is still incomplete. Please review it in WebSphere.</p>` });
 }
 
 new Worker('deadline-scan', async () => {
@@ -65,8 +65,7 @@ new Worker('deadline-scan', async () => {
     if (!overdue && !upcoming) continue;
     for (const assignment of task.assignments) {
       if (overdue) {
-        const created = await notifyOnce(assignment.assigneeId, 'delay_risk', `Task “${task.title}” is overdue.`, task.id, 'task');
-        if (created) await emailOverdueTask(assignment.assigneeId, task).catch((error: unknown) => console.error('Overdue task email failed', { taskId: task.id, userId: assignment.assigneeId, error }));
+        await notifyOnce(assignment.assigneeId, 'delay_risk', `Task “${task.title}” is overdue.`, task.id, 'task');
       }
       else await notifyOnce(assignment.assigneeId, 'deadline_reminder', dueToday ? `Task “${task.title}” is due today.` : `Task “${task.title}” is due within 24 hours.`, task.id, 'task');
     }
@@ -109,6 +108,11 @@ new Worker('maintenance-scan', async () => {
 type InactiveAccountAlertConfig = { enabled?: boolean; recipientEmail?: string; inactivityDays?: number; lastSentAt?: string };
 
 function escapeHtml(value: string) { return value.replace(/[&<>]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[char] ?? char)); }
+
+const notificationEmailWorker = new Worker('notification-email', async (job) => {
+  await deliverNotificationEmail(prisma, job.data.notificationId as string);
+}, { connection });
+notificationEmailWorker.on('failed', (job, error) => console.error('Notification email failed', { notificationId: job?.data.notificationId, attemptsMade: job?.attemptsMade, error }));
 
 /** Sends at most one digest per calendar day, after the administrator explicitly enables it. */
 new Worker('inactive-account-scan', async () => {

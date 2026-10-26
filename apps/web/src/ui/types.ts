@@ -8,7 +8,7 @@ export type GroupSummary = {
   _count: { projects: number; ideas: number };
 };
 
-export type Idea = { id: string; authorId: string; title: string; body: string; category: string; readinessScore: number; status: 'submitted' | 'refined' | 'selected'; createdAt: string };
+export type Idea = { id: string; authorId: string; title: string; body: string; category: string; readinessScore: number; status: 'submitted' | 'refined' | 'selected' | 'rejected'; createdAt: string };
 export type Poll = {
   pollId: string;
   groupId: string;

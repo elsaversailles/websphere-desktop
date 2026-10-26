@@ -27,6 +27,7 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
   const leader = selectedProject?.members?.[0]?.role === 'Project_Leader';
 
   async function openTasks(projectId: string) {
+    if (projectId !== selectedProjectId) setEditing(false);
     setSelectedProjectId(projectId);
     setDetail(null);
     setLoadingDetail(true);
