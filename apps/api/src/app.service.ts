@@ -895,6 +895,15 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.closePollRecord(pollId, caller.id);
     return this.tally(pollId, caller.id);
   }
+  async extendPoll(caller: Caller, pollId: string, input: { hours: number }) {
+    const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, select: { id: true, groupId: true, open: true, closesAt: true } });
+    await this.member(poll.groupId, caller.id, true);
+    await this.settleExpired(poll);
+    if (!this.pollIsOpen(poll)) fail('POLL_CLOSED', 'Voting has closed for this poll', 409);
+    const closesAt = new Date(Math.max(poll.closesAt?.getTime() ?? Date.now(), Date.now()) + input.hours * 3_600_000);
+    await this.prisma.ideaPoll.update({ where: { id: pollId }, data: { closesAt } });
+    return this.tally(pollId, caller.id);
+  }
   async vote(caller: Caller, pollId: string, optionId: string) {
     const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: true } });
     await this.member(poll.groupId, caller.id);

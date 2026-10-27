@@ -4,11 +4,13 @@ import { getAccessToken, request, socketBaseUrl } from '../api';
 import { DateField } from './DateField';
 import { dateOnlyKey, formatDateOnly } from './dates';
 import { deadlineHealth, priorityHealth, taskStatusHealth } from './health';
+import { ConfirmDialog } from './ConfirmDialog';
 
 type Project = { id: string; title: string; description: string; status: string; deadline?: string | null; group: { name: string } | null; members?: Array<{ role: string }>; tasks: Array<{ id: string; status: string }> };
 type ProjectTask = { id: string; title: string; description: string; deadline?: string | null; priority: string; status: string; assignments: Array<{ assigneeId: string }>; risk?: { level: 'high' | 'medium' | 'low' } };
 type Member = { userId: string; role: string; responsibility?: string | null; user: { id: string; fullName: string } };
 type ProjectDetail = { id: string; title: string; description: string; status: string; deadline?: string | null; group: { members: Member[] } | null; members: Member[]; tasks: ProjectTask[] };
+type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
 
 export function ProjectsPage({ notify }: { notify: (message: string) => void }) {
   const [projects, setProjects] = useState<Project[] | null>(null);
@@ -19,6 +21,7 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
   const [editing, setEditing] = useState(false);
   const [editingTask, setEditingTask] = useState<{ task: ProjectTask; mode: 'edit' | 'reassign' } | null>(null);
   const [createFormKey, setCreateFormKey] = useState(0);
+  const [confirmation, setConfirmation] = useState<ConfirmAction | null>(null);
 
   const refreshProjects = () => request<Project[]>('/projects').then(setProjects).catch((error: Error) => notify(error.message));
   useEffect(() => { void refreshProjects(); }, [notify]);
@@ -104,7 +107,6 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
   }
 
   async function deleteProject(project: Project) {
-    if (!window.confirm(`Delete “${project.title}” and all its tasks? This cannot be undone.`)) return;
     setSaving(true);
     try {
       await request(`/projects/${project.id}`, { method: 'DELETE' });
@@ -116,7 +118,6 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
   }
 
   async function deleteTask(task: ProjectTask) {
-    if (!window.confirm(`Delete task “${task.title}”? This cannot be undone.`)) return;
     setSaving(true);
     try {
       await request(`/tasks/${task.id}`, { method: 'DELETE' });
@@ -143,7 +144,7 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
             <td><span className="bdg ac">{isLeader ? 'Leader' : 'Member'}</span></td>
             <td><div className="progress-cell"><div className="pb-wrap"><div className="pb" style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div></td>
             <td>{formatDateOnly(project.deadline)}</td><td><span className="bdg g">{project.status}</span></td>
-            <td><div className="task-actions"><button className="btn-o btn-sm" onClick={() => void openTasks(project.id)}>{selectedProjectId === project.id ? 'Refresh Tasks' : isLeader ? 'Manage Tasks' : 'View Tasks'}</button>{isLeader ? <button type="button" className="btn-o btn-sm btn-red" disabled={saving} onClick={() => void deleteProject(project)}>Delete</button> : null}</div></td>
+            <td><div className="task-actions"><button className="btn-o btn-sm" onClick={() => void openTasks(project.id)}>{selectedProjectId === project.id ? 'Refresh Tasks' : isLeader ? 'Manage Tasks' : 'View Tasks'}</button>{isLeader ? <button type="button" className="btn-o btn-sm btn-red" disabled={saving} onClick={() => setConfirmation({ title: 'Delete project?', description: `“${project.title}” and all of its tasks will be permanently deleted.`, confirmLabel: 'Delete project', destructive: true, action: () => void deleteProject(project) })}>Delete</button> : null}</div></td>
           </tr>;
         })}</tbody>
       </table> : <div className="legacy-empty">Your projects will appear here. Create your first project from the dashboard.</div>}
@@ -182,13 +183,14 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
               {leader ? <td><div className="task-actions">
                 <button type="button" className="btn-o btn-sm" disabled={saving} onClick={() => setEditingTask({ task, mode: 'edit' })}>Edit Task</button>
                 {needsReassignment ? <button type="button" className="btn-o btn-sm" disabled={saving || !replacementAvailable} title={replacementAvailable ? undefined : 'No other project member is available'} onClick={() => setEditingTask({ task, mode: 'reassign' })}>Reassign Task</button> : null}
-                <button type="button" className="btn-o btn-sm btn-red" disabled={saving} onClick={() => void deleteTask(task)}>Delete</button>
+                <button type="button" className="btn-o btn-sm btn-red" disabled={saving} onClick={() => setConfirmation({ title: 'Delete task?', description: `“${task.title}” will be permanently deleted.`, confirmLabel: 'Delete task', destructive: true, action: () => void deleteTask(task) })}>Delete</button>
               </div></td> : null}
             </tr>;
           })}</tbody>
         </table> : <div className="legacy-empty">No tasks yet.{leader ? ' Create the first one above.' : ''}</div>}
       </> : null}
     </section> : null}
+    {confirmation ? <ConfirmDialog {...confirmation} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation.action; setConfirmation(null); action(); }} /> : null}
     {editingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setEditingTask(null); }}><div className="modal-box task-edit-modal" role="dialog" aria-modal="true" aria-label={editingTask.mode === 'reassign' ? 'Reassign task' : 'Edit task'}>
       <div className="modal-ttl"><span>{editingTask.mode === 'reassign' ? `Reassign “${editingTask.task.title}”` : `Edit “${editingTask.task.title}”`}</span><button type="button" className="modal-close" disabled={saving} onClick={() => setEditingTask(null)} aria-label="Close task editor">×</button></div>
       <form key={`${editingTask.task.id}-${editingTask.mode}`} onSubmit={(event) => void saveTaskEdit(event)}>

@@ -5,6 +5,7 @@ import { getAccessToken, request, socketBaseUrl } from '../api';
 import { GroupAvatar } from './GroupAvatar';
 import { GroupHub as GroupHubPanel } from './GroupHub';
 import { PollStatus } from './PollStatus';
+import { ConfirmDialog } from './ConfirmDialog';
 import type { GroupHub, GroupSummary, Poll } from './types';
 
 type Props = { userId: string; selectedGroupId: string; onSelectGroup: (id: string) => void; onIdeas: () => void; notify: (message: string) => void; incomingCall: { groupId: string; kind: CallKind } | null; onIncomingCallHandled: () => void };
@@ -12,6 +13,7 @@ type ActiveCall = { groupId: string; kind: CallKind };
 type RemoteStream = { socketId: string; userId: string; stream: MediaStream };
 type ChatSearchGroup = GroupSummary & { messageMatch?: string | null };
 type UpcomingEvent = { id: string; title: string; startAt: string; endAt?: string | null; type: string };
+type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
 
 function mediaDeviceErrorMessage(error: unknown, kind: CallKind) {
   const name = error instanceof DOMException ? error.name : '';
@@ -89,6 +91,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const [leaving, setLeaving] = useState(false);
   const [closingPoll, setClosingPoll] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+  const [confirmation, setConfirmation] = useState<ConfirmAction | null>(null);
   const refreshHub = useCallback(async () => {
     if (!selectedGroupId) return;
     try { setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); } catch { /* the next tally or refresh will retry */ }
@@ -374,16 +377,20 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   }
 
   async function closeVoting() {
-    if (!hub?.poll || !window.confirm('Close voting now? Members will no longer be able to vote.')) return;
+    if (!hub?.poll) return;
     setClosingPoll(true);
     try { await request(`/polls/${hub.poll.pollId}/close`, { method: 'POST' }); await refreshHub(); notify('Voting is closed.'); }
     catch (error: any) { notify(error.message); }
     finally { setClosingPoll(false); }
   }
+  async function extendVoting() {
+    if (!hub?.poll) return;
+    try { await request(`/polls/${hub.poll.pollId}/extend`, { method: 'POST', body: JSON.stringify({ hours: 24 }) }); await refreshHub(); notify('Voting time extended by 1 day.'); }
+    catch (error: any) { notify(error.message); }
+  }
 
   async function leaveGroup() {
     if (!hub || !selectedGroupId) return;
-    if (!window.confirm(`Leave “${hub.group.name}”? You will lose access to its chat, projects and tasks.`)) return;
     setLeaving(true);
     try {
       await request(`/groups/${selectedGroupId}/leave`, { method: 'POST' });
@@ -410,7 +417,6 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   async function removeMember(memberUserId: string) {
     if (!hub || !selectedGroupId || !viewerIsLeader) return;
     const name = hub.group.members.find((member) => member.userId === memberUserId)?.user.fullName ?? 'this member';
-    if (!window.confirm(`Kick ${name} from “${hub.group.name}”? They will immediately lose access to its chat, projects and tasks.`)) return;
     try {
       await request(`/groups/${selectedGroupId}/members/${memberUserId}`, { method: 'DELETE' });
       await refreshHub();
@@ -447,20 +453,22 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       <aside className="gc-left-panel"><div className="gc-left-head"><h3>Chats</h3></div><div className="gc-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search chats or messages..." aria-label="Search group chats and messages" /></div><div className="gc-chat-list">{visibleGroups.length ? visibleGroups.map((group) => <button className={`gc-chat-item ${group.id === selectedGroupId ? 'active' : ''}`} key={group.id} onClick={() => onSelectGroup(group.id)}><GroupAvatar name={group.name} className="gc-list-avatar" /><span><strong>{group.name}</strong><small>{group.messageMatch ? `Message: ${group.messageMatch}` : `${group._count.projects} projects · ${group._count.ideas} ideas`}</small></span></button>) : <div className="gc-panel-empty">{searchTerm ? 'No chats or messages match your search.' : 'Your groups will appear here.'}</div>}</div><div className="gc-mini-calendar"><strong>{new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</strong><span>{searchTerm ? 'Matching messages are shown in the selected chat.' : nextEvent ? `${nextEvent.title} · ${new Date(nextEvent.startAt).toLocaleString()}` : 'No upcoming scheduled events.'}</span></div></aside>
       {hub ? <>
         <main className="gc-main-chat">
-          <header className="gc-chat-header"><GroupAvatar name={hub.group.name} className="gc-list-avatar large" /><div><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => setManageOpen(true)}>Add Members</button><button className="gc-leave-btn" disabled={leaving} onClick={() => void leaveGroup()}>{leaving ? 'Leaving…' : 'Leave'}</button></div></header>
+          <header className="gc-chat-header"><GroupAvatar name={hub.group.name} className="gc-list-avatar large" /><div><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => setManageOpen(true)}>Add Members</button><button className="gc-leave-btn" disabled={leaving} onClick={() => setConfirmation({ title: 'Leave group?', description: `You will lose access to ${hub.group.name}’s chat, projects, and tasks.`, confirmLabel: 'Leave group', destructive: true, action: () => void leaveGroup() })}>{leaving ? 'Leaving…' : 'Leave'}</button></div></header>
           {callStage ?? <><div className="gchat-msgs">{visibleMessages.length ? [...visibleMessages].reverse().map((message) => { const member = hub.group.members.find((value) => value.userId === message.senderId); const sender = message.senderId === userId ? 'You' : member?.user.fullName ?? 'Group member'; return <div className={`gc-msg ${message.senderId === userId ? 'me' : ''}`} key={message.id}><MemberAvatar name={member?.user.fullName ?? sender} avatarUrl={member?.user.avatarUrl} className="gc-message-avatar" /><div className="gc-bub"><div className="gc-name">{sender}</div><div className="gc-txt">{message.body}</div><div className="gc-time">{new Date(message.createdAt).toLocaleString()}</div></div></div>; }) : <div className="legacy-empty">{searchTerm ? 'No messages match your search in this chat.' : 'Choose or create a group to begin a conversation.'}</div>}</div><form className="gchat-ir" onSubmit={send}><input className="gchat-input" name="body" placeholder="Type a message to your group…" autoComplete="off" /><button className="gchat-send">Send</button></form></>}
         </main>
         <aside className="gc-right-panel">
-          <section><div className="gc-side-title"><h3>Members</h3><span>{hub.group.members.length}</span></div>{hub.group.members.map((member) => <div className="gc-member-row" key={member.userId}><MemberAvatar name={member.user.fullName} avatarUrl={member.user.avatarUrl} /><span><strong>{member.user.fullName}</strong><small>{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</small></span>{viewerIsLeader && member.userId !== userId ? <button type="button" className="gc-member-remove" aria-label={`Remove ${member.user.fullName} from the group`} title={`Remove ${member.user.fullName}`} onClick={() => void removeMember(member.userId)}>Remove</button> : <i />}</div>)}<button type="button" className="gc-manage-members" onClick={() => setManageOpen(true)}>{viewerIsLeader ? 'Manage members' : 'Add members'}</button></section>
-          <section className="gc-voting"><div className="gc-side-title"><h3>Idea Voting</h3></div>{poll ? <><div className="gc-poll-status"><PollStatus poll={poll} onExpired={refreshHub} />{poll.open && viewerIsLeader ? <button type="button" className="gc-close-vote" disabled={closingPoll} onClick={() => void closeVoting()}>{closingPoll ? 'Closing…' : 'Close voting'}</button> : null}</div><div className="gc-poll-options">{poll.options.map((option) => <IdeaVoteCard key={option.optionId} option={option} totalVotes={poll.options.reduce((total, value) => total + value.votes, 0)} viewerOptionId={poll.viewerOptionId} viewerId={userId} votingOpen={poll.open} onVote={(optionId) => void vote(optionId)} />)}</div></> : <div className="gc-panel-empty">Your group vote starts in Idea Management.</div>}</section>
+          <section><div className="gc-side-title"><h3>Members</h3><span>{hub.group.members.length}</span></div>{hub.group.members.map((member) => <div className="gc-member-row" key={member.userId}><MemberAvatar name={member.user.fullName} avatarUrl={member.user.avatarUrl} /><span><strong>{member.user.fullName}</strong><small>{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</small></span>{viewerIsLeader && member.userId !== userId ? <button type="button" className="gc-member-remove" aria-label={`Remove ${member.user.fullName} from the group`} title={`Remove ${member.user.fullName}`} onClick={() => setConfirmation({ title: 'Remove member?', description: `${member.user.fullName} will immediately lose access to this group’s chat, projects, and tasks.`, confirmLabel: 'Remove member', destructive: true, action: () => void removeMember(member.userId) })}>Remove</button> : <i />}</div>)}<button type="button" className="gc-manage-members" onClick={() => setManageOpen(true)}>{viewerIsLeader ? 'Manage members' : 'Add members'}</button></section>
+          <section className="gc-voting"><div className="gc-side-title"><h3>Idea Voting</h3></div>{poll ? <><div className="gc-poll-status"><PollStatus poll={poll} onExpired={refreshHub} />{poll.open && viewerIsLeader ? <button type="button" className="gc-close-vote" disabled={closingPoll} onClick={() => setConfirmation({ title: 'Close voting?', description: 'Members will no longer be able to vote in this poll.', confirmLabel: 'Close voting', action: () => void closeVoting() })}>{closingPoll ? 'Closing…' : 'Close voting'}</button> : null}</div><div className="gc-poll-options">{poll.options.map((option) => <IdeaVoteCard key={option.optionId} option={option} totalVotes={poll.options.reduce((total, value) => total + value.votes, 0)} viewerOptionId={poll.viewerOptionId} viewerId={userId} votingOpen={poll.open} onVote={(optionId) => void vote(optionId)} />)}</div></> : <div className="gc-panel-empty">Your group vote starts in Idea Management.</div>}</section>
           <button className="gc-start-project" disabled={!hub.poll} onClick={() => void startProject()}>Start Project</button>
         </aside>
       </> : <div className="gc-no-selection"><strong>Your workspace is ready</strong><span>Choose or create a group to begin a conversation.</span></div>}
     </div>
+    {hub?.poll?.open && viewerIsLeader ? <button type="button" className="btn-o btn-sm" onClick={() => void extendVoting()}>Extend voting by 1 day</button> : null}
+    {confirmation ? <ConfirmDialog {...confirmation} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation.action; setConfirmation(null); action(); }} /> : null}
     {manageOpen && hub ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setManageOpen(false); }}>
       <div className="modal-box hub-modal" role="dialog" aria-modal="true" aria-label={`Group Hub for ${hub.group.name}`}>
         <div className="modal-ttl"><span>Group Hub · {hub.group.name}</span><button type="button" className="modal-close" aria-label="Close Group Hub" onClick={() => setManageOpen(false)}>×</button></div>
-        <GroupHubPanel hub={hub} userId={userId} notify={notify} onAdd={addMember} onRemove={removeMember} onIdeas={onIdeas} />
+        <GroupHubPanel hub={hub} userId={userId} notify={notify} onAdd={addMember} onRemove={(memberUserId) => { const member = hub.group.members.find((item) => item.userId === memberUserId); setConfirmation({ title: 'Remove member?', description: `${member?.user.fullName ?? 'This member'} will immediately lose access to this group’s chat, projects, and tasks.`, confirmLabel: 'Remove member', destructive: true, action: () => void removeMember(memberUserId) }); return Promise.resolve(); }} onIdeas={onIdeas} />
       </div>
     </div> : null}
   </section>;
