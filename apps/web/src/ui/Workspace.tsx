@@ -101,39 +101,6 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     return () => document.removeEventListener('keydown', closeOnEscape);
   }, [logoutOpen, loggingOut]);
 
-  /** Hover flyout: mousing over a section header pops its links out beside the sidebar, in the brand gradient. */
-  const [flyoutTitle, setFlyoutTitle] = useState<string | null>(null);
-  const [flyoutPos, setFlyoutPos] = useState({ top: 0, left: 0 });
-  const flyoutHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const flyoutSection = sections.find((section) => section.title === flyoutTitle) ?? null;
-
-  function openFlyout(title: string, target: HTMLElement) {
-    if (flyoutHideTimer.current) { clearTimeout(flyoutHideTimer.current); flyoutHideTimer.current = null; }
-    const rect = target.getBoundingClientRect();
-    setFlyoutPos({ top: rect.top, left: rect.right + 8 });
-    setFlyoutTitle(title);
-  }
-  function scheduleCloseFlyout() {
-    if (flyoutHideTimer.current) clearTimeout(flyoutHideTimer.current);
-    flyoutHideTimer.current = setTimeout(() => setFlyoutTitle(null), 120);
-  }
-  function cancelCloseFlyout() {
-    if (flyoutHideTimer.current) { clearTimeout(flyoutHideTimer.current); flyoutHideTimer.current = null; }
-  }
-  /** Touch/click fallback for devices without hover: tapping a section toggles its flyout instead of leaving it stuck open. */
-  function toggleFlyout(title: string, target: HTMLElement) {
-    if (flyoutTitle === title) { setFlyoutTitle(null); return; }
-    openFlyout(title, target);
-  }
-  useEffect(() => {
-    if (!flyoutTitle) return;
-    function close() { setFlyoutTitle(null); }
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
-    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
-  }, [flyoutTitle]);
-  useEffect(() => { if (sidebarCollapsed) setFlyoutTitle(null); }, [sidebarCollapsed]);
-
   function navigate(target: Page) {
     if (target === 'assistant') { setAssistantOpen(true); setAssistantMinimized(false); }
     else setPage(target);
@@ -234,37 +201,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   return <main className="page on">{incomingCall && (page !== 'chat' || incomingCall.groupId !== selectedGroupId) ? <div className="workspace-call-invite call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => { setSelectedGroupId(incomingCall.groupId); setPage('chat'); }}>Join call</button><button className="btn-o btn-sm" onClick={() => setIncomingCall(null)}>Dismiss</button></div> : null}<div className="layout">
     <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
       <div className="sb-head"><button className="sb-brand" onClick={() => setPage(administrator ? 'admin' : 'dashboard')}><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">{systemName}</span></button><button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'} title={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'}><BurgerIcon /></button></div>
-      <nav aria-label="Main navigation">{administrator
-        // Admins get the menu pinned inline in the sidebar (no hover flyout) so every item is one click away.
-        ? sections.map((section) => <div className="sb-inline-sec" key={section.title}><div className="sb-sec-label">{section.title}</div>{section.links.map((link) => <button type="button" className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => setPage(link.id)}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>)
-        : sections.map((section) => {
-        const holdsActivePage = section.links.some((link) => link.id === page);
-        const isFlyoutOpen = flyoutTitle === section.title;
-        return <button
-          type="button"
-          className={`sb-sec ${holdsActivePage ? 'has-active' : ''} ${isFlyoutOpen ? 'flyout-open' : ''}`}
-          key={section.title}
-          aria-haspopup="menu"
-          aria-expanded={isFlyoutOpen}
-          onMouseEnter={(event) => openFlyout(section.title, event.currentTarget)}
-          onMouseLeave={scheduleCloseFlyout}
-          onFocus={(event) => openFlyout(section.title, event.currentTarget)}
-          onBlur={scheduleCloseFlyout}
-          onClick={(event) => toggleFlyout(section.title, event.currentTarget)}
-        >
-          <span>{section.title}</span>
-          <ChevronIcon />
-        </button>;
-      })}</nav>
-      {!administrator && flyoutSection ? <div
-        className="sb-flyout"
-        style={{ top: flyoutPos.top, left: flyoutPos.left }}
-        onMouseEnter={cancelCloseFlyout}
-        onMouseLeave={scheduleCloseFlyout}
-      >
-        <div className="sb-flyout-title">{flyoutSection.title}</div>
-        <div className="sb-flyout-items">{flyoutSection.links.map((link) => <button className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => { setPage(link.id); setFlyoutTitle(null); }}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>
-      </div> : null}
+      <nav aria-label="Main navigation">{sections.map((section) => <div className="sb-inline-sec" key={section.title}><div className="sb-sec-label">{section.title}</div>{section.links.map((link) => <button type="button" className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => setPage(link.id)}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>)}</nav>
       <div className="sb-bot"><div className="uchip">{session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className="ava">{initials(session.user.fullName)}</span>}<span className="user-detail"><strong className="u-name">{session.user.fullName}</strong><small className="u-role">{administrator ? 'Administrator' : 'Member'}</small></span></div><button className="logout-btn" onClick={() => setLogoutOpen(true)} title={sidebarCollapsed ? 'Log out' : undefined}><span aria-hidden="true">↪</span><span className="logout-label">Logout</span></button></div>
     </aside>
     {sidebarCollapsed ? <button className="sidebar-reopen" type="button" onClick={() => setSidebarCollapsed(false)} aria-label="Show sidebar navigation" title="Show sidebar navigation"><BurgerIcon /></button> : null}
@@ -347,10 +284,12 @@ function AdminTicketCard({ ticket, notify, onSaved, focused }: { ticket: AdminSu
 type AdminUser = { id: string; fullName: string; email: string; role: string; status: string; archivedAt?: string | null };
 type AdminUsersPage = { users: AdminUser[]; total: number; page: number; pageSize: number; totalPages: number };
 const USERS_PAGE_SIZE = 10;
+const SUPPORT_REQUESTS_PAGE_SIZE = 5;
 
 function AdminAccounts({ notify, focusedTicketId }: { notify: (message: string) => void; focusedTicketId?: string }) {
   const [data, setData] = useState<AdminUsersPage | null>(null);
   const [tickets, setTickets] = useState<AdminSupportTicket[] | null>(null);
+  const [supportPage, setSupportPage] = useState(1);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -362,6 +301,7 @@ function AdminAccounts({ notify, focusedTicketId }: { notify: (message: string) 
   async function refreshSupportRequests() {
     try {
       setTickets(await request<AdminSupportTicket[]>('/admin/support/tickets'));
+      setSupportPage(1);
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not load support requests.'); }
   }
   // Debounce the typed search so we don't fire a request on every keystroke; reset to page 1 whenever the term changes.
@@ -381,15 +321,24 @@ function AdminAccounts({ notify, focusedTicketId }: { notify: (message: string) 
   }, [page, term, notify, reloadToken]);
   useEffect(() => { void refreshSupportRequests(); }, [notify]);
   useEffect(() => {
-    if (!focusedTicketId || !tickets?.some((ticket) => ticket.id === focusedTicketId)) return;
+    if (!focusedTicketId || !tickets) return;
+    const ticketIndex = tickets.findIndex((ticket) => ticket.id === focusedTicketId);
+    if (ticketIndex < 0) return;
+    const focusedPage = Math.floor(ticketIndex / SUPPORT_REQUESTS_PAGE_SIZE) + 1;
+    if (supportPage !== focusedPage) { setSupportPage(focusedPage); return; }
     const frame = requestAnimationFrame(() => document.getElementById(`admin-ticket-${focusedTicketId}`)?.scrollIntoView({ block: 'center' }));
     return () => cancelAnimationFrame(frame);
-  }, [focusedTicketId, tickets]);
+  }, [focusedTicketId, tickets, supportPage]);
   const users = data?.users ?? [];
   const total = data?.total ?? 0;
   const totalPages = data?.totalPages ?? 1;
   const rangeStart = total ? (page - 1) * USERS_PAGE_SIZE + 1 : 0;
   const rangeEnd = (page - 1) * USERS_PAGE_SIZE + users.length;
+  const supportTotal = tickets?.length ?? 0;
+  const supportTotalPages = Math.max(1, Math.ceil(supportTotal / SUPPORT_REQUESTS_PAGE_SIZE));
+  const supportRangeStart = supportTotal ? (supportPage - 1) * SUPPORT_REQUESTS_PAGE_SIZE + 1 : 0;
+  const supportRangeEnd = Math.min(supportPage * SUPPORT_REQUESTS_PAGE_SIZE, supportTotal);
+  const displayedTickets = tickets?.slice(supportRangeStart - 1, supportRangeEnd) ?? [];
   async function setStatus(user: AdminUser, status: string, done: string) {
     try {
       await request(`/admin/users/${user.id}`, { method: 'PATCH', body: JSON.stringify({ status }) });
@@ -397,7 +346,7 @@ function AdminAccounts({ notify, focusedTicketId }: { notify: (message: string) 
       refreshUsers();
     } catch (error) { notify((error as Error).message); }
   }
-  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div></div><section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{tickets?.length ?? 0} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => void refreshSupportRequests()}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <div className="support-ticket-list">{tickets.map((ticket) => <AdminTicketCard key={`${ticket.id}-${ticket.updatedAt}`} ticket={ticket} focused={ticket.id === focusedTicketId} notify={notify} onSaved={() => void refreshSupportRequests()} />)}</div> : <div className="empty-message">New support requests will appear here.</div>}</section><div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <AdminUserRow key={user.id} user={user} onEdit={() => setEditing(user)} onArchive={() => setArchiving(user)} onDeactivate={() => setStatus(user, 'deactivated', `${user.fullName} has been deactivated.`)} onActivate={() => setStatus(user, 'active', `${user.fullName} has been reactivated.`)} />) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div>
+  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div></div><section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{supportTotal} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => void refreshSupportRequests()}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <><div className="support-ticket-list">{displayedTickets.map((ticket) => <AdminTicketCard key={`${ticket.id}-${ticket.updatedAt}`} ticket={ticket} focused={ticket.id === focusedTicketId} notify={notify} onSaved={() => void refreshSupportRequests()} />)}</div>{supportTotalPages > 1 ? <div className="user-pager support-request-pager"><button type="button" className="btn-o btn-sm" disabled={supportPage <= 1} onClick={() => setSupportPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label" aria-live="polite">{supportRangeStart}–{supportRangeEnd} of {supportTotal} · Page {supportPage} of {supportTotalPages}</span><button type="button" className="btn-o btn-sm" disabled={supportPage >= supportTotalPages} onClick={() => setSupportPage((current) => Math.min(supportTotalPages, current + 1))}>Next</button></div> : null}</> : <div className="empty-message">New support requests will appear here.</div>}</section><div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <AdminUserRow key={user.id} user={user} onEdit={() => setEditing(user)} onArchive={() => setArchiving(user)} onDeactivate={() => setStatus(user, 'deactivated', `${user.fullName} has been deactivated.`)} onActivate={() => setStatus(user, 'active', `${user.fullName} has been reactivated.`)} />) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div>
     {editing ? <AdminUserEditModal user={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refreshUsers(); }} notify={notify} /> : null}
     {archiving ? <AdminUserArchiveModal user={archiving} onClose={() => setArchiving(null)} onArchived={() => { setArchiving(null); refreshUsers(); }} notify={notify} /> : null}
   </section>;
@@ -511,7 +460,6 @@ function AdminUserArchiveModal({ user, onClose, onArchived, notify }: { user: Ad
 
 function DotsIcon() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>; }
 
-function ChevronIcon() { return <svg className="sb-sec-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>; }
 function LogoutIcon() { return <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>; }
 function BurgerIcon() { return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>; }
 function NavIcon({ page }: { page: Page }) {
