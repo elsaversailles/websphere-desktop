@@ -191,13 +191,13 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
       </> : null}
     </section> : null}
     {confirmation ? <ConfirmDialog {...confirmation} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation.action; setConfirmation(null); action(); }} /> : null}
-    {editingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setEditingTask(null); }}><div className="modal-box task-edit-modal" role="dialog" aria-modal="true" aria-label={editingTask.mode === 'reassign' ? 'Reassign task' : 'Edit task'}>
-      <div className="modal-ttl"><span>{editingTask.mode === 'reassign' ? `Reassign “${editingTask.task.title}”` : `Edit “${editingTask.task.title}”`}</span><button type="button" className="modal-close" disabled={saving} onClick={() => setEditingTask(null)} aria-label="Close task editor">×</button></div>
-      <form key={`${editingTask.task.id}-${editingTask.mode}`} onSubmit={(event) => void saveTaskEdit(event)}>
+    {editingTask ? <div className="modal-ov open project-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setEditingTask(null); }}><div className="modal-box project-modal" role="dialog" aria-modal="true" aria-labelledby="task-editor-title">
+      <div className="modal-ttl"><div><span id="task-editor-title">{editingTask.mode === 'reassign' ? 'Reassign Task' : 'Edit Task'}</span><small>{editingTask.mode === 'reassign' ? 'Task Assignment' : 'Task Details'}</small></div><button type="button" className="modal-close" disabled={saving} onClick={() => setEditingTask(null)} aria-label="Close task editor">×</button></div>
+      <form className="project-create-form" key={`${editingTask.task.id}-${editingTask.mode}`} onSubmit={(event) => void saveTaskEdit(event)}>
         {editingTask.mode === 'edit' ? <>
           <label className="lbl" htmlFor="task-edit-title">Task Name</label><input id="task-edit-title" className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={editingTask.task.title} />
-          <label className="lbl" htmlFor="task-edit-description">Description</label><textarea id="task-edit-description" className="ifield" name="description" required defaultValue={editingTask.task.description} />
-          <label className="lbl" htmlFor="task-edit-deadline">Due Date</label><DateField id="task-edit-deadline" name="deadline" label="Task due date" defaultValue={editingTask.task.deadline ? dateOnlyKey(editingTask.task.deadline) : ''} />
+          <label className="lbl" htmlFor="task-edit-description">Description</label><textarea id="task-edit-description" className="ifield project-description" name="description" required defaultValue={editingTask.task.description} />
+          <label className="lbl" htmlFor="task-edit-deadline">Due Date</label><DateField id="task-edit-deadline" name="deadline" label="Task due date" defaultValue={editingTask.task.deadline ? dateOnlyKey(editingTask.task.deadline) : ''} showJump={false} />
           <label className="lbl" htmlFor="task-edit-priority">Priority</label><select id="task-edit-priority" className="ifield" name="priority" defaultValue={editingTask.task.priority}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
           <label className="lbl" htmlFor="task-edit-status">Status</label><select id="task-edit-status" className="ifield" name="status" defaultValue={editingTask.task.status}><option value="pending">Not Started</option><option value="ongoing">In Progress</option><option value="for_review">For Review</option><option value="completed">Completed</option></select>
         </> : <p className="muted">Choose a replacement project member. They will receive a task notification.</p>}
@@ -206,7 +206,7 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
           <option value="" disabled={editingTask.mode === 'reassign'}>{editingTask.mode === 'reassign' ? 'Choose replacement' : 'Unassigned'}</option>
           {(detail?.members ?? []).filter((member) => editingTask.mode !== 'reassign' || member.userId !== editingTask.task.assignments[0]?.assigneeId).map((member) => <option key={member.userId} value={member.userId}>{member.user.fullName}</option>)}
         </select>
-        <div className="modal-acts"><button type="button" className="btn-o" disabled={saving} onClick={() => setEditingTask(null)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : editingTask.mode === 'reassign' ? 'Reassign Task' : 'Save Task'}</button></div>
+        <div className="modal-acts project-modal-actions"><button type="button" className="btn-o" disabled={saving} onClick={() => setEditingTask(null)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : editingTask.mode === 'reassign' ? 'Reassign Task' : 'Save Task'}</button></div>
       </form>
     </div></div> : null}
   </section>;
