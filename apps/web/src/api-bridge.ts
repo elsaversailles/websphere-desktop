@@ -34,6 +34,39 @@ const clearSession = () => {
 };
 const formError = (message: string) => (globalThis as any).toast?.(message, 'error');
 
+const bridgeConfirm = (title: string, description: string, confirmLabel: string) => new Promise<boolean>((resolve) => {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-ov open';
+  overlay.innerHTML = `<section class="modal-box security-modal action-confirm-modal" role="dialog" aria-modal="true"><div class="modal-ttl"><span></span><button type="button" class="modal-close" aria-label="Close">×</button></div><p class="security-modal-help"></p><div class="modal-acts"><button type="button" class="btn-o">Cancel</button><button type="button" class="btn btn-red"></button></div></section>`;
+  const dialog = overlay.querySelector('section')!;
+  dialog.querySelector('.modal-ttl span')!.textContent = title;
+  dialog.querySelector('.security-modal-help')!.textContent = description;
+  const [cancel, confirmButton] = dialog.querySelectorAll<HTMLButtonElement>('.modal-acts button');
+  confirmButton.textContent = confirmLabel;
+  const close = (accepted: boolean) => { document.removeEventListener('keydown', onKey); overlay.remove(); resolve(accepted); };
+  const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') close(false); };
+  overlay.addEventListener('mousedown', (event) => { if (event.target === overlay) close(false); });
+  dialog.querySelector<HTMLButtonElement>('.modal-close')!.onclick = () => close(false);
+  cancel.onclick = () => close(false); confirmButton.onclick = () => close(true);
+  document.addEventListener('keydown', onKey); document.body.append(overlay); confirmButton.focus();
+});
+
+const bridgeIdeaRevision = (idea: any) => new Promise<{ title: string; body: string } | null>((resolve) => {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-ov open';
+  overlay.innerHTML = `<section class="modal-box security-modal" role="dialog" aria-modal="true"><div class="modal-ttl"><span>Revise idea</span><button type="button" class="modal-close" aria-label="Close">×</button></div><form><label class="lbl">Title</label><input class="ifield" name="title" required minlength="2" maxlength="180"><label class="lbl">Details</label><textarea class="ifield" name="body" required></textarea><div class="modal-acts"><button type="button" class="btn-o">Cancel</button><button class="btn">Save changes</button></div></form></section>`;
+  const form = overlay.querySelector('form')!;
+  (form.elements.namedItem('title') as HTMLInputElement).value = idea.title;
+  (form.elements.namedItem('body') as HTMLTextAreaElement).value = idea.body;
+  const close = (value: { title: string; body: string } | null) => { document.removeEventListener('keydown', onKey); overlay.remove(); resolve(value); };
+  const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') close(null); };
+  overlay.addEventListener('mousedown', (event) => { if (event.target === overlay) close(null); });
+  overlay.querySelector<HTMLButtonElement>('.modal-close')!.onclick = () => close(null);
+  overlay.querySelector<HTMLButtonElement>('.btn-o')!.onclick = () => close(null);
+  form.onsubmit = (event) => { event.preventDefault(); const data = new FormData(form); close({ title: String(data.get('title')).trim(), body: String(data.get('body')).trim() }); };
+  document.addEventListener('keydown', onKey); document.body.append(overlay); (form.elements.namedItem('title') as HTMLInputElement).focus();
+});
+
 (globalThis as any).doLogin = async (button: HTMLButtonElement) => {
   const email = document.querySelector<HTMLInputElement>('#pg-login input[type="email"]')?.value.trim();
   const password = document.getElementById('login-pw') as HTMLInputElement | null;
@@ -164,12 +197,12 @@ const renderIdeas = () => {
 (globalThis as any).wsOpenIdeas = () => { (globalThis as any).usw?.('ideamgmt'); renderIdeas(); };
 (globalThis as any).wsCopyJoinCode = async (code: string) => { try { await navigator.clipboard.writeText(code); (globalThis as any).toast?.('Invitation code copied.', 'success'); } catch { (globalThis as any).toast?.(`Invitation code: ${code}`, 'info'); } };
 (globalThis as any).wsAddMember = async () => { const email = (document.getElementById('ws-member-email') as HTMLInputElement | null)?.value.trim(); if (!email) return formError('Enter the member’s registered email.'); try { await call(`/groups/${activeGroupId}/members`, { method: 'POST', body: JSON.stringify({ email }) }); await selectGroup(activeGroupId); (globalThis as any).toast?.('Member added to the group.', 'success'); } catch (error: any) { formError(error.message); } };
-(globalThis as any).wsRemoveMember = async (userId: string) => { if (!activeGroupId || !confirm('Remove this member from the group?')) return; try { await call(`/groups/${activeGroupId}/members/${userId}`, { method: 'DELETE' }); await selectGroup(activeGroupId); (globalThis as any).toast?.('Member removed.', 'success'); } catch (error: any) { formError(error.message); } };
+(globalThis as any).wsRemoveMember = async (userId: string) => { if (!activeGroupId || !(await bridgeConfirm('Remove member?', 'This member will lose access to the group.', 'Remove member'))) return; try { await call(`/groups/${activeGroupId}/members/${userId}`, { method: 'DELETE' }); await selectGroup(activeGroupId); (globalThis as any).toast?.('Member removed.', 'success'); } catch (error: any) { formError(error.message); } };
 (globalThis as any).wsSubmitIdea = async () => { const title = (document.getElementById('ws-idea-title') as HTMLInputElement | null)?.value.trim(); const body = (document.getElementById('ws-idea-body') as HTMLTextAreaElement | null)?.value.trim(); if (!activeGroupId || !title || !body) return formError('Add both an idea title and description.'); try { await call(`/groups/${activeGroupId}/ideas`, { method: 'POST', body: JSON.stringify({ title, body }) }); await selectGroup(activeGroupId); (globalThis as any).toast?.('Idea submitted to your group.', 'success'); } catch (error: any) { formError(error.message); } };
-(globalThis as any).wsEditIdea = async (id: string) => { const idea = activeHub?.ideas.find((item: any) => item.id === id); if (!idea) return; const title = prompt('Revise the title', idea.title); if (!title?.trim()) return; const body = prompt('Revise the description', idea.body); if (!body?.trim()) return; try { await call(`/ideas/${id}`, { method: 'PATCH', body: JSON.stringify({ title: title.trim(), body: body.trim() }) }); await selectGroup(activeGroupId); (globalThis as any).toast?.('Idea revised.', 'success'); } catch (error: any) { formError(error.message); } };
+(globalThis as any).wsEditIdea = async (id: string) => { const idea = activeHub?.ideas.find((item: any) => item.id === id); if (!idea) return; const revised = await bridgeIdeaRevision(idea); if (!revised?.title || !revised.body) return; try { await call(`/ideas/${id}`, { method: 'PATCH', body: JSON.stringify(revised) }); await selectGroup(activeGroupId); (globalThis as any).toast?.('Idea revised.', 'success'); } catch (error: any) { formError(error.message); } };
 (globalThis as any).wsOpenPoll = async () => { const ideaIds = [...document.querySelectorAll<HTMLInputElement>('[data-ws-poll-idea]:checked')].map((input) => input.value); if (ideaIds.length < 2) return formError('Choose at least two ideas for a vote.'); try { await call(`/groups/${activeGroupId}/polls`, { method: 'POST', body: JSON.stringify({ ideaIds }) }); await selectGroup(activeGroupId); (globalThis as any).toast?.('Group vote is open.', 'success'); } catch (error: any) { formError(error.message); } };
 (globalThis as any).wsVote = async (pollId: string, optionId: string) => { try { await call(`/polls/${pollId}/vote`, { method: 'POST', body: JSON.stringify({ optionId }) }); await selectGroup(activeGroupId); } catch (error: any) { formError(error.message); } };
-(globalThis as any).wsBeginProject = async (ideaId: string) => { if (!confirm('Create a project from this idea? This cannot be undone.')) return; try { const project = await call(`/groups/${activeGroupId}/ideas/${ideaId}/begin`, { method: 'POST' }); await selectGroup(activeGroupId); (globalThis as any).toast?.(`Project “${project.title}” created.`, 'success'); } catch (error: any) { formError(error.message); } };
+(globalThis as any).wsBeginProject = async (ideaId: string) => { if (!(await bridgeConfirm('Create project?', 'This converts the idea into a project and cannot be undone.', 'Create project'))) return; try { const project = await call(`/groups/${activeGroupId}/ideas/${ideaId}/begin`, { method: 'POST' }); await selectGroup(activeGroupId); (globalThis as any).toast?.(`Project “${project.title}” created.`, 'success'); } catch (error: any) { formError(error.message); } };
 
 const existingUsw = (globalThis as any).usw;
 (globalThis as any).usw = function (id: string, ...args: unknown[]) { existingUsw?.(id, ...args); if (access && (id === 'mygroups' || id === 'ideamgmt')) void refreshGroups(); };

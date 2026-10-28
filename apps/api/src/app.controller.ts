@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, Redirect, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { z } from 'zod';
-import { accountDeleteSchema, adminGeneralSettingsSchema, aiAskSchema, announcementSchema, calendarEventSchema, deactivationRequestSchema, ideaSchema, loginSchema, maintenanceAnnouncementSchema, mobilePushTokenSchema, notificationPreferencesSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, pollCreateSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, projectUpdateSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskEditSchema, taskSchema, ticketUpdateSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
+import { accountDeleteSchema, adminGeneralSettingsSchema, aiAskSchema, announcementSchema, calendarEventSchema, deactivationRequestSchema, ideaSchema, loginSchema, maintenanceAnnouncementSchema, mobilePushTokenSchema, notificationPreferencesSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, pollCreateSchema, pollExtendSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, projectUpdateSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskEditSchema, taskSchema, ticketUpdateSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
 import { AppService } from './app.service.js';
 import { LocalStorageService } from './local-storage.service.js';
 import { RedisService } from './redis.service.js';
@@ -66,6 +66,7 @@ export class AppController {
   @GroupScope() @Post('groups/:id/ideas/merge') async mergeIdeas(@Headers('authorization') auth: string, @Param('id') id: string, @Body('ideaIds') ideaIds: string[]) { return this.app.mergeIdeas(await this.caller(auth), id, ideaIds); }
   @GroupScope() @Post('groups/:id/polls') async poll(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.openPoll(await this.caller(auth), id, parse(pollCreateSchema, body)); }
   @Post('polls/:id/close') async closePoll(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.closePoll(await this.caller(auth), id); }
+  @Post('polls/:id/extend') async extendPoll(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.extendPoll(await this.caller(auth), id, parse(pollExtendSchema, body)); }
   @Post('polls/:id/vote') async vote(@Headers('authorization') auth: string, @Param('id') id: string, @Body('optionId') optionId: string) { const tally = await this.app.vote(await this.caller(auth), id, optionId); this.realtime.publishPollTally(tally.groupId, tally); return tally; }
   @Get('polls/:id/results') async results(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.pollResults(await this.caller(auth), id); }
   @GroupScope('groupId') @Post('groups/:groupId/ideas/:ideaId/begin') async begin(@Headers('authorization') auth: string, @Param() params: any) { return this.app.begin(await this.caller(auth), params.groupId, params.ideaId); }

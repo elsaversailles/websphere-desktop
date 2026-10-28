@@ -10,10 +10,11 @@ type DateFieldProps = {
   defaultValue?: string;
   required?: boolean;
   id?: string;
+  showJump?: boolean;
 };
 
-/** Keeps the native day picker and adds direct month/year jumps beside it. */
-export function DateField({ name, label, type = 'date', defaultValue = '', required = false, id }: DateFieldProps) {
+/** Uses the native picker, with optional direct month/year jumps where they add value. */
+export function DateField({ name, label, type = 'date', defaultValue = '', required = false, id, showJump = true }: DateFieldProps) {
   const [value, setValue] = useState(defaultValue);
   const selected = value ? dateOnlyKey(value) : localDateKey();
   const [year, month] = selected.split('-').map(Number);
@@ -30,14 +31,14 @@ export function DateField({ name, label, type = 'date', defaultValue = '', requi
   }
 
   return <div className="date-field">
-    <div className="date-field-jump">
+    {showJump ? <div className="date-field-jump">
       <select className="legacy-select" value={month} aria-label={`${label} month`} onChange={(event) => moveTo(year, Number(event.target.value))}>
         {MONTHS.map((name, index) => <option key={name} value={index + 1}>{name}</option>)}
       </select>
       <select className="legacy-select" value={year} aria-label={`${label} year`} onChange={(event) => moveTo(Number(event.target.value), month)}>
         {Array.from({ length: endYear - startYear + 1 }, (_, index) => startYear + index).map((option) => <option key={option} value={option}>{option}</option>)}
       </select>
-    </div>
+    </div> : null}
     <input id={id} className="ifield" name={name} type={type} required={required} value={value} onChange={(event) => setValue(event.target.value)} aria-label={label} />
   </div>;
 }
