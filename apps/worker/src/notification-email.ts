@@ -19,7 +19,7 @@ export async function deliverNotificationEmail(prisma: PrismaClient, notificatio
   await transport.sendMail({
     from,
     to: notification.user.email,
-    subject: 'New WebSphere notification',
+    subject: notification.type === 'deadline_reminder' && notification.relatedType === 'task' ? 'WebSphere task deadline reminder' : 'New WebSphere notification',
     text: `${notification.message}\n\nOpen WebSphere to view your notifications.`,
     html: `<p>${escapeHtml(notification.message).replace(/\n/g, '<br>')}</p><p>Open WebSphere to view your notifications.</p>`,
   });

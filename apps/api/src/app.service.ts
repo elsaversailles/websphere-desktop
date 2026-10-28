@@ -612,7 +612,8 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const assignerIds = [...new Set(tasks.map((task: any) => task.assignments[0]?.assignerId).filter(Boolean))];
     const assigners = assignerIds.length ? await this.prisma.user.findMany({ where: { id: { in: assignerIds } }, select: { id: true, fullName: true } }) : [];
     const assignerName = (id?: string) => assigners.find((user: any) => user.id === id)?.fullName ?? 'Unassigned';
-    return tasks.map((task: any) => ({ ...task, project: task.project, assignedBy: assignerName(task.assignments[0]?.assignerId), assignedAt: task.assignments[0]?.assignedAt ?? task.createdAt, progress: taskProgress(task.status) }));
+    const assignedTasks = tasks.map((task: any) => ({ ...task, project: task.project, assignedBy: assignerName(task.assignments[0]?.assignerId), assignedAt: task.assignments[0]?.assignedAt ?? task.createdAt, progress: taskProgress(task.status) }));
+    return filter.sort === 'assigned' ? assignedTasks.sort((a: any, b: any) => new Date(b.assignedAt).getTime() - new Date(a.assignedAt).getTime()) : assignedTasks;
   }
   async tracker(caller: Caller, projectId: string) { await this.projectMember(projectId, caller.id); const tasks = await this.prisma.task.findMany({ where: { projectId } }); const counts = Object.fromEntries(['pending', 'ongoing', 'for_review', 'completed'].map((status) => [status, tasks.filter((task) => task.status === status).length])); return { ...counts, total: tasks.length, progress: completionRate(counts.completed, tasks.length) }; }
   async taskTracker(caller: Caller) {
@@ -904,6 +905,20 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.prisma.ideaPoll.update({ where: { id: pollId }, data: { closesAt } });
     return this.tally(pollId, caller.id);
   }
+  async deleteFinishedPoll(caller: Caller, pollId: string) {
+    const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: { select: { id: true, ideaId: true } } } });
+    await this.member(poll.groupId, caller.id, true);
+    await this.settleExpired(poll);
+    if (this.pollIsOpen(poll)) fail('VALIDATION_FAILED', 'Close voting before deleting its ideas', 409);
+    const ideaIds = poll.options.map((option) => option.ideaId);
+    await this.prisma.$transaction([
+      this.prisma.vote.deleteMany({ where: { pollId } }),
+      this.prisma.pollOption.deleteMany({ where: { pollId } }),
+      this.prisma.ideaPoll.delete({ where: { id: pollId } }),
+      this.prisma.idea.deleteMany({ where: { id: { in: ideaIds }, project: null } }),
+    ]);
+    return { ok: true };
+  }
   async vote(caller: Caller, pollId: string, optionId: string) {
     const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: true } });
     await this.member(poll.groupId, caller.id);
@@ -942,7 +957,21 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.audit.log('AdminModule', 'maintenance_announced', 'info', `Announced maintenance starting ${startsAt.toISOString()} to ${users.length} active account(s)`, caller.id);
     return { startsAt: startsAt.toISOString(), notified: users.length };
   }
-  async calendar(caller: Caller, from?: string, to?: string) { const events = await this.prisma.calendarEvent.findMany({ where: { OR: [{ ownerId: caller.id }, { project: { members: { some: { userId: caller.id } } } }], ...(from || to ? { startAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}) }, orderBy: { startAt: 'asc' } }); const projects = await this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, deadline: { not: null } }, select: { id: true, title: true, deadline: true } }); const tasks = await this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, deadline: { not: null }, status: { not: 'completed' } }, select: { id: true, title: true, deadline: true } }); return { events, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))] }; }
+  async calendar(caller: Caller, from?: string, to?: string) {
+    const dateRange = from || to ? { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } : {};
+    const [events, projects, tasks, notifications] = await Promise.all([
+      this.prisma.calendarEvent.findMany({ where: { OR: [{ ownerId: caller.id }, { project: { members: { some: { userId: caller.id } } } }], ...(from || to ? { startAt: dateRange } : {}) }, orderBy: { startAt: 'asc' } }),
+      this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, deadline: { not: null, ...dateRange } }, select: { id: true, title: true, deadline: true } }),
+      // Task dates are projected from the task itself, so edits, completion and reassignment
+      // never leave duplicate/stale calendar-event rows behind. Keep completed tasks as history.
+      this.prisma.task.findMany({ where: {
+        OR: [{ createdBy: caller.id }, { assignments: { some: { assigneeId: caller.id, active: true } } }],
+        deadline: { not: null, ...dateRange },
+      }, select: { id: true, title: true, deadline: true }, orderBy: { deadline: 'asc' } }),
+      this.prisma.notification.findMany({ where: { userId: caller.id, relatedType: 'task', type: { in: ['task_assignment', 'deadline_reminder'] }, read: false }, orderBy: { createdAt: 'desc' }, take: 5 }),
+    ]);
+    return { events, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))], notifications };
+  }
   async createCalendarEvent(caller: Caller, input: any) { if (input.projectId) await this.projectMember(input.projectId, caller.id); return this.prisma.calendarEvent.create({ data: { ...input, ownerId: caller.id } }); }
   private async calendarEventAccess(caller: Caller, id: string) { const event = await this.prisma.calendarEvent.findUniqueOrThrow({ where: { id } }); if (event.projectId) await this.projectMember(event.projectId, caller.id); else if (event.ownerId !== caller.id) fail('RBAC_FORBIDDEN', 'Only the event owner or project members can modify this event', 403); return event; }
   async updateCalendarEvent(caller: Caller, id: string, input: any) { await this.calendarEventAccess(caller, id); return this.prisma.calendarEvent.update({ where: { id }, data: input }); }
@@ -971,7 +1000,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const preferences = preferenceKey && recipients.length ? await this.prisma.notificationPreference.findMany({ where: { userId: { in: recipients } }, select: { userId: true, [preferenceKey]: true } }) : [];
     const enabled = new Map(preferences.map((preference: any) => [preference.userId, preference[preferenceKey!]]));
     const eligible = preferenceKey ? recipients.filter((userId) => enabled.get(userId) !== false) : recipients;
-    const created = await Promise.all(eligible.map((userId) => this.prisma.notification.create({ data: { userId, type, message, relatedId, relatedType } })));
+    const created = await Promise.all(eligible.map((userId) => this.prisma.notification.create({ data: { userId, type, message: this.noticeText(message, 191), relatedId, relatedType } })));
     for (const notification of created) {
       this.events.emitNotification(notification.userId, notification);
       void this.push.deliver(notification).catch(() => undefined);

@@ -5,7 +5,7 @@ import { disablePush, enablePush, pushStatus as getPushStatus, type PushStatus }
 import { ChartCanvas } from './ChartCanvas';
 import { ToolLogo } from './ToolLogo';
 import { DateField } from './DateField';
-import { dateOnlyKey, formatDateOnly, localDateKey } from './dates';
+import { dateOnlyKey, formatDateOnly, localDateFromKey, localDateKey } from './dates';
 import { badgeTone } from './health';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -13,7 +13,8 @@ type Notice = (message: string) => void;
 type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
 type Task = { id: string; title: string; projectId: string; deadline?: string | null; assignedAt?: string; priority: string; status: string; project?: { id: string; title: string }; assignedBy?: string; progress?: number };
 type Project = { id: string; title: string; status: string; deadline?: string | null; group: { name: string }; members?: Array<{ role: string }>; tasks: Array<{ status: string }> };
-type CalendarData = { events: Array<{ id: string; title: string; type: string; startAt: string; endAt?: string | null; projectId?: string | null; source?: string }>; hints: Array<{ id: string; title: string; type: string; deadline: string }> };
+type CalendarTaskNotification = { id: string; message: string; type: string; relatedId?: string | null; createdAt: string };
+type CalendarData = { events: Array<{ id: string; title: string; type: string; startAt: string; endAt?: string | null; projectId?: string | null; source?: string }>; hints: Array<{ id: string; title: string; type: string; deadline: string }>; notifications?: CalendarTaskNotification[] };
 
 type TeamMemberWeek = { id: string; fullName: string; role: string; contributions: number; tasksCompleted: number; performance: number; active: boolean };
 type TeamPerformanceWeek = { periodStart: string; periodEnd: string; label: string; members: TeamMemberWeek[]; activeCount: number; inactiveCount: number };
@@ -69,18 +70,39 @@ export function CalendarPage({ notify }: { notify: Notice }) {
   const [saving, setSaving] = useState(false);
   const [loadingCalendar, setLoadingCalendar] = useState(true);
   const [calendarError, setCalendarError] = useState<string | null>(null);
-  async function refresh() {
+  const refresh = useCallback(async () => {
     try { setData(await request<CalendarData>('/calendar')); setCalendarError(null); }
     catch (error) { setCalendarError(error instanceof Error ? error.message : 'Could not load calendar events.'); throw error; }
     finally { setLoadingCalendar(false); }
-  }
-  useEffect(() => { void refresh().catch((error: Error) => notify(error.message)); }, [notify]);
+  }, []);
+  useEffect(() => { void refresh().catch((error: Error) => notify(error.message)); }, [notify, refresh]);
   useEffect(() => { void request<Project[]>('/projects').then(setProjects).catch(() => undefined); }, []);
+  useEffect(() => {
+    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
+    socket.on('connect', () => {
+      projects.forEach((project) => socket.emit('project:join', project.id, () => undefined));
+      void refresh().catch(() => undefined);
+    });
+    socket.on('notification:new', () => { void refresh().catch(() => undefined); });
+    socket.on('task:updated', () => { void refresh().catch(() => undefined); });
+    // Also reconcile task creation/deletion and changes made while this tab was disconnected.
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh().catch(() => undefined); }, 30_000);
+    return () => { socket.disconnect(); window.clearInterval(timer); };
+  }, [projects, refresh]);
   const cells = useMemo(() => monthCells(cursor), [cursor]);
   const items = [...data.events.map((event) => ({ ...event, at: event.startAt, kind: 'event' as const })), ...data.hints.map((hint) => ({ ...hint, at: hint.deadline, kind: 'hint' as const }))];
 
   function openCreate(day?: Date) { setEditingEvent(null); setNewEventStart(day ? toLocalInput(new Date(day.getFullYear(), day.getMonth(), day.getDate(), 9)) : ''); setDialogOpen(true); }
   function openEdit(event: CalendarData['events'][number]) { setEditingEvent(event); setDialogOpen(true); }
+  async function openTaskNotification(notification: CalendarTaskNotification) {
+    const task = data.hints.find((hint) => hint.type === 'task_deadline' && hint.id === notification.relatedId);
+    if (task) {
+      setCursor(localDateFromKey(dateOnlyKey(task.deadline)));
+      setSelectedItem({ title: task.title, when: task.deadline, category: 'Deadline' });
+    } else setSelectedItem({ title: notification.message, when: notification.createdAt, category: 'Task notification' });
+    try { await request(`/notifications/${notification.id}/read`, { method: 'PATCH' }); await refresh(); }
+    catch (error) { notify(error instanceof Error ? error.message : 'Could not mark notification as read.'); }
+  }
   async function saveEvent(formEvent: React.FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
     const values = new FormData(formEvent.currentTarget);
@@ -118,6 +140,10 @@ export function CalendarPage({ notify }: { notify: Notice }) {
       </div>
     </div>
     {calendarError ? <div className="calendar-error" role="alert">{calendarError} <button type="button" onClick={() => void refresh().catch(() => undefined)}>Retry</button></div> : null}
+    {data.notifications?.length ? <section className="cc" aria-label="Task calendar notifications">
+      <div className="cc-head"><h3>Task notifications</h3><span className="user-page-count">{data.notifications.length} recent unread</span></div>
+      {data.notifications.map((notification) => <button type="button" className="notif-item notif-entry" key={notification.id} onClick={() => void openTaskNotification(notification)}><span className="ndot" /><span><span className="ntxt">{notification.message}</span><span className="ntime">{new Date(notification.createdAt).toLocaleString()}</span></span></button>)}
+    </section> : null}
     <div className="cal-grid-wrap">
       <div className="cal-weekday-row">{['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day) => <div className="cal-weekday-cell" key={day}>{day}</div>)}</div>
       <div className="cal-body">{cells.map((cell, index) => {
@@ -148,15 +174,15 @@ export function CalendarPage({ notify }: { notify: Notice }) {
       <h3>{selectedItem.title}</h3><p>{selectedItem.category === 'Deadline' ? formatDateOnly(selectedItem.when) : new Date(selectedItem.when).toLocaleString()}</p>
       <div className="modal-acts"><button className="btn" onClick={() => setSelectedItem(null)}>Close</button></div>
     </div></div> : null}
-    {dialogOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialogOpen(false); }}><div className="modal-box" role="dialog" aria-modal="true" aria-label={editingEvent ? 'Edit event' : 'New event'}>
+    {dialogOpen ? <div className="modal-ov open project-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialogOpen(false); }}><div className="modal-box project-modal calendar-event-modal" role="dialog" aria-modal="true" aria-label={editingEvent ? 'Edit event' : 'New event'}>
       <div className="modal-ttl"><span>{editingEvent ? 'Edit Event' : 'New Event'}</span><button className="modal-close" onClick={() => setDialogOpen(false)} aria-label="Close event form">×</button></div>
-      <form onSubmit={saveEvent}>
+      <form className="project-create-form" onSubmit={saveEvent}>
         <label className="lbl">Title</label><input className="ifield" name="title" required minLength={2} defaultValue={editingEvent?.title ?? ''} placeholder="Event title" />
         <label className="lbl">Type</label><select className="ifield" name="type" defaultValue={editingEvent?.type ?? 'meeting'}><option value="meeting">Meeting</option><option value="work_session">Work session</option><option value="presentation">Presentation</option><option value="activity">Activity</option></select>
-        <label className="lbl" htmlFor="event-start-at">Start</label><DateField id="event-start-at" name="startAt" label="Event start" type="datetime-local" required defaultValue={editingEvent ? toLocalInput(editingEvent.startAt) : newEventStart} />
-        <label className="lbl" htmlFor="event-end-at">End (optional)</label><DateField id="event-end-at" name="endAt" label="Event end" type="datetime-local" defaultValue={editingEvent?.endAt ? toLocalInput(editingEvent.endAt) : ''} />
+        <label className="lbl" htmlFor="event-start-at">Start</label><DateField id="event-start-at" name="startAt" label="Event start" type="datetime-local" required defaultValue={editingEvent ? toLocalInput(editingEvent.startAt) : newEventStart} showJump={false} />
+        <label className="lbl" htmlFor="event-end-at">End (optional)</label><DateField id="event-end-at" name="endAt" label="Event end" type="datetime-local" defaultValue={editingEvent?.endAt ? toLocalInput(editingEvent.endAt) : ''} showJump={false} />
         <label className="lbl">Related Project (optional)</label><select className="ifield" name="projectId" defaultValue={editingEvent?.projectId ?? ''}><option value="">No project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select>
-        <div className="modal-acts">{editingEvent ? <button type="button" className="btn-red" onClick={() => void deleteEvent()} disabled={saving}>Delete</button> : null}<button type="button" className="btn-o" onClick={() => setDialogOpen(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : editingEvent ? 'Save Changes' : 'Create Event'}</button></div>
+        <div className="modal-acts project-modal-actions">{editingEvent ? <button type="button" className="btn-red" onClick={() => void deleteEvent()} disabled={saving}>Delete</button> : null}<button type="button" className="btn-o" onClick={() => setDialogOpen(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : editingEvent ? 'Save Changes' : 'Create Event'}</button></div>
       </form>
     </div></div> : null}
   </section>;

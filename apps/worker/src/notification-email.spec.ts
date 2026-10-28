@@ -33,6 +33,16 @@ describe('notification email delivery', () => {
     expect(sendMail).not.toHaveBeenCalled();
   });
 
+  it('emails the due-today task reminder to the responsible user’s registered address', async () => {
+    const prisma = fixture();
+    prisma.notification.findUnique.mockResolvedValueOnce({
+      type: 'deadline_reminder', relatedType: 'task', message: 'Task “Report” is due today.',
+      user: { email: 'responsible@example.test', status: 'active', preference: { emailEnabled: true } },
+    });
+    await deliverNotificationEmail(prisma, 'due-today-1', env);
+    expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: 'responsible@example.test', subject: 'WebSphere task deadline reminder', text: expect.stringContaining('is due today.') }));
+  });
+
   it('throws on SMTP failure so BullMQ can retry', async () => {
     sendMail.mockRejectedValueOnce(new Error('SMTP unavailable'));
     await expect(deliverNotificationEmail(fixture(), 'notification-1', env)).rejects.toThrow('SMTP unavailable');

@@ -92,6 +92,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const [closingPoll, setClosingPoll] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<ConfirmAction | null>(null);
+  const [extensionHours, setExtensionHours] = useState('24');
   const refreshHub = useCallback(async () => {
     if (!selectedGroupId) return;
     try { setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); } catch { /* the next tally or refresh will retry */ }
@@ -385,7 +386,14 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   }
   async function extendVoting() {
     if (!hub?.poll) return;
-    try { await request(`/polls/${hub.poll.pollId}/extend`, { method: 'POST', body: JSON.stringify({ hours: 24 }) }); await refreshHub(); notify('Voting time extended by 1 day.'); }
+    const hours = Number(extensionHours);
+    if (!Number.isFinite(hours) || hours <= 0) return notify('Enter a valid number of hours.');
+    try { await request(`/polls/${hub.poll.pollId}/extend`, { method: 'POST', body: JSON.stringify({ hours }) }); await refreshHub(); notify(`Voting time extended by ${hours} hour${hours === 1 ? '' : 's'}.`); }
+    catch (error: any) { notify(error.message); }
+  }
+  async function deleteFinishedVoting() {
+    if (!hub?.poll) return;
+    try { await request(`/polls/${hub.poll.pollId}`, { method: 'DELETE' }); await refreshHub(); notify('Finished voting and its unused ideas were deleted.'); }
     catch (error: any) { notify(error.message); }
   }
 
@@ -458,12 +466,12 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
         </main>
         <aside className="gc-right-panel">
           <section><div className="gc-side-title"><h3>Members</h3><span>{hub.group.members.length}</span></div>{hub.group.members.map((member) => <div className="gc-member-row" key={member.userId}><MemberAvatar name={member.user.fullName} avatarUrl={member.user.avatarUrl} /><span><strong>{member.user.fullName}</strong><small>{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</small></span>{viewerIsLeader && member.userId !== userId ? <button type="button" className="gc-member-remove" aria-label={`Remove ${member.user.fullName} from the group`} title={`Remove ${member.user.fullName}`} onClick={() => setConfirmation({ title: 'Remove member?', description: `${member.user.fullName} will immediately lose access to this group’s chat, projects, and tasks.`, confirmLabel: 'Remove member', destructive: true, action: () => void removeMember(member.userId) })}>Remove</button> : <i />}</div>)}<button type="button" className="gc-manage-members" onClick={() => setManageOpen(true)}>{viewerIsLeader ? 'Manage members' : 'Add members'}</button></section>
-          <section className="gc-voting"><div className="gc-side-title"><h3>Idea Voting</h3></div>{poll ? <><div className="gc-poll-status"><PollStatus poll={poll} onExpired={refreshHub} />{poll.open && viewerIsLeader ? <button type="button" className="gc-close-vote" disabled={closingPoll} onClick={() => setConfirmation({ title: 'Close voting?', description: 'Members will no longer be able to vote in this poll.', confirmLabel: 'Close voting', action: () => void closeVoting() })}>{closingPoll ? 'Closing…' : 'Close voting'}</button> : null}</div><div className="gc-poll-options">{poll.options.map((option) => <IdeaVoteCard key={option.optionId} option={option} totalVotes={poll.options.reduce((total, value) => total + value.votes, 0)} viewerOptionId={poll.viewerOptionId} viewerId={userId} votingOpen={poll.open} onVote={(optionId) => void vote(optionId)} />)}</div></> : <div className="gc-panel-empty">Your group vote starts in Idea Management.</div>}</section>
+          <section className="gc-voting"><div className="gc-side-title"><h3>Idea Voting</h3></div>{poll ? <><div className="gc-poll-status"><PollStatus poll={poll} onExpired={refreshHub} />{poll.open && viewerIsLeader ? <><label className="gc-vote-extend"><span className="sr-only">Hours to extend voting</span><input type="number" min="1" max="720" value={extensionHours} onChange={(event) => setExtensionHours(event.target.value)} aria-label="Hours to extend voting" /><button type="button" onClick={() => void extendVoting()}>Extend</button></label><button type="button" className="gc-close-vote" disabled={closingPoll} onClick={() => setConfirmation({ title: 'Close voting?', description: 'Members will no longer be able to vote in this poll.', confirmLabel: 'Close voting', action: () => void closeVoting() })}>{closingPoll ? 'Closing…' : 'Close voting'}</button></> : null}</div><div className="gc-poll-options">{poll.options.map((option) => <IdeaVoteCard key={option.optionId} option={option} totalVotes={poll.options.reduce((total, value) => total + value.votes, 0)} viewerOptionId={poll.viewerOptionId} viewerId={userId} votingOpen={poll.open} onVote={(optionId) => void vote(optionId)} />)}</div></> : <div className="gc-panel-empty">Your group vote starts in Idea Management.</div>}</section>
           <button className="gc-start-project" disabled={!hub.poll} onClick={() => void startProject()}>Start Project</button>
         </aside>
       </> : <div className="gc-no-selection"><strong>Your workspace is ready</strong><span>Choose or create a group to begin a conversation.</span></div>}
     </div>
-    {hub?.poll?.open && viewerIsLeader ? <button type="button" className="btn-o btn-sm" onClick={() => void extendVoting()}>Extend voting by 1 day</button> : null}
+    {hub?.poll && !hub.poll.open && viewerIsLeader ? <button type="button" className="btn-o btn-sm btn-red" onClick={() => setConfirmation({ title: 'Delete finished voting?', description: 'This removes the completed vote and its unused ideas. Ideas already turned into projects will be kept.', confirmLabel: 'Delete finished voting', destructive: true, action: () => void deleteFinishedVoting() })}>Delete finished voting</button> : null}
     {confirmation ? <ConfirmDialog {...confirmation} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation.action; setConfirmation(null); action(); }} /> : null}
     {manageOpen && hub ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setManageOpen(false); }}>
       <div className="modal-box hub-modal" role="dialog" aria-modal="true" aria-label={`Group Hub for ${hub.group.name}`}>
