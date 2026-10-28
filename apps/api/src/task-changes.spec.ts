@@ -58,4 +58,30 @@ describe('task authorization and persistence', () => {
     expect(notify).toHaveBeenCalledWith(['member-2'], 'task_assignment', expect.any(String), 'task-1', 'task');
     expect(result.title).toBe('Final report');
   });
+
+  it('does not send another assignment alert when only the due date changes', async () => {
+    const { service, notify, update } = taskService();
+    const deadline = new Date('2026-10-30');
+    await service.updateTask(leader, 'task-1', { deadline });
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ deadline }) }));
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('does not repeat an assignment alert for the same active assignee', async () => {
+    const { service, notify, assignmentCreate } = taskService();
+    await service.assignTask(leader, 'task-1', assignee.id);
+    expect(assignmentCreate).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('puts an older task newly assigned today first in the dashboard task preview', async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      { id: 'new-task', createdAt: new Date('2026-10-27'), status: 'pending', assignments: [{ assigneeId: assignee.id, assignedAt: new Date('2026-10-27') }] },
+      { id: 'old-task-new-assignment', createdAt: new Date('2026-09-01'), status: 'pending', assignments: [{ assigneeId: assignee.id, assignedAt: new Date('2026-10-28') }] },
+    ]);
+    const service = Object.assign(Object.create(AppService.prototype), { prisma: { task: { findMany }, user: { findMany: vi.fn().mockResolvedValue([]) } } }) as AppService;
+    const tasks = await service.myTasks(assignee, { sort: 'assigned' });
+    expect(tasks.map((task: any) => task.id)).toEqual(['old-task-new-assignment', 'new-task']);
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { assignments: { some: { assigneeId: assignee.id, active: true } } } }));
+  });
 });

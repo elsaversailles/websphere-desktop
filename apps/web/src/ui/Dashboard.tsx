@@ -51,7 +51,12 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
   useEffect(() => { setUnread(data?.notifications.filter((item) => !item.read).length ?? 0); }, [data]);
   useEffect(() => {
     const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
+    socket.on('connect', () => {
+      void request<Array<{ id: string }>>('/projects').then((projects) => projects.forEach((project) => socket.emit('project:join', project.id, () => undefined))).catch(() => undefined);
+      void refreshDashboard();
+    });
     socket.on('notification:new', () => void refreshDashboard());
+    socket.on('task:updated', () => void refreshDashboard());
     return () => { socket.disconnect(); };
   }, [refreshDashboard]);
   useEffect(() => {

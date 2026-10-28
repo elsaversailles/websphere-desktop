@@ -20,13 +20,15 @@ function fixture(disabled = false) {
 
 describe('notification email queueing', () => {
   it('queues one email per new eligible notification', async () => {
-    const { service, enqueueNotificationEmail, emitNotification } = fixture();
+    const { service, enqueueNotificationEmail, emitNotification, deliver } = fixture();
     const result = await service.notify(['user-1', 'user-2', 'user-1'], 'task_assignment', 'Task assigned');
     expect(result.delivered).toBe(2);
     expect(enqueueNotificationEmail).toHaveBeenCalledTimes(2);
     expect(enqueueNotificationEmail).toHaveBeenCalledWith('notification-user-1');
     expect(enqueueNotificationEmail).toHaveBeenCalledWith('notification-user-2');
     expect(emitNotification).toHaveBeenCalledTimes(2);
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ userId: 'user-1', type: 'task_assignment' }));
   });
 
   it('does not queue email when the notification category is disabled', async () => {
@@ -50,5 +52,12 @@ describe('notification email queueing', () => {
     const result = await service.notify(['user-1'], 'announcement', 'New announcement');
     expect(result.delivered).toBe(1);
     expect(emitNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps assignment alerts within the database message limit for long task/project titles', async () => {
+    const { service, create, deliver } = fixture();
+    await service.notify(['user-1'], 'task_assignment', `You were assigned “${'A'.repeat(180)}” in “${'B'.repeat(180)}”`, 'task-1', 'task');
+    expect(create.mock.calls[0][0].data.message.length).toBeLessThanOrEqual(191);
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ relatedId: 'task-1', relatedType: 'task' }));
   });
 });

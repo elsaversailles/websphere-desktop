@@ -23,7 +23,7 @@ export class JobsService implements OnApplicationShutdown {
       jobId: notificationId,
       attempts: 3,
       backoff: { type: 'exponential', delay: 30_000 },
-      removeOnComplete: true,
+      removeOnComplete: { age: 7 * 86_400 },
       removeOnFail: 1000,
     });
   }
