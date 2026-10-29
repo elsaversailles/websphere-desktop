@@ -232,6 +232,7 @@ model Task {
   projectId String
   title String
   description String @db.Text
+  startDate DateTime?
   deadline DateTime?
   priority TaskPriority @default(medium)
   status TaskStatus @default(pending)
