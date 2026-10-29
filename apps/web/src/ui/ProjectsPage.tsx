@@ -7,7 +7,7 @@ import { deadlineHealth, priorityHealth, taskStatusHealth } from './health';
 import { ConfirmDialog } from './ConfirmDialog';
 
 type Project = { id: string; title: string; description: string; status: string; deadline?: string | null; group: { name: string } | null; members?: Array<{ role: string }>; tasks: Array<{ id: string; status: string }> };
-type ProjectTask = { id: string; title: string; description: string; deadline?: string | null; priority: string; status: string; assignments: Array<{ assigneeId: string }>; risk?: { level: 'high' | 'medium' | 'low' } };
+type ProjectTask = { id: string; title: string; description: string; startDate?: string | null; deadline?: string | null; priority: string; status: string; assignments: Array<{ assigneeId: string }>; risk?: { level: 'high' | 'medium' | 'low' } };
 type Member = { userId: string; role: string; responsibility?: string | null; user: { id: string; fullName: string } };
 type ProjectDetail = { id: string; title: string; description: string; status: string; deadline?: string | null; group: { members: Member[] } | null; members: Member[]; tasks: ProjectTask[] };
 type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
@@ -59,7 +59,7 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
     const assigneeId = String(values.get('assigneeId') ?? '');
     setSaving(true);
     try {
-      const task = await request<{ id: string }>(`/projects/${detail.id}/tasks`, { method: 'POST', body: JSON.stringify({ title: values.get('title'), description: values.get('description'), deadline: values.get('deadline') || undefined, priority: values.get('priority') }) });
+      const task = await request<{ id: string }>(`/projects/${detail.id}/tasks`, { method: 'POST', body: JSON.stringify({ title: values.get('title'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, priority: values.get('priority') }) });
       if (assigneeId) {
         if (!detail.members.some((member) => member.userId === assigneeId)) await request(`/projects/${detail.id}/members`, { method: 'POST', body: JSON.stringify({ userId: assigneeId }) });
         await request(`/tasks/${task.id}/assign`, { method: 'POST', body: JSON.stringify({ assigneeId }) });
@@ -79,7 +79,7 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
     const assigneeId = String(values.get('assigneeId') ?? '');
     const payload = editingTask.mode === 'reassign'
       ? { assigneeId }
-      : { title: values.get('title'), description: values.get('description'), deadline: values.get('deadline') || null, priority: values.get('priority'), status: values.get('status'), assigneeId: assigneeId || null };
+      : { title: values.get('title'), startDate: values.get('startDate') || null, deadline: values.get('deadline') || null, priority: values.get('priority'), assigneeId: assigneeId || null };
     setSaving(true);
     try {
       await request(`/tasks/${editingTask.task.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
@@ -159,16 +159,16 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
           <select className="legacy-select" name="status" defaultValue={detail.status}><option value="active">Active</option><option value="completed">Completed</option><option value="archived">Archived</option><option value="on_hold">On hold</option></select>
           <button className="btn btn-sm" disabled={saving}>{saving ? 'Saving…' : 'Save Changes'}</button>
         </form> : null}
-        {leader ? <form className="task-create-form" key={createFormKey} onSubmit={(event) => void createTask(event)}>
-          <input className="ifield" name="title" required minLength={2} maxLength={180} placeholder="Task title" />
-          <input className="ifield" name="description" required placeholder="Task description" />
-          <select className="legacy-select" name="assigneeId" defaultValue=""><option value="">Assign later</option>{projectMembers.map((member) => <option value={member.userId} key={member.userId}>{member.user.fullName}</option>)}</select>
-          <select className="legacy-select" name="priority" defaultValue="medium"><option value="low">Low priority</option><option value="medium">Medium</option><option value="high">High priority</option></select>
-          <DateField name="deadline" label="Task due date" />
+        {leader ? <form className="task-create-form task-entry-form" aria-label="Create task" key={createFormKey} onSubmit={(event) => void createTask(event)}>
+          <div className="task-form-field"><label className="lbl" htmlFor="task-create-title">Task Title</label><input id="task-create-title" className="ifield" name="title" required minLength={2} maxLength={180} placeholder="Task title" /></div>
+          <div className="task-form-field"><label className="lbl" htmlFor="task-create-start-date">Start Date</label><DateField id="task-create-start-date" name="startDate" label="Task start date" showJump={false} /></div>
+          <div className="task-form-field"><label className="lbl" htmlFor="task-create-deadline">Due Date</label><DateField id="task-create-deadline" name="deadline" label="Task due date" showJump={false} /></div>
+          <div className="task-form-field"><label className="lbl" htmlFor="task-create-priority">Priority</label><select id="task-create-priority" className="legacy-select" name="priority" defaultValue="medium"><option value="low">Low priority</option><option value="medium">Medium</option><option value="high">High priority</option></select></div>
+          <div className="task-form-field"><label className="lbl" htmlFor="task-create-assignee">Assigned Member</label><select id="task-create-assignee" className="legacy-select" name="assigneeId" defaultValue=""><option value="">Assign later</option>{projectMembers.map((member) => <option value={member.userId} key={member.userId}>{member.user.fullName}</option>)}</select></div>
           <button className="btn btn-sm" disabled={saving}>{saving ? 'Saving…' : 'Create Task'}</button>
         </form> : null}
         {detail.tasks.length ? <table className="tbl">
-          <thead><tr><th>Task</th><th>Assignee</th><th>Due Date</th><th>Priority</th><th>Status</th>{leader ? <th>Actions</th> : null}</tr></thead>
+          <thead><tr><th>Task</th><th>Assignee</th><th>Start Date</th><th>Due Date</th><th>Priority</th><th>Status</th>{leader ? <th>Actions</th> : null}</tr></thead>
           <tbody>{detail.tasks.map((task) => {
             const due = deadlineHealth(task.deadline);
             const priority = priorityHealth(task.priority);
@@ -178,7 +178,7 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
             const replacementAvailable = detail.members.some((member) => member.userId !== currentAssignee);
             return <tr key={task.id}>
               <td><strong>{task.title}</strong><span className="task-description">{task.description}</span></td>
-              <td>{memberName(currentAssignee)}</td><td>{formatDateOnly(task.deadline)}</td>
+              <td>{memberName(currentAssignee)}</td><td>{formatDateOnly(task.startDate)}</td><td>{formatDateOnly(task.deadline)}</td>
               <td><span className={`bdg ${priority.tone}`}>{priority.label}</span></td><td><div className="task-actions"><span className={`bdg ${status.tone}`}>{status.label}</span>{needsReassignment ? <span className="bdg r">{due && due.days < 0 ? 'Overdue' : 'At Risk'}</span> : null}</div></td>
               {leader ? <td><div className="task-actions">
                 <button type="button" className="btn-o btn-sm" disabled={saving} onClick={() => setEditingTask({ task, mode: 'edit' })}>Edit Task</button>
@@ -195,11 +195,10 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
       <div className="modal-ttl"><div><span id="task-editor-title">{editingTask.mode === 'reassign' ? 'Reassign Task' : 'Edit Task'}</span><small>{editingTask.mode === 'reassign' ? 'Task Assignment' : 'Task Details'}</small></div><button type="button" className="modal-close" disabled={saving} onClick={() => setEditingTask(null)} aria-label="Close task editor">×</button></div>
       <form className="project-create-form" key={`${editingTask.task.id}-${editingTask.mode}`} onSubmit={(event) => void saveTaskEdit(event)}>
         {editingTask.mode === 'edit' ? <>
-          <label className="lbl" htmlFor="task-edit-title">Task Name</label><input id="task-edit-title" className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={editingTask.task.title} />
-          <label className="lbl" htmlFor="task-edit-description">Description</label><textarea id="task-edit-description" className="ifield project-description" name="description" required defaultValue={editingTask.task.description} />
+          <label className="lbl" htmlFor="task-edit-title">Task Title</label><input id="task-edit-title" className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={editingTask.task.title} />
+          <label className="lbl" htmlFor="task-edit-start-date">Start Date</label><DateField id="task-edit-start-date" name="startDate" label="Task start date" defaultValue={editingTask.task.startDate ? dateOnlyKey(editingTask.task.startDate) : ''} showJump={false} />
           <label className="lbl" htmlFor="task-edit-deadline">Due Date</label><DateField id="task-edit-deadline" name="deadline" label="Task due date" defaultValue={editingTask.task.deadline ? dateOnlyKey(editingTask.task.deadline) : ''} showJump={false} />
           <label className="lbl" htmlFor="task-edit-priority">Priority</label><select id="task-edit-priority" className="ifield" name="priority" defaultValue={editingTask.task.priority}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
-          <label className="lbl" htmlFor="task-edit-status">Status</label><select id="task-edit-status" className="ifield" name="status" defaultValue={editingTask.task.status}><option value="pending">Not Started</option><option value="ongoing">In Progress</option><option value="for_review">For Review</option><option value="completed">Completed</option></select>
         </> : <p className="muted">Choose a replacement project member. They will receive a task notification.</p>}
         <label className="lbl" htmlFor="task-edit-assignee">{editingTask.mode === 'reassign' ? 'New Assignee' : 'Assigned Member'}</label>
         <select id="task-edit-assignee" className="ifield" name="assigneeId" required={editingTask.mode === 'reassign'} defaultValue={editingTask.mode === 'reassign' ? '' : editingTask.task.assignments[0]?.assigneeId ?? ''}>

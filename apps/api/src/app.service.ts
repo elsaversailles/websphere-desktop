@@ -492,10 +492,47 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     ]);
     return { ok: true };
   }
-  // memberIds drives the members relation and is not a Project column, so it has to be peeled off
-  // before the rest of the payload is spread into create(). projectSchema defaults it to [], which
-  // means it is always present and would otherwise always be rejected by Prisma.
-  async createProject(caller: Caller, input: any) { const { memberIds: requested, groupId, ...data } = input; if (groupId) await this.member(groupId, caller.id); const memberIds = [...new Set([caller.id, ...(requested ?? [])])]; if (groupId) for (const userId of memberIds) await this.member(groupId, userId); else if (memberIds.length > 1) fail('VALIDATION_FAILED', 'Add collaborators after connecting this project to a group.', 400, { memberIds: 'Independent projects start with their creator only' }); return this.prisma.project.create({ data: { ...data, ...(groupId ? { groupId } : {}), createdBy: caller.id, members: { create: memberIds.map((userId) => ({ userId, role: userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } }, include: { members: true } }); }
+  async createProject(caller: Caller, input: any) {
+    const { memberIds: requested, initialTasks = [], groupId, ...data } = input;
+    if (groupId) await this.member(groupId, caller.id);
+    const memberIds = [...new Set<string>([caller.id, ...(requested ?? [])])];
+    if (groupId) for (const userId of memberIds) await this.member(groupId, userId);
+    else if (memberIds.length > 1) fail('VALIDATION_FAILED', 'Add collaborators after connecting this project to a group.', 400, { memberIds: 'Independent projects start with their creator only' });
+    const responsibilities = new Map<string, string>();
+    for (const { assigneeId, title } of initialTasks) {
+      if (!memberIds.includes(assigneeId)) fail('VALIDATION_FAILED', 'Assign initial tasks only to selected project members.', 400, { initialTasks: 'Select the assignee as a team member first' });
+      if (responsibilities.has(assigneeId)) fail('VALIDATION_FAILED', 'Provide one initial task per member.', 400, { initialTasks: 'Duplicate assignee' });
+      responsibilities.set(assigneeId, title);
+    }
+    // Commit the project, memberships and real assignments together. A failed task must not
+    // leave a project that looks successful but requires the leader to enter the work again.
+    const { project, tasks } = await this.prisma.$transaction(async (tx: any) => {
+      const project = await tx.project.create({ data: {
+        ...data, ...(groupId ? { groupId } : {}), createdBy: caller.id,
+        members: { create: memberIds.map((userId) => ({
+          userId, role: userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member,
+          ...(responsibilities.has(userId) ? { responsibility: responsibilities.get(userId) } : {}),
+        })) },
+      }, include: { members: true } });
+      const tasks: Array<{ id: string; title: string; assigneeId: string }> = [];
+      for (const [assigneeId, title] of responsibilities) {
+        const task = await tx.task.create({ data: {
+          projectId: project.id, title, description: title, createdBy: caller.id,
+          deadline: project.deadline, priority: 'medium', status: 'pending',
+          assignments: { create: { assigneeId, assignerId: caller.id } },
+          workflow: { create: { projectId: project.id, actorId: caller.id, type: WorkflowEventType.assignment_change, toValue: assigneeId } },
+        } });
+        tasks.push({ id: task.id, title: task.title, assigneeId });
+      }
+      return { project, tasks };
+    });
+    // Notify only after commit, so live dashboards and mobile links can read the new tasks.
+    await Promise.all(tasks.map((task: { id: string; title: string; assigneeId: string }) =>
+      this.notify([task.assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}” in “${project.title}”`, task.id, 'task')
+        .catch((error: unknown) => this.logger.error(`Could not notify initial assignee for task ${task.id}`, error)),
+    ));
+    return project;
+  }
   async projects(caller: Caller) { return this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } } }, include: { group: true, members: { where: { userId: caller.id } }, tasks: true, _count: { select: { members: true } } } }); }
   async project(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { group: { include: { members: { include: { user: { select: { id: true, fullName: true } } } } } }, members: { include: { user: { select: { id: true, fullName: true } } } }, tasks: { include: { assignments: { where: { active: true } } } } } }); return { ...project, tasks: project.tasks.map((task: any) => ({ ...task, risk: taskPrediction(task, new Date()) })) }; }
   async updateProject(caller: Caller, id: string, input: any) { await this.projectMember(id, caller.id, true); const { memberIds, ...data } = input; return this.prisma.project.update({ where: { id }, data }); }
@@ -951,26 +988,33 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.notify(users.map((user: { id: string }) => user.id), NotificationType.announcement, input.message, 'maintenance', 'system');
     await this.prisma.systemSetting.upsert({
       where: { key: 'maintenanceSchedule' },
-      update: { value: { startsAt: startsAt.toISOString(), notifiedAt: new Date().toISOString() }, updatedBy: caller.id },
-      create: { key: 'maintenanceSchedule', value: { startsAt: startsAt.toISOString(), notifiedAt: new Date().toISOString() }, updatedBy: caller.id },
+      update: { value: { startsAt: startsAt.toISOString(), message: input.message, notifiedAt: new Date().toISOString() }, updatedBy: caller.id },
+      create: { key: 'maintenanceSchedule', value: { startsAt: startsAt.toISOString(), message: input.message, notifiedAt: new Date().toISOString() }, updatedBy: caller.id },
     });
     await this.audit.log('AdminModule', 'maintenance_announced', 'info', `Announced maintenance starting ${startsAt.toISOString()} to ${users.length} active account(s)`, caller.id);
     return { startsAt: startsAt.toISOString(), notified: users.length };
   }
   async calendar(caller: Caller, from?: string, to?: string) {
     const dateRange = from || to ? { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } : {};
-    const [events, projects, tasks, notifications] = await Promise.all([
-      this.prisma.calendarEvent.findMany({ where: { OR: [{ ownerId: caller.id }, { project: { members: { some: { userId: caller.id } } } }], ...(from || to ? { startAt: dateRange } : {}) }, orderBy: { startAt: 'asc' } }),
+    const [events, projects, tasks, notifications, maintenanceSetting] = await Promise.all([
+      this.prisma.calendarEvent.findMany({ where: { OR: [{ ownerId: caller.id }, { project: { members: { some: { userId: caller.id } } } }], ...(from || to ? { startAt: dateRange } : {}) }, include: { project: { select: { id: true, title: true } } }, orderBy: { startAt: 'asc' } }),
       this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, deadline: { not: null, ...dateRange } }, select: { id: true, title: true, deadline: true } }),
       // Task dates are projected from the task itself, so edits, completion and reassignment
       // never leave duplicate/stale calendar-event rows behind. Keep completed tasks as history.
       this.prisma.task.findMany({ where: {
         OR: [{ createdBy: caller.id }, { assignments: { some: { assigneeId: caller.id, active: true } } }],
         deadline: { not: null, ...dateRange },
-      }, select: { id: true, title: true, deadline: true }, orderBy: { deadline: 'asc' } }),
-      this.prisma.notification.findMany({ where: { userId: caller.id, relatedType: 'task', type: { in: ['task_assignment', 'deadline_reminder'] }, read: false }, orderBy: { createdAt: 'desc' }, take: 5 }),
+      }, select: { id: true, title: true, deadline: true, project: { select: { id: true, title: true } } }, orderBy: { deadline: 'asc' } }),
+      this.prisma.notification.findMany({ where: { userId: caller.id, relatedType: 'task', type: { in: ['task_assignment', 'deadline_reminder', 'delay_risk'] }, read: false }, orderBy: { createdAt: 'desc' }, take: 5 }),
+      this.prisma.systemSetting.findUnique({ where: { key: 'maintenanceSchedule' }, select: { value: true } }),
     ]);
-    return { events, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))], notifications };
+    const calendarEvents = [...events];
+    const maintenance = maintenanceSetting?.value as { startsAt?: string; message?: string } | null;
+    const maintenanceStart = typeof maintenance?.startsAt === 'string' ? new Date(maintenance.startsAt) : null;
+    if (maintenanceStart && Number.isFinite(maintenanceStart.getTime()) && (!from || maintenanceStart >= new Date(from)) && (!to || maintenanceStart <= new Date(to))) {
+      calendarEvents.push({ id: 'system-maintenance', title: 'System maintenance', type: 'maintenance', source: 'system', startAt: maintenanceStart.toISOString(), description: typeof maintenance?.message === 'string' ? maintenance.message : null });
+    }
+    return { events: calendarEvents, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))], notifications };
   }
   async createCalendarEvent(caller: Caller, input: any) { if (input.projectId) await this.projectMember(input.projectId, caller.id); return this.prisma.calendarEvent.create({ data: { ...input, ownerId: caller.id } }); }
   private async calendarEventAccess(caller: Caller, id: string) { const event = await this.prisma.calendarEvent.findUniqueOrThrow({ where: { id } }); if (event.projectId) await this.projectMember(event.projectId, caller.id); else if (event.ownerId !== caller.id) fail('RBAC_FORBIDDEN', 'Only the event owner or project members can modify this event', 403); return event; }

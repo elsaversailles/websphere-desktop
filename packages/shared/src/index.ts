@@ -127,6 +127,7 @@ export const projectSchema = z.object({
   // A project can be started independently; linking it to a group chat is optional.
   groupId: z.string().cuid().optional(), title: z.string().trim().min(2).max(180), description: z.string().trim().min(1),
   startDate: z.coerce.date().optional(), deadline: z.coerce.date().optional(), memberIds: z.array(z.string().cuid()).default([]),
+  initialTasks: z.array(z.object({ assigneeId: z.string().cuid(), title: z.string().trim().min(2).max(180) })).default([]),
 });
 export const projectUpdateSchema = z.object({
   title: z.string().trim().min(2).max(180).optional(), description: z.string().trim().min(1).optional(),
@@ -134,7 +135,8 @@ export const projectUpdateSchema = z.object({
   status: z.enum(['active', 'completed', 'archived', 'on_hold']).optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one project change' });
 export const taskSchema = z.object({
-  title: z.string().trim().min(2).max(180), description: z.string().trim().min(1), deadline: z.coerce.date().nullable().optional(),
+  title: z.string().trim().min(2).max(180), description: z.string().trim().default(''),
+  startDate: z.coerce.date().nullable().optional(), deadline: z.coerce.date().nullable().optional(),
   priority: z.enum(['low', 'medium', 'high']).default('medium'), expectedDurationHrs: z.number().positive().optional(),
 });
 export const taskStatusSchema = z.object({ status: z.enum(['pending', 'ongoing', 'for_review', 'completed']) });

@@ -25,7 +25,7 @@ describe('maintenance announcement', () => {
     const result = await service.announceMaintenance(admin, { startsAt, message: 'WebSphere will be unavailable for maintenance.' });
     expect(result).toEqual({ startsAt, notified: 2 });
     expect(notify).toHaveBeenCalledWith(['user-1', 'user-2'], 'announcement', 'WebSphere will be unavailable for maintenance.', 'maintenance', 'system');
-    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ where: { key: 'maintenanceSchedule' }, update: { value: expect.objectContaining({ startsAt, notifiedAt: expect.any(String) }), updatedBy: admin.id } }));
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ where: { key: 'maintenanceSchedule' }, update: { value: expect.objectContaining({ startsAt, message: 'WebSphere will be unavailable for maintenance.', notifiedAt: expect.any(String) }), updatedBy: admin.id } }));
     expect(log).toHaveBeenCalled();
   });
 

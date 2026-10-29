@@ -6,7 +6,7 @@ import { JobsService } from './jobs.service.js';
 import { PrismaService } from './prisma.service.js';
 import { PushService } from './push.service.js';
 
-type ScheduledReminder = { deadline: string; day: string; timeZone: string };
+type ScheduledReminder = { deadline: string; day: string; timeZone: string; slot?: '10:00' | '20:00' };
 
 /** Relays persisted worker reminders through the same live/mobile/email channels as assignments. */
 @Injectable()
@@ -26,6 +26,8 @@ export class NotificationDispatchService implements OnApplicationBootstrap, OnAp
       const parts = new Intl.DateTimeFormat('en-US', { timeZone: reminder.timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
       const day = ['year', 'month', 'day'].map((type) => parts.find((part) => part.type === type)!.value).join('-');
       if (day !== reminder.day) return; // A delayed delivery must not send yesterday’s reminder.
+      const hour = new Intl.DateTimeFormat('en-GB', { timeZone: reminder.timeZone, hour: '2-digit', hourCycle: 'h23' }).format(new Date());
+      if (reminder.slot && hour !== reminder.slot.slice(0, 2)) return;
     }
     const notification = await this.prisma.notification.findUnique({ where: { id: notificationId }, include: { user: { select: { status: true, role: true } } } });
     if (!notification || notification.user.status !== 'active') return;

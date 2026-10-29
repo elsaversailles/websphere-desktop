@@ -2,14 +2,11 @@ import { Queue, Worker } from 'bullmq';
 import { PrismaClient } from '@prisma/client';
 import nodemailer from 'nodemailer';
 import { deliverNotificationEmail } from './notification-email.js';
-import { scanDeadlineReminders } from './deadline-reminders.js';
+import { scanDeadlineReminders, scheduleDeadlineReminders } from './deadline-reminders.js';
 const prisma: any = new PrismaClient();
 const connection = { url: process.env.REDIS_URL ?? 'redis://localhost:6379' };
 const deadlineScanQueue = new Queue('deadline-scan', { connection });
-void (async () => {
-  await deadlineScanQueue.removeRepeatable('hourly-scan', { every: 3_600_000 }, 'deadline-scan-hourly');
-  await deadlineScanQueue.add('five-minute-scan', {}, { repeat: { every: 300_000 }, jobId: 'deadline-scan-five-minute', attempts: 3, backoff: { type: 'exponential', delay: 30_000 } });
-})().catch((error) => console.error('Could not schedule deadline reminders', error));
+void scheduleDeadlineReminders(deadlineScanQueue).catch((error) => console.error('Could not schedule deadline reminders', error));
 const maintenanceScanQueue = new Queue('maintenance-scan', { connection });
 void maintenanceScanQueue.add('five-minute-scan', {}, { repeat: { every: 300_000 }, jobId: 'maintenance-scan-five-minute' });
 const inactiveAccountScanQueue = new Queue('inactive-account-scan', { connection });

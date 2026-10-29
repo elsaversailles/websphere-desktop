@@ -121,17 +121,18 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
   }
   async function createProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (saving) return;
     const values = new FormData(event.currentTarget);
+    const initialTasks = selectedMemberIds.flatMap((assigneeId) => {
+      const title = String(values.get(`responsibility-${assigneeId}`) ?? '').trim();
+      return title ? [{ assigneeId, title }] : [];
+    });
     setSaving(true);
     try {
-      const project = await request<{ id: string }>('/projects', { method: 'POST', body: JSON.stringify({ ...(createGroupId ? { groupId: createGroupId } : {}), title: values.get('title'), description: values.get('description'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, memberIds: selectedMemberIds }) });
-      await Promise.all(selectedMemberIds.map(async (userId) => {
-        const responsibility = String(values.get(`responsibility-${userId}`) ?? '').trim();
-        if (responsibility) await request(`/projects/${project.id}/team/${userId}`, { method: 'PATCH', body: JSON.stringify({ responsibility }) });
-      }));
+      await request('/projects', { method: 'POST', body: JSON.stringify({ ...(createGroupId ? { groupId: createGroupId } : {}), title: values.get('title'), description: values.get('description'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, memberIds: selectedMemberIds, initialTasks }) });
       setCreateOpen(false);
       await refreshDashboard();
-      notify('Project created.');
+      notify(initialTasks.length ? 'Project created and tasks assigned.' : 'Project created.');
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not create the project.'); }
     finally { setSaving(false); }
   }
@@ -167,7 +168,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
       <label className="lbl" htmlFor="project-title">Project Name</label><input className="ifield" id="project-title" name="title" required minLength={2} maxLength={180} placeholder="Enter project name" />
       <label className="lbl" htmlFor="project-group">Project Group</label><select className="ifield" id="project-group" value={createGroupId} onChange={(event) => void pickCreateGroup(event.target.value)}><option value="">No group — independent project</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select>
       <label className="lbl">Team Members</label><fieldset className="project-member-picker" disabled={!createGroupHub}><legend className="sr-only">Team Members</legend>{createGroupHub ? createGroupHub.group.members.map((member) => <label className="project-member-option" key={member.userId}><input type="checkbox" checked={selectedMemberIds.includes(member.userId)} onChange={() => toggleProjectMember(member.userId)} /><span>{member.user.fullName}</span></label>) : <span>Add members by selecting a project group first.</span>}</fieldset>
-      <label className="lbl">Task Assignment Per Member</label><div className={`project-responsibilities ${selectedMemberIds.length ? '' : 'empty'}`}>{selectedMemberIds.length ? createGroupHub?.group.members.filter((member) => selectedMemberIds.includes(member.userId)).map((member) => <label key={member.userId}><span>{member.user.fullName}</span><input className="ifield" name={`responsibility-${member.userId}`} placeholder={`Assign ${member.user.fullName} a responsibility`} /></label>) : <span>Add members first, then assign responsibilities here.</span>}</div>
+      <label className="lbl">Task Assignment Per Member</label><div className={`project-responsibilities ${selectedMemberIds.length ? '' : 'empty'}`}>{selectedMemberIds.length ? createGroupHub?.group.members.filter((member) => selectedMemberIds.includes(member.userId)).map((member) => <label key={member.userId}><span>{member.user.fullName}</span><input className="ifield" name={`responsibility-${member.userId}`} minLength={2} maxLength={180} placeholder={`Assign ${member.user.fullName} a task`} /></label>) : <span>Add members first, then assign tasks here.</span>}</div>
       <label className="lbl" htmlFor="external-tools">External Tools Will Be Used</label><select className="ifield project-tools-select" id="external-tools" name="externalTools" defaultValue="" aria-label="External tools used for this project"><option value="" disabled>Select external tools</option><option value="google">Google Workspace</option><option value="microsoft">Microsoft 365</option><option value="trello">Trello</option><option value="asana">Asana</option></select>
       <div className="project-date-grid"><div><label className="lbl" htmlFor="project-start-date">Start Date</label><DateField id="project-start-date" name="startDate" label="Project start date" showJump={false} /></div><div><label className="lbl" htmlFor="project-deadline">End Date / Deadline</label><DateField id="project-deadline" name="deadline" label="Project due date" showJump={false} /></div></div>
       <label className="lbl" htmlFor="project-description">Project Description</label><textarea className="ifield project-description" id="project-description" name="description" required placeholder="Describe the project goals and scope…" />

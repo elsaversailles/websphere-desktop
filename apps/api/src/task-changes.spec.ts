@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AppService } from './app.service.js';
+import { taskEditSchema, taskSchema } from '@websphere/shared';
 
-const assignee = { id: 'member-1', role: 'Project_Member' as const, tv: 0 };
+const assignee = { id: 'clw00000000000000000000001', role: 'Project_Member' as const, tv: 0 };
 const leader = { id: 'leader-1', role: 'Project_Leader' as const, tv: 0 };
 
 function taskService() {
@@ -27,6 +28,34 @@ function taskService() {
 }
 
 describe('task authorization and persistence', () => {
+  it('creates a task with a planned start date and no description from the new form', async () => {
+    const { service, prisma, projectMember } = taskService();
+    const create = vi.fn(async ({ data }) => ({ id: 'task-2', ...data }));
+    Object.assign(prisma.task, { create });
+    const input = taskSchema.parse({ title: 'Write chapter 1', startDate: '2026-10-29', deadline: '2026-11-08', priority: 'high' });
+    await service.createTask(leader, 'project-1', input);
+    expect(projectMember).toHaveBeenCalledWith('project-1', leader.id, true);
+    expect(create).toHaveBeenCalledWith({ data: {
+      title: 'Write chapter 1', description: '', startDate: new Date('2026-10-29'), deadline: new Date('2026-11-08'),
+      priority: 'high', projectId: 'project-1', createdBy: leader.id,
+    } });
+  });
+
+  it('edits planned dates without changing task status, existing description or actual work-start time', async () => {
+    const { service, update, workflowCreate, notify } = taskService();
+    await service.updateTask(leader, 'task-1', taskEditSchema.parse({ title: 'Final report', startDate: '2026-10-30', deadline: '2026-11-08', priority: 'high', assigneeId: assignee.id }));
+    const data = update.mock.calls[0][0].data;
+    expect(data).toEqual({ title: 'Final report', startDate: new Date('2026-10-30'), deadline: new Date('2026-11-08'), priority: 'high' });
+    expect(workflowCreate).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('clears a planned start date without clearing the actual work-start timestamp', async () => {
+    const { service, update } = taskService();
+    await service.updateTask(leader, 'task-1', taskEditSchema.parse({ startDate: null }));
+    expect(update).toHaveBeenCalledWith({ where: { id: 'task-1' }, data: { startDate: null } });
+  });
+
   it('lets the active assignee change status without a legacy project membership row', async () => {
     const { service, projectMember, update, workflowCreate, notify } = taskService();
     const result = await service.taskStatus(assignee, 'task-1', 'ongoing');

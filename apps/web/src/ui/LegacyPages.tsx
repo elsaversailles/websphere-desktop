@@ -8,13 +8,14 @@ import { DateField } from './DateField';
 import { dateOnlyKey, formatDateOnly, localDateFromKey, localDateKey } from './dates';
 import { badgeTone } from './health';
 import { ConfirmDialog } from './ConfirmDialog';
+import { CalendarAgendaModal } from './CalendarAgendaModal';
+import { MaintenanceModeControl } from './MaintenanceModeControl';
+import { agendaForDay, calendarItems, type CalendarData, type CalendarTaskNotification } from './calendar';
 
 type Notice = (message: string) => void;
 type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
 type Task = { id: string; title: string; projectId: string; deadline?: string | null; assignedAt?: string; priority: string; status: string; project?: { id: string; title: string }; assignedBy?: string; progress?: number };
 type Project = { id: string; title: string; status: string; deadline?: string | null; group: { name: string }; members?: Array<{ role: string }>; tasks: Array<{ status: string }> };
-type CalendarTaskNotification = { id: string; message: string; type: string; relatedId?: string | null; createdAt: string };
-type CalendarData = { events: Array<{ id: string; title: string; type: string; startAt: string; endAt?: string | null; projectId?: string | null; source?: string }>; hints: Array<{ id: string; title: string; type: string; deadline: string }>; notifications?: CalendarTaskNotification[] };
 
 type TeamMemberWeek = { id: string; fullName: string; role: string; contributions: number; tasksCompleted: number; performance: number; active: boolean };
 type TeamPerformanceWeek = { periodStart: string; periodEnd: string; label: string; members: TeamMemberWeek[]; activeCount: number; inactiveCount: number };
@@ -66,6 +67,7 @@ export function CalendarPage({ notify }: { notify: Notice }) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingEvent, setEditingEvent] = useState<CalendarData['events'][number] | null>(null);
   const [newEventStart, setNewEventStart] = useState('');
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [selectedItem, setSelectedItem] = useState<{ title: string; when: string; category: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [loadingCalendar, setLoadingCalendar] = useState(true);
@@ -90,15 +92,15 @@ export function CalendarPage({ notify }: { notify: Notice }) {
     return () => { socket.disconnect(); window.clearInterval(timer); };
   }, [projects, refresh]);
   const cells = useMemo(() => monthCells(cursor), [cursor]);
-  const items = [...data.events.map((event) => ({ ...event, at: event.startAt, kind: 'event' as const })), ...data.hints.map((hint) => ({ ...hint, at: hint.deadline, kind: 'hint' as const }))];
+  const items = useMemo(() => calendarItems(data), [data]);
 
   function openCreate(day?: Date) { setEditingEvent(null); setNewEventStart(day ? toLocalInput(new Date(day.getFullYear(), day.getMonth(), day.getDate(), 9)) : ''); setDialogOpen(true); }
-  function openEdit(event: CalendarData['events'][number]) { setEditingEvent(event); setDialogOpen(true); }
+  function openEdit(event: CalendarData['events'][number]) { setSelectedDay(null); setEditingEvent(event); setDialogOpen(true); }
   async function openTaskNotification(notification: CalendarTaskNotification) {
     const task = data.hints.find((hint) => hint.type === 'task_deadline' && hint.id === notification.relatedId);
     if (task) {
       setCursor(localDateFromKey(dateOnlyKey(task.deadline)));
-      setSelectedItem({ title: task.title, when: task.deadline, category: 'Deadline' });
+      setSelectedDay(dateOnlyKey(task.deadline));
     } else setSelectedItem({ title: notification.message, when: notification.createdAt, category: 'Task notification' });
     try { await request(`/notifications/${notification.id}/read`, { method: 'PATCH' }); await refresh(); }
     catch (error) { notify(error instanceof Error ? error.message : 'Could not mark notification as read.'); }
@@ -128,12 +130,11 @@ export function CalendarPage({ notify }: { notify: Notice }) {
 
   return <section className="sp on cal-page-wrap">
     <div className="cal-page-header">
-      <div><h2>Calendar</h2><div className="cal-page-header-sub">Your project schedule and deadlines</div></div>
+      <div><h2>Calendar</h2></div>
       <div className="cal-header-controls">
         <div className="cal-legend"><span className="cal-legend-item"><i className="cal-legend-dot event" />Event</span><span className="cal-legend-item"><i className="cal-legend-dot deadline" />Deadline</span></div>
         <button className="cal-nav-btn" onClick={() => setCursor(shiftMonth(cursor, -1))} aria-label="Previous month">‹</button>
-        <select className="legacy-select calendar-jump" value={cursor.getMonth()} aria-label="Calendar month" onChange={(event) => setCursor(new Date(cursor.getFullYear(), Number(event.target.value), 1))}>{Array.from({ length: 12 }, (_, month) => <option key={month} value={month}>{new Date(2024, month, 1).toLocaleDateString(undefined, { month: 'long' })}</option>)}</select>
-        <select className="legacy-select calendar-jump year" value={cursor.getFullYear()} aria-label="Calendar year" onChange={(event) => setCursor(new Date(Number(event.target.value), cursor.getMonth(), 1))}>{Array.from({ length: 101 }, (_, offset) => 2000 + offset).map((year) => <option key={year} value={year}>{year}</option>)}</select>
+        <span className="cal-month-label" aria-live="polite">{cursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span>
         <button className="cal-nav-btn" onClick={() => setCursor(shiftMonth(cursor, 1))} aria-label="Next month">›</button>
         <button className="cal-today-btn" onClick={() => setCursor(new Date())}>Today</button>
         <button className="btn btn-sm" onClick={() => openCreate()}>+ New Event</button>
@@ -147,28 +148,27 @@ export function CalendarPage({ notify }: { notify: Notice }) {
     <div className="cal-grid-wrap">
       <div className="cal-weekday-row">{['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day) => <div className="cal-weekday-cell" key={day}>{day}</div>)}</div>
       <div className="cal-body">{cells.map((cell, index) => {
-        const dayItems = cell ? items.filter((item) => item.kind === 'hint' ? dateOnlyKey(item.at) === localDateKey(cell) : sameDay(new Date(item.at), cell)) : [];
-        return <div className={`cal-cell ${cell && sameDay(cell, new Date()) ? 'today' : ''}`} key={index}>
-          {cell ? <>
-            <button className="cal-day-num" type="button" onClick={() => openCreate(cell)} aria-label={`Create event on ${cell.toLocaleDateString()}`} title="Create an event on this day">{cell.getDate()}</button>
-            {dayItems.map((item) => {
+        if (!cell) return <div className="cal-cell" key={`empty-${index}`} aria-hidden="true" />;
+        const dayItems = agendaForDay(items, cell);
+        const key = localDateKey(cell);
+        return <button type="button" className={`cal-cell cal-cell-button ${sameDay(cell, new Date()) ? 'today' : ''}`} key={key}
+          aria-label={`Agenda for ${cell.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })}, ${dayItems.length} ${dayItems.length === 1 ? 'item' : 'items'}`}
+          aria-haspopup="dialog" aria-expanded={selectedDay === key} onClick={() => setSelectedDay(key)}>
+            <span className="cal-day-num" aria-hidden="true">{cell.getDate()}</span>
+            {dayItems.slice(0, 3).map((item) => {
               const outlook = 'source' in item && item.source === 'outlook';
               const deadline = item.type.includes('deadline');
-              return <button
-                type="button"
+              return <span
                 className={`cal-event ${deadline ? 'deadline' : 'event'}${outlook ? ' outlook' : ''}`}
                 key={`${item.kind}-${item.id}-${item.type}`}
-                title={outlook ? `Outlook · ${item.title}` : item.title}
-                onClick={() => item.kind === 'event' && !outlook
-                  ? openEdit(item as CalendarData['events'][number])
-                  : setSelectedItem({ title: item.title, when: item.at, category: outlook ? 'Outlook event' : deadline ? 'Deadline' : 'Event' })}
-              >{outlook ? '◆ ' : ''}{item.title}</button>;
+              >{item.title}</span>;
             })}
-          </> : null}
-        </div>;
+            {dayItems.length > 3 ? <span className="cal-agenda-more">+{dayItems.length - 3} more</span> : null}
+        </button>;
       })}</div>
     </div>
-    {loadingCalendar ? <div className="calendar-empty-note">Loading calendar…</div> : !calendarError && !items.length ? <div className="calendar-empty-note">No events or deadlines yet. Choose a day or select New Event to add one.</div> : null}
+    {loadingCalendar ? <div className="calendar-empty-note">Loading calendar…</div> : !calendarError && !items.length ? <div className="calendar-empty-note">No events or deadlines yet. Select a day to view its agenda, or New Event to add an event.</div> : null}
+    {selectedDay ? <CalendarAgendaModal key={selectedDay} day={localDateFromKey(selectedDay)} items={agendaForDay(items, localDateFromKey(selectedDay))} loading={loadingCalendar} error={calendarError} onClose={() => setSelectedDay(null)} onEdit={openEdit} onRetry={() => void refresh().catch(() => undefined)} /> : null}
     {selectedItem ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedItem(null); }}><div className="modal-box" role="dialog" aria-modal="true" aria-label={selectedItem.title}>
       <div className="modal-ttl"><span>{selectedItem.category}</span><button className="modal-close" onClick={() => setSelectedItem(null)} aria-label="Close details">×</button></div>
       <h3>{selectedItem.title}</h3><p>{selectedItem.category === 'Deadline' ? formatDateOnly(selectedItem.when) : new Date(selectedItem.when).toLocaleString()}</p>
@@ -505,7 +505,6 @@ type AuditLogEntry = { id: string; actorId: string | null; module: string; activ
 type InactiveAccountAlerts = { enabled: boolean; recipientEmail: string; inactivityDays: number };
 type AdminSecuritySettings = { sessionTimeoutMinutes: number; inactiveAccountAlerts: InactiveAccountAlerts };
 type AdminGeneralSettings = { systemName: string; maxIdeasPerSearch: number; releaseManifestUrl: string };
-type SystemNotice = { id: string; title: string; message: string; type: string; read: boolean; createdAt: string };
 type SystemBackup = { id: string; fileName: string; bytes: number; createdAt: string; downloadPath?: string };
 type ReleaseCheck = { currentVersion: string; latestVersion: string; updateAvailable: boolean; releaseDate: string | null; summary: string; features: string[]; fixes: string[]; enhancements: string[]; downloadUrl: string | null; checkedAt: string };
 const defaultAdminSecuritySettings: AdminSecuritySettings = { sessionTimeoutMinutes: 30, inactiveAccountAlerts: { enabled: false, recipientEmail: '', inactivityDays: 30 } };
@@ -530,7 +529,6 @@ export function AdminSettingsPage({ notify, onSessionInvalidated }: { notify: No
   const [updateOpen, setUpdateOpen] = useState(false);
   const [general, setGeneral] = useState<AdminGeneralSettings>(defaultAdminGeneralSettings);
   const [generalSaving, setGeneralSaving] = useState(false);
-  const [notices, setNotices] = useState<SystemNotice[] | null>(null);
   const [backups, setBackups] = useState<SystemBackup[] | null>(null);
   const [backupSaving, setBackupSaving] = useState(false);
   const [release, setRelease] = useState<ReleaseCheck | null>(null);
@@ -543,7 +541,6 @@ export function AdminSettingsPage({ notify, onSessionInvalidated }: { notify: No
     }).catch(() => undefined);
     void request<AdminSecuritySettings>('/admin/security-settings').then(setSecurity).catch((error: Error) => notify(error.message));
     void request<AdminGeneralSettings>('/admin/general-settings').then(setGeneral).catch((error: Error) => notify(error.message));
-    void request<SystemNotice[]>('/admin/system-notices').then(setNotices).catch((error: Error) => notify(error.message));
     void request<SystemBackup[]>('/admin/backups').then(setBackups).catch((error: Error) => notify(error.message));
   }, [notify]);
   const maintenanceActive = maintenance || Boolean(maintenanceSchedule && new Date(maintenanceSchedule.startsAt) <= new Date());
@@ -631,7 +628,7 @@ export function AdminSettingsPage({ notify, onSessionInvalidated }: { notify: No
   }
   async function createBackup() {
     setBackupSaving(true);
-    try { const backup = await request<SystemBackup>('/admin/backups', { method: 'POST' }); setBackups((current) => [backup, ...(current ?? [])]); setNotices(await request<SystemNotice[]>('/admin/system-notices')); notify('Database backup created.'); }
+    try { const backup = await request<SystemBackup>('/admin/backups', { method: 'POST' }); setBackups((current) => [backup, ...(current ?? [])]); notify('Database backup created.'); }
     catch (error) { notify(error instanceof Error ? error.message : 'Could not create the database backup.'); }
     finally { setBackupSaving(false); }
   }
@@ -644,16 +641,12 @@ export function AdminSettingsPage({ notify, onSessionInvalidated }: { notify: No
   }
   async function checkForUpdates() {
     setReleaseChecking(true);
-    try { const result = await request<ReleaseCheck>('/admin/release/check', { method: 'POST' }); setRelease(result); setUpdateOpen(true); setNotices(await request<SystemNotice[]>('/admin/system-notices')); }
+    try { const result = await request<ReleaseCheck>('/admin/release/check', { method: 'POST' }); setRelease(result); setUpdateOpen(true); }
     catch (error) { notify(error instanceof Error ? error.message : 'Could not check for updates.'); }
     finally { setReleaseChecking(false); }
   }
-  async function markSystemNoticesRead() {
-    try { await request('/admin/system-notices/read', { method: 'POST' }); setNotices((current) => current?.map((notice) => ({ ...notice, read: true })) ?? []); notify('System notifications marked as read.'); }
-    catch (error) { notify(error instanceof Error ? error.message : 'Could not update system notifications.'); }
-  }
-  return <section className="sp on"><Head title="System Settings" /><div className="g2 settings-top"><form className="cc" onSubmit={(event) => void saveGeneral(event)}><div className="cc-head"><h3>General Configuration</h3></div><label className="lbl" htmlFor="system-name">System Name</label><input id="system-name" className="ifield" value={general.systemName} maxLength={80} required onChange={(event) => setGeneral((current) => ({ ...current, systemName: event.target.value }))} /><label className="lbl" htmlFor="max-ideas">Maximum ideas shown per group</label><input id="max-ideas" className="ifield" type="number" min="2" max="50" required value={general.maxIdeasPerSearch} onChange={(event) => setGeneral((current) => ({ ...current, maxIdeasPerSearch: Number(event.target.value) }))} /><label className="lbl" htmlFor="release-manifest">Release Manifest URL</label><input id="release-manifest" className="ifield" type="url" value={general.releaseManifestUrl} placeholder="https://example.edu/websphere-release.json" onChange={(event) => setGeneral((current) => ({ ...current, releaseManifestUrl: event.target.value }))} /><button className="btn" disabled={generalSaving}>{generalSaving ? 'Saving…' : 'Save Settings'}</button></form><div className="cc"><div className="cc-head"><h3>Security & Access</h3></div><Security title="Admin Password" description="Change this administrator account's password" action="Change" onClick={() => openSecurityDialog('password')} /><Security title="Session Timeout" description={`Currently: ${security.sessionTimeoutMinutes} minutes`} action="Edit" onClick={() => openSecurityDialog('timeout')} /><Security title="Email Notifications" description={security.inactiveAccountAlerts.enabled ? `Inactive account alerts every ${security.inactiveAccountAlerts.inactivityDays} days` : 'Inactive account alerts are disabled'} action="Configure" onClick={() => openSecurityDialog('email')} /><Security title="System Logs" description="View recent activity" action="View Logs" onClick={() => void openLogs()} /></div></div><div className="cc maintenance-card"><div className="cc-head"><h3>Maintenance & Updates</h3></div><div className="g3"><Security title="Software Update" description={release ? `Current ${release.currentVersion} · latest ${release.latestVersion}` : 'Check the configured release manifest'} action={releaseChecking ? 'Checking…' : release ? 'View details' : 'Check now'} onClick={() => release ? setUpdateOpen(true) : void checkForUpdates()} /><Security title="Backup Database" description={backups?.[0] ? `Latest: ${new Date(backups[0].createdAt).toLocaleString()}` : 'Create a private application-data snapshot'} action={backupSaving ? 'Backing up…' : 'Backup Now'} onClick={() => void createBackup()} /><Security danger={maintenanceActive} title="Maintenance Mode" description={maintenanceActive ? 'Enabled — only administrators can access WebSphere' : maintenanceSchedule ? `Scheduled for ${new Date(maintenanceSchedule.startsAt).toLocaleString()}` : 'Disabled — WebSphere is available to everyone'} action={saving ? 'Saving…' : maintenanceActive ? 'End Maintenance' : 'Enable Now'} onClick={() => void toggleMaintenance()} /><Security title="Announce Maintenance" description={maintenanceSchedule && !maintenanceActive ? `Users notified · starts ${new Date(maintenanceSchedule.startsAt).toLocaleString()}` : 'Schedule a start time and notify all active users'} action="Schedule & Announce" onClick={() => setMaintenanceDialog(true)} /></div>{maintenanceSchedule && !maintenanceActive ? <button type="button" className="btn-o btn-sm maintenance-cancel" disabled={saving} onClick={() => void cancelScheduledMaintenance()}>Cancel Scheduled Maintenance</button> : null}{backups?.length ? <div className="logs-list">{backups.slice(0, 3).map((backup) => <div className="log-row" key={backup.id}><span className="log-time">{new Date(backup.createdAt).toLocaleString()}</span><span className="log-desc">{backup.fileName} · {(backup.bytes / 1024).toFixed(1)} KB</span><button type="button" className="btn-o btn-sm" onClick={() => void downloadBackup(backup)}>Download</button></div>)}</div> : null}</div><div className="cc"><div className="cc-head"><h3>System Notifications</h3><button type="button" className="btn-o btn-sm" onClick={() => void markSystemNoticesRead()} disabled={!notices?.some((notice) => !notice.read)}>Mark All Read</button></div>{notices?.length ? <div className="logs-list">{notices.map((notice) => <div className="log-row" key={notice.id}><span className={`log-sev ${notice.read ? 'info' : 'warning'}`}>{notice.read ? 'READ' : 'NEW'}</span><span className="log-time">{new Date(notice.createdAt).toLocaleString()}</span><span className="log-desc"><strong>{notice.title}</strong> — {notice.message}</span></div>)}</div> : <Empty>No system notifications yet.</Empty>}</div>
-    {maintenanceDialog ? <SecurityModal title="Announce Upcoming Maintenance" onClose={() => setMaintenanceDialog(false)}><form onSubmit={(event) => void announceMaintenance(event)}><p className="security-modal-help">All active users will receive an in-app announcement now. Email and push follow their delivery settings. Maintenance starts automatically at the chosen time.</p><label className="lbl" htmlFor="maintenance-start">Maintenance starts</label><input className="ifield" id="maintenance-start" type="datetime-local" required value={maintenanceStartDraft} onChange={(event) => setMaintenanceStartDraft(event.target.value)} /><label className="lbl" htmlFor="maintenance-message">Announcement message (optional)</label><textarea className="ifield" id="maintenance-message" maxLength={350} rows={4} value={maintenanceMessageDraft} onChange={(event) => setMaintenanceMessageDraft(event.target.value)} placeholder="Scheduled maintenance begins at the selected time. WebSphere will be unavailable until maintenance is complete." /><div className="modal-acts"><button type="button" className="btn-o" disabled={maintenanceAnnouncementSaving} onClick={() => setMaintenanceDialog(false)}>Cancel</button><button className="btn" disabled={maintenanceAnnouncementSaving}>{maintenanceAnnouncementSaving ? 'Announcing…' : 'Schedule & Announce'}</button></div></form></SecurityModal> : null}
+  return <section className="sp on"><Head title="System Settings" /><div className="g2 settings-top"><form className="cc" onSubmit={(event) => void saveGeneral(event)}><div className="cc-head"><h3>General Configuration</h3></div><label className="lbl" htmlFor="system-name">System Name</label><input id="system-name" className="ifield" value={general.systemName} maxLength={80} required onChange={(event) => setGeneral((current) => ({ ...current, systemName: event.target.value }))} /><label className="lbl" htmlFor="max-ideas">Maximum ideas shown per group</label><input id="max-ideas" className="ifield" type="number" min="2" max="50" required value={general.maxIdeasPerSearch} onChange={(event) => setGeneral((current) => ({ ...current, maxIdeasPerSearch: Number(event.target.value) }))} /><label className="lbl" htmlFor="release-manifest">Release Manifest URL</label><input id="release-manifest" className="ifield" type="url" value={general.releaseManifestUrl} placeholder="https://example.edu/websphere-release.json" onChange={(event) => setGeneral((current) => ({ ...current, releaseManifestUrl: event.target.value }))} /><button className="btn" disabled={generalSaving}>{generalSaving ? 'Saving…' : 'Save Settings'}</button></form><div className="cc"><div className="cc-head"><h3>Security & Access</h3></div><Security title="Admin Password" description="Change this administrator account's password" action="Change" onClick={() => openSecurityDialog('password')} /><Security title="Session Timeout" description={`Currently: ${security.sessionTimeoutMinutes} minutes`} action="Edit" onClick={() => openSecurityDialog('timeout')} /><Security title="Email Notifications" description={security.inactiveAccountAlerts.enabled ? `Inactive account alerts every ${security.inactiveAccountAlerts.inactivityDays} days` : 'Inactive account alerts are disabled'} action="Configure" onClick={() => openSecurityDialog('email')} /><Security title="System Logs" description="View recent activity" action="View Logs" onClick={() => void openLogs()} /></div></div><div className="cc maintenance-card"><div className="cc-head"><h3>Maintenance & Updates</h3></div><div className="g3"><Security title="Software Update" description={release ? `Current ${release.currentVersion} · latest ${release.latestVersion}` : 'Check the configured release manifest'} action={releaseChecking ? 'Checking…' : release ? 'View details' : 'Check now'} onClick={() => release ? setUpdateOpen(true) : void checkForUpdates()} /><Security title="Backup Database" description={backups?.[0] ? `Latest: ${new Date(backups[0].createdAt).toLocaleString()}` : 'Create a private application-data snapshot'} action={backupSaving ? 'Backing up…' : 'Backup Now'} onClick={() => void createBackup()} /><MaintenanceModeControl active={maintenanceActive} busy={saving || maintenanceAnnouncementSaving} description={maintenanceActive ? 'Enabled — only administrators can access WebSphere' : maintenanceSchedule ? `Scheduled for ${new Date(maintenanceSchedule.startsAt).toLocaleString()}` : 'Disabled — WebSphere is available to everyone'} onToggle={() => void toggleMaintenance()} onSchedule={() => setMaintenanceDialog(true)} /></div>{maintenanceSchedule && !maintenanceActive ? <button type="button" className="btn-o btn-sm maintenance-cancel" disabled={saving} onClick={() => void cancelScheduledMaintenance()}>Cancel Scheduled Maintenance</button> : null}{backups?.length ? <div className="logs-list">{backups.slice(0, 3).map((backup) => <div className="log-row" key={backup.id}><span className="log-time">{new Date(backup.createdAt).toLocaleString()}</span><span className="log-desc">{backup.fileName} · {(backup.bytes / 1024).toFixed(1)} KB</span><button type="button" className="btn-o btn-sm" onClick={() => void downloadBackup(backup)}>Download</button></div>)}</div> : null}</div>
+    {maintenanceDialog ? <SecurityModal title="Announce Upcoming Maintenance" onClose={() => setMaintenanceDialog(false)}><form onSubmit={(event) => void announceMaintenance(event)}><p className="security-modal-help">All active users will receive an in-app announcement now. Email and push follow their delivery settings. Maintenance starts automatically at the chosen time.</p><label className="lbl" htmlFor="maintenance-start">Maintenance starts</label><input className="ifield" id="maintenance-start" type="datetime-local" autoFocus required value={maintenanceStartDraft} onChange={(event) => setMaintenanceStartDraft(event.target.value)} /><label className="lbl" htmlFor="maintenance-message">Announcement message (optional)</label><textarea className="ifield" id="maintenance-message" maxLength={350} rows={4} value={maintenanceMessageDraft} onChange={(event) => setMaintenanceMessageDraft(event.target.value)} placeholder="Scheduled maintenance begins at the selected time. WebSphere will be unavailable until maintenance is complete." /><div className="modal-acts"><button type="button" className="btn-o" disabled={maintenanceAnnouncementSaving} onClick={() => setMaintenanceDialog(false)}>Cancel</button><button className="btn" disabled={maintenanceAnnouncementSaving}>{maintenanceAnnouncementSaving ? 'Announcing…' : 'Schedule & Announce'}</button></div></form></SecurityModal> : null}
     {securityDialog === 'password' ? <SecurityModal title="Change Admin Password" onClose={() => setSecurityDialog(null)}><form onSubmit={(event) => void changeAdminPassword(event)}><p className="security-modal-help">Changing your password signs this administrator account out of every active session.</p><label className="lbl">Current password</label><input className="ifield" name="oldPassword" type="password" autoComplete="current-password" required /><label className="lbl">New password</label><input className="ifield" name="password" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><label className="lbl">Confirm new password</label><input className="ifield" name="confirm" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><div className="modal-acts"><button type="button" className="btn-o" disabled={securitySaving} onClick={() => setSecurityDialog(null)}>Cancel</button><button className="btn" disabled={securitySaving}>{securitySaving ? 'Changing…' : 'Change Password'}</button></div></form></SecurityModal> : null}
     {securityDialog === 'timeout' ? <SecurityModal title="Edit Session Timeout" onClose={() => setSecurityDialog(null)}><form onSubmit={(event) => void saveTimeout(event)}><p className="security-modal-help">Users are signed out after this amount of inactivity. Choose 5 to 480 minutes.</p><label className="lbl" htmlFor="session-timeout-minutes">Inactivity timeout (minutes)</label><input className="ifield" id="session-timeout-minutes" type="number" min="5" max="480" step="1" required value={timeoutDraft} onChange={(event) => setTimeoutDraft(event.target.value)} /><div className="modal-acts"><button type="button" className="btn-o" disabled={securitySaving} onClick={() => setSecurityDialog(null)}>Cancel</button><button className="btn" disabled={securitySaving}>{securitySaving ? 'Saving…' : 'Save Timeout'}</button></div></form></SecurityModal> : null}
     {securityDialog === 'email' ? <SecurityModal title="Inactive Account Email Alerts" onClose={() => setSecurityDialog(null)}><form onSubmit={(event) => void saveInactiveAccountAlerts(event)}><label className="security-checkbox"><input type="checkbox" checked={emailDraft.enabled} onChange={(event) => setEmailDraft((current) => ({ ...current, enabled: event.target.checked }))} /> Send a daily digest when inactive accounts are found</label><label className="lbl" htmlFor="inactive-alert-recipient">Recipient email</label><input className="ifield" id="inactive-alert-recipient" type="email" value={emailDraft.recipientEmail} disabled={!emailDraft.enabled} required={emailDraft.enabled} onChange={(event) => setEmailDraft((current) => ({ ...current, recipientEmail: event.target.value }))} placeholder="admin@example.edu" /><label className="lbl" htmlFor="inactive-alert-days">Alert when an account has not signed in for</label><select className="ifield" id="inactive-alert-days" value={emailDraft.inactivityDays} disabled={!emailDraft.enabled} onChange={(event) => setEmailDraft((current) => ({ ...current, inactivityDays: Number(event.target.value) }))}>{[7, 14, 30, 60, 90, 180, 365].map((days) => <option key={days} value={days}>{days} days</option>)}</select><p className="security-modal-help">The daily digest lists active accounts with no sign-in since the selected period, including accounts that have never signed in.</p><div className="modal-acts"><button type="button" className="btn-o" disabled={securitySaving} onClick={() => setSecurityDialog(null)}>Cancel</button><button className="btn" disabled={securitySaving}>{securitySaving ? 'Saving…' : 'Save Alerts'}</button></div></form></SecurityModal> : null}

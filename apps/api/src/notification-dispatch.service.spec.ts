@@ -62,4 +62,19 @@ describe('scheduled notification delivery', () => {
     expect(push.deliver).not.toHaveBeenCalled();
     expect(jobs.enqueueNotificationEmail).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['2026-10-28T02:00:00Z', '10:00', true],
+    ['2026-10-28T12:00:00Z', '20:00', true],
+    ['2026-10-28T12:00:00Z', '10:00', false],
+    ['2026-10-28T01:59:00Z', '10:00', false],
+    ['2026-10-28T13:00:00Z', '20:00', false],
+  ] as const)('delivers only in the matching Manila reminder slot (%s, %s)', async (now, slot, shouldDeliver) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(now));
+    const { service, events, push } = fixture();
+    await service.deliver('reminder-1', { deadline: '2026-10-28T00:00:00.000Z', day: '2026-10-28', timeZone: 'Asia/Manila', slot });
+    expect(events.emitNotification).toHaveBeenCalledTimes(shouldDeliver ? 1 : 0);
+    expect(push.deliver).toHaveBeenCalledTimes(shouldDeliver ? 1 : 0);
+  });
 });
