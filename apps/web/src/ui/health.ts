@@ -43,6 +43,15 @@ export function priorityHealth(priority?: string | null): Health {
   return { tone: 'y', label: 'Medium' };
 }
 
+/** Derive unfinished task priority from calendar days, retaining the assigned priority otherwise. */
+export function taskPriorityHealth(task: { priority?: string | null; deadline?: string | null; status: string }, today = localDateKey()): Health {
+  if (!task.deadline || task.status === 'completed') return priorityHealth(task.priority);
+  const days = daysBetweenCalendarDates(today, dateOnlyKey(task.deadline));
+  if (days <= 2) return { tone: 'r', label: 'Urgent' };
+  if (days <= 5) return { tone: 'y', label: 'Medium' };
+  return { tone: 'g', label: 'Low' };
+}
+
 /** Task status → health, so status badges read the same way as everything else. */
 export function taskStatusHealth(status?: string | null): Health {
   if (status === 'completed') return { tone: 'g', label: 'Completed' };
@@ -67,14 +76,13 @@ export function daysUntil(date: string | Date): number {
 export type DeadlineHealth = Health & { days: number };
 
 /** Deadline proximity → health. Imminent or missed is red, comfortably far is green. */
-export function deadlineHealth(deadline?: string | Date | null): DeadlineHealth | null {
+export function deadlineHealth(deadline?: string | Date | null, today = localDateKey()): DeadlineHealth | null {
   if (!deadline) return null;
-  const days = daysUntil(deadline);
+  const days = daysBetweenCalendarDates(today, dateOnlyKey(deadline));
   if (days < 0) return { tone: 'r', label: 'Overdue', days };
-  if (days <= 3) return { tone: 'r', label: 'Urgent', days };
-  if (days <= 8) return { tone: 'y', label: 'Soon', days };
-  if (days <= 14) return { tone: 'ac', label: 'On Track', days };
-  return { tone: 'g', label: 'Scheduled', days };
+  if (days <= 2) return { tone: 'r', label: 'Urgent', days };
+  if (days <= 5) return { tone: 'y', label: 'Due Soon', days };
+  return { tone: 'ac', label: 'On Track', days };
 }
 
 /** Human countdown for a deadline, e.g. "3 days left" or "2 days overdue". */
