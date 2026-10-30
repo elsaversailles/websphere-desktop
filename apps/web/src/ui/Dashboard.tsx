@@ -6,6 +6,7 @@ import { DateField } from './DateField';
 import { dateOnlyKey, formatDateOnly, localDateFromKey } from './dates';
 import { type Tone, avatarTone, dateKey, deadlineCountdown, deadlineHealth, initials, taskPriorityHealth, projectHealth, relativeTime, worstTone } from './health';
 import { useLocalDay } from './useLocalDay';
+import { upcomingDeadlines } from './upcomingDeadlines';
 
 type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string } | null; tasks: Array<{ status: string }>; _count?: { members: number } };
 type DashboardTask = { id: string; title: string; status: string; priority?: string | null; deadline?: string | null; project?: { id: string; title: string } | null };
@@ -95,12 +96,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
   const monthCells = useMemo(() => monthMatrix(monthCursor.year, monthCursor.month), [monthCursor]);
   /** Overdue first, then soonest — matches the "Next 14 days" framing in the panel header. */
   const upcoming = useMemo(() => {
-    return (data?.tasks ?? [])
-      .filter((task) => task.deadline && task.status !== 'completed')
-      .map((task) => ({ task, health: deadlineHealth(task.deadline, localDay)! }))
-      .filter((entry) => entry.health.days <= 14)
-      .sort((a, b) => a.health.days - b.health.days)
-      .slice(0, 5);
+    return upcomingDeadlines(data?.tasks ?? [], localDay);
   }, [data, localDay]);
 
   /** The panel header says "All active projects", so archived and completed work is filtered out. */
@@ -201,7 +197,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
         <DataCard title="My Tasks" action="View All" onAction={() => onPage('tasks')}>
           {data.tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Deadline</th><th>Priority</th></tr></thead><tbody>{data.tasks.slice(0, 8).map((task) => {
             const priority = taskPriorityHealth(task, localDay);
-            const due = deadlineHealth(task.deadline);
+            const due = task.status !== 'completed' && task.deadline ? priority : deadlineHealth(task.deadline);
             return <tr key={task.id}>
               <td className="table-title">{task.title}</td>
               <td className="table-sub">{task.project?.title ?? '—'}</td>
@@ -233,7 +229,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
         {upcoming.length ? upcoming.map(({ task, health }) => <div className={`deadline-row tone-${health.tone}`} key={task.id}>
           <span className={`deadline-date ${health.tone}`}><strong>{localDateFromKey(dateOnlyKey(task.deadline!)).getDate()}</strong><small>{formatDateOnly(task.deadline, { month: 'short' }).toUpperCase()}</small></span>
           <span className="deadline-copy"><strong>{task.title}</strong><small>{task.project?.title ?? 'Unassigned project'} · {deadlineCountdown(health.days)}</small></span>
-          <span className={`bdg ${health.tone}`}>{health.label}</span>
+          <span className={`bdg ${task.status === 'completed' ? 'g' : health.tone}`}>{task.status === 'completed' ? 'Completed' : health.label}</span>
         </div>) : <Empty text="Nothing is due in the next 14 days. Add tasks with due dates to see them here." />}
       </DataCard>
       <DataCard title="Team Activity" note="Live feed">
