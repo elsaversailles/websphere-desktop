@@ -47,9 +47,9 @@ export function priorityHealth(priority?: string | null): Health {
 export function taskPriorityHealth(task: { priority?: string | null; deadline?: string | null; status: string }, today = localDateKey()): Health {
   if (!task.deadline || task.status === 'completed') return priorityHealth(task.priority);
   const days = daysBetweenCalendarDates(today, dateOnlyKey(task.deadline));
-  if (days <= 2) return { tone: 'r', label: 'Urgent' };
+  if (days <= 2) return { tone: 'r', label: 'High' };
   if (days <= 5) return { tone: 'y', label: 'Medium' };
-  return { tone: 'g', label: 'Low' };
+  return { tone: 'ac', label: 'Low' };
 }
 
 /** Task status → health, so status badges read the same way as everything else. */
