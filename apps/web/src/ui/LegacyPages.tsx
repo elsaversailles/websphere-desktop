@@ -5,12 +5,13 @@ import { disablePush, enablePush, pushStatus as getPushStatus, type PushStatus }
 import { ChartCanvas } from './ChartCanvas';
 import { ToolLogo } from './ToolLogo';
 import { DateField } from './DateField';
-import { dateOnlyKey, formatDateOnly, localDateFromKey, localDateKey } from './dates';
-import { badgeTone } from './health';
+import { formatDateOnly, localDateFromKey, localDateKey } from './dates';
+import { badgeTone, taskPriorityHealth } from './health';
+import { useLocalDay } from './useLocalDay';
 import { ConfirmDialog } from './ConfirmDialog';
 import { CalendarAgendaModal } from './CalendarAgendaModal';
 import { MaintenanceModeControl } from './MaintenanceModeControl';
-import { agendaForDay, calendarItems, type CalendarData, type CalendarTaskNotification } from './calendar';
+import { agendaForDay, calendarItems, type CalendarData } from './calendar';
 
 type Notice = (message: string) => void;
 type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
@@ -30,6 +31,7 @@ const Head = ({ title, action }: { title: string; action?: React.ReactNode }) =>
 const Badge = ({ value }: { value: string }) => <span className={`bdg ${badgeTone(value)}`}>{value.replaceAll('_', ' ')}</span>;
 
 export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTaskId?: string }) {
+  const today = useLocalDay();
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [connections, setConnections] = useState<Array<{ id: string; provider: string; status: string; lastSyncedAt?: string | null; tool: { name: string; category: string }; _count: { linkedResources: number; usage: number } }> | null>(null);
   const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null);
@@ -57,7 +59,7 @@ export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTa
     finally { setUpdatingTaskId(null); }
   }
   const connectedTools = connections?.filter((connection) => connection.status === 'connected') ?? [];
-  return <section className="sp on"><Head title="My Tasks" /><div className="cc legacy-table-card">{tasks === null ? <Empty>Loading tasks…</Empty> : tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Assigned By</th><th>Date Assigned</th><th>Due Date</th><th>Priority</th><th>Auto-Progress</th><th>Status</th></tr></thead><tbody>{tasks.map((task) => <tr id={`task-${task.id}`} className={task.id === focusedTaskId ? 'notification-target' : ''} key={task.id}><td><strong>{task.title}</strong></td><td>{task.project?.title ?? '—'}</td><td>{task.assignedBy ?? '—'}</td><td>{task.assignedAt ? new Date(task.assignedAt).toLocaleDateString() : 'Not set'}</td><td>{formatDateOnly(task.deadline)}</td><td><Badge value={task.priority} /></td><td>{task.progress ?? 0}%</td><td><select className={`task-status-select ${badgeTone(task.status)}`} value={task.status} aria-label={`Status for ${task.title}`} disabled={updatingTaskId === task.id} onChange={(event) => void updateStatus(task, event.target.value as 'pending' | 'ongoing' | 'for_review' | 'completed')}><option value="pending">Not Started</option><option value="ongoing">In Progress</option><option value="for_review">For Review</option><option value="completed">Completed</option></select></td></tr>)}</tbody></table> : <Empty>Tasks assigned to you will appear here.</Empty>}</div><div className="cc"><div className="cc-head"><h3>Connected External Tools</h3></div><div className="g4 legacy-tool-progress">{connections === null ? <Empty>Loading connected tools…</Empty> : connectedTools.length ? connectedTools.map((connection) => <div className="mini-state" key={connection.id}><strong>{connection.tool.name}</strong><span>{connection._count.linkedResources} linked resource{connection._count.linkedResources === 1 ? '' : 's'}{connection.lastSyncedAt ? ` · synced ${new Date(connection.lastSyncedAt).toLocaleString()}` : ''}</span></div>) : <Empty>Connect an external tool to link its files to your tasks.</Empty>}</div></div></section>;
+  return <section className="sp on"><Head title="My Tasks" /><div className="cc legacy-table-card">{tasks === null ? <Empty>Loading tasks…</Empty> : tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Assigned By</th><th>Date Assigned</th><th>Due Date</th><th>Priority</th><th>Auto-Progress</th><th>Status</th></tr></thead><tbody>{tasks.map((task) => <tr id={`task-${task.id}`} className={task.id === focusedTaskId ? 'notification-target' : ''} key={task.id}><td><strong>{task.title}</strong></td><td>{task.project?.title ?? '—'}</td><td>{task.assignedBy ?? '—'}</td><td>{task.assignedAt ? new Date(task.assignedAt).toLocaleDateString() : 'Not set'}</td><td>{formatDateOnly(task.deadline)}</td><td><span className={`bdg ${taskPriorityHealth(task, today).tone}`}>{taskPriorityHealth(task, today).label}</span></td><td>{task.progress ?? 0}%</td><td><select className={`task-status-select ${badgeTone(task.status)}`} value={task.status} aria-label={`Status for ${task.title}`} disabled={updatingTaskId === task.id} onChange={(event) => void updateStatus(task, event.target.value as 'pending' | 'ongoing' | 'for_review' | 'completed')}><option value="pending">Not Started</option><option value="ongoing">In Progress</option><option value="for_review">For Review</option><option value="completed">Completed</option></select></td></tr>)}</tbody></table> : <Empty>Tasks assigned to you will appear here.</Empty>}</div><div className="cc"><div className="cc-head"><h3>Connected External Tools</h3></div><div className="g4 legacy-tool-progress">{connections === null ? <Empty>Loading connected tools…</Empty> : connectedTools.length ? connectedTools.map((connection) => <div className="mini-state" key={connection.id}><strong>{connection.tool.name}</strong><span>{connection._count.linkedResources} linked resource{connection._count.linkedResources === 1 ? '' : 's'}{connection.lastSyncedAt ? ` · synced ${new Date(connection.lastSyncedAt).toLocaleString()}` : ''}</span></div>) : <Empty>Connect an external tool to link its files to your tasks.</Empty>}</div></div></section>;
 }
 
 export function CalendarPage({ notify }: { notify: Notice }) {
@@ -68,7 +70,6 @@ export function CalendarPage({ notify }: { notify: Notice }) {
   const [editingEvent, setEditingEvent] = useState<CalendarData['events'][number] | null>(null);
   const [newEventStart, setNewEventStart] = useState('');
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
-  const [selectedItem, setSelectedItem] = useState<{ title: string; when: string; category: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [loadingCalendar, setLoadingCalendar] = useState(true);
   const [calendarError, setCalendarError] = useState<string | null>(null);
@@ -96,15 +97,6 @@ export function CalendarPage({ notify }: { notify: Notice }) {
 
   function openCreate(day?: Date) { setEditingEvent(null); setNewEventStart(day ? toLocalInput(new Date(day.getFullYear(), day.getMonth(), day.getDate(), 9)) : ''); setDialogOpen(true); }
   function openEdit(event: CalendarData['events'][number]) { setSelectedDay(null); setEditingEvent(event); setDialogOpen(true); }
-  async function openTaskNotification(notification: CalendarTaskNotification) {
-    const task = data.hints.find((hint) => hint.type === 'task_deadline' && hint.id === notification.relatedId);
-    if (task) {
-      setCursor(localDateFromKey(dateOnlyKey(task.deadline)));
-      setSelectedDay(dateOnlyKey(task.deadline));
-    } else setSelectedItem({ title: notification.message, when: notification.createdAt, category: 'Task notification' });
-    try { await request(`/notifications/${notification.id}/read`, { method: 'PATCH' }); await refresh(); }
-    catch (error) { notify(error instanceof Error ? error.message : 'Could not mark notification as read.'); }
-  }
   async function saveEvent(formEvent: React.FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
     const values = new FormData(formEvent.currentTarget);
@@ -141,10 +133,6 @@ export function CalendarPage({ notify }: { notify: Notice }) {
       </div>
     </div>
     {calendarError ? <div className="calendar-error" role="alert">{calendarError} <button type="button" onClick={() => void refresh().catch(() => undefined)}>Retry</button></div> : null}
-    {data.notifications?.length ? <section className="cc" aria-label="Task calendar notifications">
-      <div className="cc-head"><h3>Task notifications</h3><span className="user-page-count">{data.notifications.length} recent unread</span></div>
-      {data.notifications.map((notification) => <button type="button" className="notif-item notif-entry" key={notification.id} onClick={() => void openTaskNotification(notification)}><span className="ndot" /><span><span className="ntxt">{notification.message}</span><span className="ntime">{new Date(notification.createdAt).toLocaleString()}</span></span></button>)}
-    </section> : null}
     <div className="cal-grid-wrap">
       <div className="cal-weekday-row">{['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day) => <div className="cal-weekday-cell" key={day}>{day}</div>)}</div>
       <div className="cal-body">{cells.map((cell, index) => {
@@ -169,11 +157,6 @@ export function CalendarPage({ notify }: { notify: Notice }) {
     </div>
     {loadingCalendar ? <div className="calendar-empty-note">Loading calendar…</div> : !calendarError && !items.length ? <div className="calendar-empty-note">No events or deadlines yet. Select a day to view its agenda, or New Event to add an event.</div> : null}
     {selectedDay ? <CalendarAgendaModal key={selectedDay} day={localDateFromKey(selectedDay)} items={agendaForDay(items, localDateFromKey(selectedDay))} loading={loadingCalendar} error={calendarError} onClose={() => setSelectedDay(null)} onEdit={openEdit} onRetry={() => void refresh().catch(() => undefined)} /> : null}
-    {selectedItem ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedItem(null); }}><div className="modal-box" role="dialog" aria-modal="true" aria-label={selectedItem.title}>
-      <div className="modal-ttl"><span>{selectedItem.category}</span><button className="modal-close" onClick={() => setSelectedItem(null)} aria-label="Close details">×</button></div>
-      <h3>{selectedItem.title}</h3><p>{selectedItem.category === 'Deadline' ? formatDateOnly(selectedItem.when) : new Date(selectedItem.when).toLocaleString()}</p>
-      <div className="modal-acts"><button className="btn" onClick={() => setSelectedItem(null)}>Close</button></div>
-    </div></div> : null}
     {dialogOpen ? <div className="modal-ov open project-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialogOpen(false); }}><div className="modal-box project-modal calendar-event-modal" role="dialog" aria-modal="true" aria-label={editingEvent ? 'Edit event' : 'New event'}>
       <div className="modal-ttl"><span>{editingEvent ? 'Edit Event' : 'New Event'}</span><button className="modal-close" onClick={() => setDialogOpen(false)} aria-label="Close event form">×</button></div>
       <form className="project-create-form" onSubmit={saveEvent}>

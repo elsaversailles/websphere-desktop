@@ -4,7 +4,8 @@ import { getAccessToken, request, socketBaseUrl } from '../api';
 import type { GroupHub as GroupHubData, GroupSummary } from './types';
 import { DateField } from './DateField';
 import { dateOnlyKey, formatDateOnly, localDateFromKey } from './dates';
-import { type Tone, avatarTone, dateKey, deadlineCountdown, deadlineHealth, initials, priorityHealth, projectHealth, relativeTime, worstTone } from './health';
+import { type Tone, avatarTone, dateKey, deadlineCountdown, deadlineHealth, initials, taskPriorityHealth, projectHealth, relativeTime, worstTone } from './health';
+import { useLocalDay } from './useLocalDay';
 
 type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string } | null; tasks: Array<{ status: string }>; _count?: { members: number } };
 type DashboardTask = { id: string; title: string; status: string; priority?: string | null; deadline?: string | null; project?: { id: string; title: string } | null };
@@ -45,6 +46,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [monthCursor, setMonthCursor] = useState(() => { const now = new Date(); return { year: now.getFullYear(), month: now.getMonth() }; });
   const notificationsRef = useRef<HTMLDivElement | null>(null);
+  const localDay = useLocalDay();
 
   const refreshDashboard = useCallback(() => request<DashboardData>('/dashboard').then(setData).catch((error: Error) => notify(error.message)), [notify]);
   useEffect(() => { void refreshDashboard(); }, [refreshDashboard]);
@@ -79,7 +81,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
   const deadlineMarkers = useMemo(() => {
     const markers = new Map<string, { tone: Tone; items: string[] }>();
     function mark(date: string | null | undefined, label: string) {
-      const health = deadlineHealth(date);
+      const health = deadlineHealth(date, localDay);
       if (!health || !date) return;
       const key = dateOnlyKey(date);
       const current = markers.get(key);
@@ -88,18 +90,18 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
     data?.tasks.forEach((task) => mark(task.deadline, task.title));
     data?.projects.forEach((project) => mark(project.deadline, `${project.title} (project)`));
     return markers;
-  }, [data]);
+  }, [data, localDay]);
 
   const monthCells = useMemo(() => monthMatrix(monthCursor.year, monthCursor.month), [monthCursor]);
   /** Overdue first, then soonest — matches the "Next 14 days" framing in the panel header. */
   const upcoming = useMemo(() => {
     return (data?.tasks ?? [])
-      .filter((task) => task.deadline)
-      .map((task) => ({ task, health: deadlineHealth(task.deadline)! }))
+      .filter((task) => task.deadline && task.status !== 'completed')
+      .map((task) => ({ task, health: deadlineHealth(task.deadline, localDay)! }))
       .filter((entry) => entry.health.days <= 14)
       .sort((a, b) => a.health.days - b.health.days)
       .slice(0, 5);
-  }, [data]);
+  }, [data, localDay]);
 
   /** The panel header says "All active projects", so archived and completed work is filtered out. */
   const activeProjects = useMemo(() => (data?.projects ?? []).filter((project) => project.status === 'active'), [data]);
@@ -198,7 +200,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
         </DataCard>
         <DataCard title="My Tasks" action="View All" onAction={() => onPage('tasks')}>
           {data.tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Deadline</th><th>Priority</th></tr></thead><tbody>{data.tasks.slice(0, 8).map((task) => {
-            const priority = priorityHealth(task.priority);
+            const priority = taskPriorityHealth(task, localDay);
             const due = deadlineHealth(task.deadline);
             return <tr key={task.id}>
               <td className="table-title">{task.title}</td>
@@ -222,7 +224,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
             title={marker ? `${marker.items.length} due: ${marker.items.join(', ')}` : undefined}
           >{cell.day}{marker ? <em className={`calendar-day-dot ${marker.tone}`} /> : null}</span>;
         })}</div>
-        <div className="calendar-legend"><span><i className="calendar-day-dot r" />Urgent</span><span><i className="calendar-day-dot y" />Soon</span><span><i className="calendar-day-dot ac" />On track</span></div>
+        <div className="calendar-legend"><span><i className="calendar-day-dot r" />Urgent</span><span><i className="calendar-day-dot y" />Due soon</span><span><i className="calendar-day-dot ac" />On track</span></div>
         <p className="calendar-label">Today is {today.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</p>
       </aside>
     </div>
