@@ -403,7 +403,19 @@ These tests check the Zod schemas that both the API and the web client use to va
 **SHR-VAL-06: Password request shapes are accepted**
 - **Expected:** `passwordForgotSchema`, `passwordChangeSchema` and `passwordResetSchema` each accept a well-formed payload. The reset token is 64 characters, and the password and confirmation match.
 
-## 7. Known coverage gaps
+## 7. Event and task activity notifications
+
+`apps/api/src/activity-notifications.spec.ts` exercises the mutation handlers through the shared notification delivery method used by maintenance announcements.
+
+| Acceptance criteria | Coverage |
+|---|---|
+| AC-01 / AC-02 | Event creation saves the calendar event and creates notifications for the active owner and active project members. Personal events notify only their owner. Changes send a new alert; unchanged saves do not. |
+| AC-03 / AC-04 | Task status changes identify the actor, task, and readable status. Project peers, active assignees/assigners, the task creator, and existing administrator recipients are included; the actor and inactive accounts are excluded. The status endpoint, project editor, and external-file tracker edit all use the same notification behavior. |
+| AC-05 | Persisted notifications use the existing live Socket.IO, browser/mobile push, and queued email delivery path. Existing category/email/push preferences apply. Email queue failure leaves the saved activity and in-app alerts intact. |
+
+Event messages include start/end dates and times in `APP_TIME_ZONE` (default `Asia/Manila`), including a time-zone label. Long titles are shortened before the schedule so date/time details remain readable. Recipient queries and delivery are tested with stubs; real MySQL/Redis/SES/VAPID delivery still requires the service checks listed in `TESTING.md`.
+
+## 8. Known coverage gaps
 
 | Area | Status |
 |---|---|

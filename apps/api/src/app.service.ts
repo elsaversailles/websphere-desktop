@@ -28,7 +28,7 @@ const WorkflowEventType = { status_change: 'status_change', task_completed: 'tas
 const NotificationType = { task_assignment: 'task_assignment', task_update: 'task_update', project_change: 'project_change', group_activity: 'group_activity', announcement: 'announcement', deadline_reminder: 'deadline_reminder', delay_risk: 'delay_risk', ai_suggestion: 'ai_suggestion', ticket_update: 'ticket_update', outlook: 'outlook' } as const;
 type Role = (typeof Role)[keyof typeof Role];
 type TaskStatus = 'pending' | 'ongoing' | 'for_review' | 'completed';
-type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva';
+type ProviderId = 'google' | 'microsoft' | 'notion' | 'trello' | 'asana' | 'canva';
 type NotificationType = (typeof NotificationType)[keyof typeof NotificationType];
 // Outlook has no WebSphere event taxonomy, so mirrored events import as meetings — the best fit for
 // invites/appointments. Module-level so it does not depend on constructor init order.
@@ -595,8 +595,8 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     });
     if (reassigned && assigneeId) await this.notify([assigneeId], NotificationType.task_assignment, `You were assigned “${updated.title}” in “${task.project.title}”`, id, 'task').catch(() => undefined);
     if (reassigned && previousAssigneeId) await this.notify([previousAssigneeId], NotificationType.task_update, `You were unassigned from “${updated.title}”`, id, 'task').catch(() => undefined);
-    if (statusChanged && (assigneeId ?? previousAssigneeId) && (assigneeId ?? previousAssigneeId) !== caller.id) await this.notify([assigneeId ?? previousAssigneeId], NotificationType.task_update, `Task “${updated.title}” changed status to ${status}.`, id, 'task').catch(() => undefined);
-    if (statusChanged || reassigned) await this.notifyTaskAdmins(id, `Task “${updated.title}” in “${task.project.title}” ${reassigned ? 'was reassigned' : `changed status to ${status}`}.`, caller.id);
+    if (statusChanged) await this.notifyTaskStatus(id, caller.id, status);
+    else if (reassigned) await this.notifyTaskAdmins(id, `Task “${updated.title}” in “${task.project.title}” was reassigned.`, caller.id);
     await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
     return updated;
   }
@@ -624,6 +624,27 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       if (admins.length) await this.notify(admins.map((admin: { id: string }) => admin.id), NotificationType.task_update, message, taskId, 'task');
     } catch { /* A notification failure must not turn a committed task change into a failed response. */ }
   }
+  /** All task mutation routes share the same recipients and human-readable status message. */
+  private async notifyTaskStatus(taskId: string, actorId: string, status: TaskStatus) {
+    try {
+      const [task, actor] = await Promise.all([
+        this.prisma.task.findUniqueOrThrow({ where: { id: taskId }, include: { assignments: { where: { active: true } } } }),
+        this.prisma.user.findUniqueOrThrow({ where: { id: actorId }, select: { fullName: true } }),
+      ]);
+      // Include legacy assignees/assigners without a membership row, as well as project peers
+      // and the administrators who already receive task oversight notifications.
+      const involvedIds = [task.createdBy, ...task.assignments.flatMap((assignment) => [assignment.assigneeId, assignment.assignerId])].filter((id): id is string => Boolean(id));
+      const recipients = await this.prisma.user.findMany({ where: {
+        status: 'active', id: { not: actorId },
+        OR: [{ projectMembers: { some: { projectId: task.projectId } } }, { id: { in: involvedIds } }, { role: Role.Administrator }],
+      }, select: { id: true } });
+      const labels: Record<TaskStatus, string> = { pending: 'Not Started', ongoing: 'In Progress', for_review: 'For Review', completed: 'Completed' };
+      const message = `${this.noticeText(actor.fullName, 40)} ${status === 'completed' ? 'marked' : 'updated'} “${this.noticeText(task.title, 90)}” ${status === 'completed' ? 'as' : 'to'} ${labels[status]}.`;
+      await this.notify(recipients.map((user) => user.id), NotificationType.task_update, message, taskId, 'task');
+    } catch (error) {
+      this.logger.error(`Could not notify members about task ${taskId}`, error);
+    }
+  }
   /**
    * An active task assignment is the authority for changing its status. Do not
    * call `task()` here: legacy assignments can exist without a ProjectMember
@@ -641,7 +662,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: status } }),
     ]);
     await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
-    await this.notifyTaskAdmins(id, `Task “${updated.title}” changed status to ${status}.`, caller.id);
+    await this.notifyTaskStatus(id, caller.id, status);
     return updated;
   }
   async myTasks(caller: Caller, filter: any) {
@@ -732,12 +753,13 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.prisma.$transaction([
       this.prisma.linkedResource.update({ where: { id: resource.id }, data: { connectionId: connection.id, title: input.title, externalUrl: input.externalUrl } }),
       ...(reassigned ? [this.prisma.taskAssignment.updateMany({ where: { taskId: task.id, active: true }, data: { active: false } }), this.prisma.taskAssignment.create({ data: { taskId: task.id, assigneeId: input.assigneeId, assignerId: caller.id } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: WorkflowEventType.assignment_change, fromValue: activeAssignment?.assigneeId, toValue: input.assigneeId } })] : []),
-      ...(changedStatus ? [this.prisma.task.update({ where: { id: task.id }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), ...(input.status === 'completed' ? { completedAt: now } : {}) } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: input.status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: input.status } })] : []),
+      ...(changedStatus ? [this.prisma.task.update({ where: { id: task.id }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: input.status === 'completed' ? now : null } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: input.status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: input.status } })] : []),
     ]);
     await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Updated “${input.title}” linked to “${task.title}”` } });
     if (changedStatus || reassigned) await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
     if (reassigned && input.assigneeId) await this.notify([input.assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}”`, task.id, 'task').catch(() => undefined);
-    if (changedStatus || reassigned) await this.notifyTaskAdmins(task.id, `Task “${task.title}” ${reassigned ? 'was reassigned' : `changed status to ${input.status}`}.`, caller.id);
+    if (changedStatus) await this.notifyTaskStatus(task.id, caller.id, input.status!);
+    else if (reassigned) await this.notifyTaskAdmins(task.id, `Task “${task.title}” was reassigned.`, caller.id);
     return { ok: true, taskId: task.id, projectId: task.projectId };
   }
   async launchResource(caller: Caller, resourceId: string) {
@@ -1016,9 +1038,43 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     }
     return { events: calendarEvents, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))], notifications };
   }
-  async createCalendarEvent(caller: Caller, input: any) { if (input.projectId) await this.projectMember(input.projectId, caller.id); return this.prisma.calendarEvent.create({ data: { ...input, ownerId: caller.id } }); }
+  async createCalendarEvent(caller: Caller, input: any) {
+    if (input.projectId) await this.projectMember(input.projectId, caller.id);
+    const event = await this.prisma.calendarEvent.create({ data: { ...input, ownerId: caller.id } });
+    await this.notifyCalendarEvent(event, caller.id, 'scheduled');
+    return event;
+  }
   private async calendarEventAccess(caller: Caller, id: string) { const event = await this.prisma.calendarEvent.findUniqueOrThrow({ where: { id } }); if (event.projectId) await this.projectMember(event.projectId, caller.id); else if (event.ownerId !== caller.id) fail('RBAC_FORBIDDEN', 'Only the event owner or project members can modify this event', 403); return event; }
-  async updateCalendarEvent(caller: Caller, id: string, input: any) { await this.calendarEventAccess(caller, id); return this.prisma.calendarEvent.update({ where: { id }, data: input }); }
+  async updateCalendarEvent(caller: Caller, id: string, input: any) {
+    const previous = await this.calendarEventAccess(caller, id);
+    if (input.projectId && input.projectId !== previous.projectId) await this.projectMember(input.projectId, caller.id);
+    const event = await this.prisma.calendarEvent.update({ where: { id }, data: input });
+    const changed = ['title', 'type', 'projectId'].some((key) => previous[key] !== event[key])
+      || previous.startAt.getTime() !== event.startAt.getTime()
+      || previous.endAt?.getTime() !== event.endAt?.getTime();
+    if (changed) await this.notifyCalendarEvent(event, caller.id, 'updated');
+    return event;
+  }
+  private async notifyCalendarEvent(event: { id: string; ownerId: string; projectId: string | null; title: string; type: string; startAt: Date; endAt: Date | null }, actorId: string, action: 'scheduled' | 'updated') {
+    try {
+      const [actor, recipients] = await Promise.all([
+        this.prisma.user.findUniqueOrThrow({ where: { id: actorId }, select: { fullName: true } }),
+        this.prisma.user.findMany({ where: { status: 'active', OR: [
+          { id: event.ownerId },
+          ...(event.projectId ? [{ projectMembers: { some: { projectId: event.projectId } } }] : []),
+        ] }, select: { id: true } }),
+      ]);
+      const format = new Intl.DateTimeFormat('en-US', { timeZone: process.env.APP_TIME_ZONE ?? 'Asia/Manila', month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+      const kind = event.type.replaceAll('_', ' ');
+      const prefix = `${this.noticeText(actor.fullName, 24)} ${action} “`;
+      const details = `” (${kind}). Starts ${format.format(event.startAt)}${event.endAt ? `; ends ${format.format(event.endAt)}` : ''}.`;
+      // Reserve room for the complete schedule before shortening a long event title.
+      const message = `${prefix}${this.noticeText(event.title, Math.min(60, 191 - prefix.length - details.length))}${details}`;
+      await this.notify(recipients.map((user) => user.id), NotificationType.announcement, message, event.id, 'calendar');
+    } catch (error) {
+      this.logger.error(`Could not notify members about calendar event ${event.id}`, error);
+    }
+  }
   async deleteCalendarEvent(caller: Caller, id: string) { await this.calendarEventAccess(caller, id); return this.prisma.calendarEvent.delete({ where: { id } }); }
   pushConfig() { return this.push.publicConfig(); }
   async subscribePush(caller: Caller, subscription: { endpoint: string; keys: { p256dh: string; auth: string } }) {
@@ -1163,7 +1219,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async launchIntegration(caller: Caller, connectionId: string) {
     const connection = await this.prisma.toolConnection.findFirst({ where: { id: connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } });
     if (!connection) fail('INTEGRATION_UNAVAILABLE', 'This integration is not connected.', 400);
-    const urls: Record<ProviderId, string> = { google: 'https://drive.google.com/', microsoft: 'https://www.office.com/', trello: 'https://trello.com/', asana: 'https://app.asana.com/', canva: 'https://www.canva.com/' };
+    const urls: Record<ProviderId, string> = { google: 'https://drive.google.com/', microsoft: 'https://www.office.com/', notion: 'https://www.notion.so/', trello: 'https://trello.com/', asana: 'https://app.asana.com/', canva: 'https://www.canva.com/' };
     await this.prisma.toolUsage.create({ data: { connectionId, action: `Opened ${connection.tool.name}` } });
     return { externalUrl: urls[connection.provider as ProviderId], platform: connection.tool.name };
   }

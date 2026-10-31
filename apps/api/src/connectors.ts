@@ -1,4 +1,4 @@
-export type ProviderId = 'google' | 'microsoft' | 'trello' | 'asana' | 'canva';
+export type ProviderId = 'google' | 'microsoft' | 'notion' | 'trello' | 'asana' | 'canva';
 export type OAuthTokens = { accessToken: string; refreshToken?: string; expiresAt?: Date };
 export type LinkTarget = { projectId?: string; taskId?: string; externalId: string; title: string; externalUrl: string };
 export type SyncTarget = Pick<LinkTarget, 'externalId' | 'title' | 'externalUrl'>;
@@ -124,6 +124,32 @@ class MicrosoftConnector extends DirectOAuthConnector implements CalendarConnect
     return { events, deltaLink: nextDeltaLink };
   }
 }
+class NotionConnector implements Connector {
+  readonly provider = 'notion' as const;
+  authorizeUrl(state: string, redirectUri: string) {
+    return `https://api.notion.com/v1/oauth/authorize?${new URLSearchParams({ client_id: required('NOTION_CLIENT_ID'), response_type: 'code', owner: 'user', redirect_uri: redirectUri, state })}`;
+  }
+  private async token(body: Record<string, string>, previousRefreshToken?: string) {
+    const basic = Buffer.from(`${required('NOTION_CLIENT_ID')}:${required('NOTION_CLIENT_SECRET')}`).toString('base64');
+    const response = await fetch('https://api.notion.com/v1/oauth/token', { method: 'POST', headers: { authorization: `Basic ${basic}`, 'content-type': 'application/json', 'Notion-Version': '2022-06-28' }, body: JSON.stringify(body) });
+    if (!response.ok) throw new Error('OAUTH_EXCHANGE_FAILED');
+    return tokensFrom(await response.json() as OAuthPayload, previousRefreshToken);
+  }
+  async exchangeCode(code: string, redirectUri: string) {
+    if (!code || !redirectUri) throw new Error('OAUTH_EXCHANGE_FAILED');
+    return this.token({ grant_type: 'authorization_code', code, redirect_uri: redirectUri });
+  }
+  async refresh(tokens: OAuthTokens) {
+    if (!tokens.refreshToken) throw new Error('OAUTH_RECONNECT_REQUIRED');
+    return this.token({ grant_type: 'refresh_token', refresh_token: tokens.refreshToken }, tokens.refreshToken);
+  }
+  async sync(tokens: OAuthTokens): Promise<SyncResult> {
+    const response = await fetch('https://api.notion.com/v1/users/me', { headers: { authorization: `Bearer ${tokens.accessToken}`, 'Notion-Version': '2022-06-28' } });
+    if (!response.ok) throw new Error('INTEGRATION_SYNC_FAILED');
+    return { summary: 'Notion connection verified' };
+  }
+  async launchUrl(target: LinkTarget) { return target.externalUrl; }
+}
 class TrelloConnector implements Connector {
   readonly provider = 'trello' as const;
   private readonly authorizationEndpoint = 'https://auth.atlassian.com/authorize';
@@ -229,6 +255,6 @@ class CanvaConnector implements Connector {
   async launchUrl(target: LinkTarget) { return target.externalUrl; }
 }
 export const connectors: Record<ProviderId, Connector> = {
-  google: new GoogleConnector(), microsoft: new MicrosoftConnector(),
+  google: new GoogleConnector(), microsoft: new MicrosoftConnector(), notion: new NotionConnector(),
   trello: new TrelloConnector(), asana: new AsanaConnector(), canva: new CanvaConnector(),
 };

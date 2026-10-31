@@ -34,6 +34,6 @@ export function CalendarAgendaModal({ day, items, loading, error, onClose, onEdi
         })}
       </ul> : <p className="calendar-agenda-empty">You have no agenda for this date.</p>}
     </div>
-    <div className="modal-acts calendar-agenda-footer"><button className="btn" type="button" onClick={onClose}>Close</button></div>
+    <div className="modal-acts calendar-agenda-footer"><button className="btn-o" type="button" onClick={onClose}>Close</button></div>
   </dialog>;
 }

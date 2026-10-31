@@ -7,6 +7,7 @@ function normalizedProvider(provider?: string | null, name?: string | null) {
   if (value.includes('canva')) return 'canva';
   if (value.includes('trello')) return 'trello';
   if (value.includes('asana')) return 'asana';
+  if (value.includes('notion')) return 'notion';
   return 'file';
 }
 
@@ -30,13 +31,17 @@ function AsanaMark() {
   return <svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="14" r="9" fill="#F06A6A"/><circle cx="14" cy="31" r="9" fill="#F06A6A"/><circle cx="34" cy="31" r="9" fill="#F06A6A"/></svg>;
 }
 
+function NotionMark() {
+  return <svg viewBox="0 0 48 48" aria-hidden="true"><rect x="4" y="4" width="40" height="40" rx="5" fill="#fff" stroke="#111" strokeWidth="3"/><text x="24" y="35" fill="#111" fontFamily="Georgia,serif" fontSize="31" fontWeight="700" textAnchor="middle">N</text></svg>;
+}
+
 function FileMark() {
   return <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M13 4h15l10 10v30H13z" fill="#EAF6FC" stroke="currentColor" strokeWidth="3" strokeLinejoin="round"/><path d="M28 4v11h10M19 23h13M19 30h13M19 37h9" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="3"/></svg>;
 }
 
 export function ToolLogo({ provider, name, size = 'md', className = '' }: { provider?: string | null; name?: string | null; size?: ToolLogoSize; className?: string }) {
   const kind = normalizedProvider(provider, name);
-  const label = name || ({ google: 'Google Drive', microsoft: 'Microsoft 365', canva: 'Canva', trello: 'Trello', asana: 'Asana', file: 'File' } as const)[kind];
-  const mark = kind === 'google' ? <GoogleDriveMark /> : kind === 'microsoft' ? <MicrosoftMark /> : kind === 'canva' ? <CanvaMark /> : kind === 'trello' ? <TrelloMark /> : kind === 'asana' ? <AsanaMark /> : <FileMark />;
+  const label = name || ({ google: 'Google Drive', microsoft: 'Microsoft 365', canva: 'Canva', trello: 'Trello', asana: 'Asana', notion: 'Notion', file: 'File' } as const)[kind];
+  const mark = kind === 'google' ? <GoogleDriveMark /> : kind === 'microsoft' ? <MicrosoftMark /> : kind === 'canva' ? <CanvaMark /> : kind === 'trello' ? <TrelloMark /> : kind === 'asana' ? <AsanaMark /> : kind === 'notion' ? <NotionMark /> : <FileMark />;
   return <span className={`tool-logo tool-logo-${kind} tool-logo-${size} ${className}`.trim()} role="img" aria-label={`${label} logo`}>{mark}</span>;
 }
