@@ -18,11 +18,11 @@ function taskService() {
     task: { findUniqueOrThrow: vi.fn(async () => ({ ...saved, assignments: [{ assigneeId: assignee.id }], project: { title: 'Capstone' } })), update },
     taskAssignment: { findFirst: vi.fn(async () => ({ assigneeId: assignee.id })), create: assignmentCreate, updateMany: assignmentUpdateMany },
     workflowEvent: { create: workflowCreate },
-    user: { findMany: vi.fn(async () => [{ id: 'admin-1' }]) },
+    user: { findMany: vi.fn(async () => [{ id: 'admin-1' }]), findUniqueOrThrow: vi.fn(async () => ({ fullName: 'Demo Member' })) },
     $transaction: vi.fn(async (operation: any) => typeof operation === 'function' ? operation(prisma) : Promise.all(operation)),
   };
   const service = Object.assign(Object.create(AppService.prototype), {
-    prisma, projectMember, notify, jobs: { enqueueAnalyticsRecompute },
+    prisma, projectMember, notify, jobs: { enqueueAnalyticsRecompute }, logger: { error: vi.fn() },
   }) as AppService;
   return { service, prisma, projectMember, notify, update, workflowCreate, assignmentCreate, assignmentUpdateMany };
 }
@@ -63,7 +63,7 @@ describe('task authorization and persistence', () => {
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'ongoing', startedAt: expect.any(Date) }) }));
     expect(workflowCreate).toHaveBeenCalledOnce();
     expect(result.status).toBe('ongoing');
-    expect(notify).toHaveBeenCalledWith(['admin-1'], 'task_update', expect.stringContaining('ongoing'), 'task-1', 'task');
+    expect(notify).toHaveBeenCalledWith(['admin-1'], 'task_update', 'Demo Member updated “Draft report” to In Progress.', 'task-1', 'task');
   });
 
   it('requires project leadership when the caller is not the active assignee', async () => {

@@ -4,7 +4,8 @@ import { getAccessToken, request, socketBaseUrl } from '../api';
 import type { GroupHub as GroupHubData, GroupSummary } from './types';
 import { DateField } from './DateField';
 import { dateOnlyKey, formatDateOnly, localDateFromKey } from './dates';
-import { type Tone, avatarTone, dateKey, deadlineCountdown, deadlineHealth, initials, taskPriorityHealth, projectHealth, relativeTime, worstTone } from './health';
+import { type Tone, avatarTone, dateKey, deadlineCountdown, deadlineHealth, initials, taskPriorityHealth, relativeTime, worstTone } from './health';
+import { dashboardProjectProgress } from './dashboardProjectProgress';
 import { useLocalDay } from './useLocalDay';
 import { upcomingDeadlines } from './upcomingDeadlines';
 
@@ -183,9 +184,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
       <div className="g2 dashboard-tables">
         <DataCard title="Recent Projects" action="View All" onAction={() => onPage('projects')}>
           {data.projects.length ? <table className="tbl"><thead><tr><th>Project</th><th>Course</th><th>Progress</th><th>Status</th></tr></thead><tbody>{data.projects.slice(0, 8).map((project) => {
-            const completed = project.tasks.filter((task) => task.status === 'completed').length;
-            const progress = project.tasks.length ? Math.round(completed / project.tasks.length * 100) : 0;
-            const health = projectHealth(progress, project.status);
+            const { progress, health } = dashboardProjectProgress(project.tasks, project.status);
             return <tr key={project.id}>
               <td className="table-title">{project.title}</td>
               <td className="table-sub">{project.group?.name ?? 'Independent'}</td>
@@ -246,8 +245,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
     <div className="g2">
       <DataCard title="Project Progress Overview" note="All active projects">
         {activeProjects.length ? activeProjects.slice(0, 4).map((project) => {
-          const progress = project.tasks.length ? Math.round(project.tasks.filter((task) => task.status === 'completed').length / project.tasks.length * 100) : 0;
-          const health = projectHealth(progress, project.status);
+          const { progress, health } = dashboardProjectProgress(project.tasks, project.status);
           const members = project._count?.members ?? 0;
           return <div className="progress-item" key={project.id}>
             <div className="progress-item-head">
