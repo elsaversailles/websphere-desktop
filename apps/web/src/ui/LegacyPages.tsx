@@ -15,7 +15,7 @@ import { agendaForDay, calendarItems, type CalendarData } from './calendar';
 
 type Notice = (message: string) => void;
 type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
-type Task = { id: string; title: string; projectId: string; deadline?: string | null; assignedAt?: string; priority: string; status: string; project?: { id: string; title: string }; assignedBy?: string; progress?: number };
+type Task = { id: string; title: string; projectId: string; deadline?: string | null; completedAt?: string | null; assignedAt?: string; priority: string; status: string; project?: { id: string; title: string }; assignedBy?: string; progress?: number };
 type Project = { id: string; title: string; status: string; deadline?: string | null; group: { name: string }; members?: Array<{ role: string }>; tasks: Array<{ status: string }> };
 
 type TeamMemberWeek = { id: string; fullName: string; role: string; contributions: number; tasksCompleted: number; performance: number; active: boolean };
@@ -59,7 +59,38 @@ export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTa
     finally { setUpdatingTaskId(null); }
   }
   const connectedTools = connections?.filter((connection) => connection.status === 'connected') ?? [];
-  return <section className="sp on"><Head title="My Tasks" /><div className="cc legacy-table-card">{tasks === null ? <Empty>Loading tasks…</Empty> : tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Assigned By</th><th>Date Assigned</th><th>Due Date</th><th>Priority</th><th>Auto-Progress</th><th>Status</th></tr></thead><tbody>{tasks.map((task) => <tr id={`task-${task.id}`} className={task.id === focusedTaskId ? 'notification-target' : ''} key={task.id}><td><strong>{task.title}</strong></td><td>{task.project?.title ?? '—'}</td><td>{task.assignedBy ?? '—'}</td><td>{task.assignedAt ? new Date(task.assignedAt).toLocaleDateString() : 'Not set'}</td><td className={task.deadline && task.status !== 'completed' ? `due-${taskPriorityHealth(task, today).tone}` : undefined}>{formatDateOnly(task.deadline)}</td><td><span className={`bdg ${taskPriorityHealth(task, today).tone}`}>{taskPriorityHealth(task, today).label}</span></td><td>{task.progress ?? 0}%</td><td><select className={`task-status-select ${badgeTone(task.status)}`} value={task.status} aria-label={`Status for ${task.title}`} disabled={updatingTaskId === task.id} onChange={(event) => void updateStatus(task, event.target.value as 'pending' | 'ongoing' | 'for_review' | 'completed')}><option value="pending">Not Started</option><option value="ongoing">In Progress</option><option value="for_review">For Review</option><option value="completed">Completed</option></select></td></tr>)}</tbody></table> : <Empty>Tasks assigned to you will appear here.</Empty>}</div><div className="cc"><div className="cc-head"><h3>Connected External Tools</h3></div><div className="g4 legacy-tool-progress">{connections === null ? <Empty>Loading connected tools…</Empty> : connectedTools.length ? connectedTools.map((connection) => <div className="mini-state" key={connection.id}><strong>{connection.tool.name}</strong><span>{connection._count.linkedResources} linked resource{connection._count.linkedResources === 1 ? '' : 's'}{connection.lastSyncedAt ? ` · synced ${new Date(connection.lastSyncedAt).toLocaleString()}` : ''}</span></div>) : <Empty>Connect an external tool to link its files to your tasks.</Empty>}</div></div></section>;
+  return <section className="sp on tasks-page">
+    <Head title="My Tasks" />
+    <section className="cc" aria-labelledby="assigned-tasks-title">
+      <div className="cc-head"><h3 id="assigned-tasks-title">Assigned Tasks</h3></div>
+      {tasks === null ? <Empty>Loading tasks…</Empty> : tasks.length ? <div className="tasks-table-scroll" role="region" aria-label="Assigned tasks" tabIndex={0}><table className="tbl tasks-table">
+        <thead><tr><th>Task</th><th>Project</th><th>Assigned By</th><th>Date Assigned</th><th>Due Date</th><th>Priority</th><th>Auto-Progress</th><th>Status</th></tr></thead>
+        <tbody>{tasks.map((task) => {
+          const priority = taskPriorityHealth(task, today);
+          const progress = task.progress ?? 0;
+          return <tr id={`task-${task.id}`} className={task.id === focusedTaskId ? 'notification-target' : ''} key={task.id}>
+            <td><strong>{task.title}</strong></td>
+            <td>{task.project?.title ?? '—'}</td>
+            <td>{task.assignedBy ?? '—'}</td>
+            <td>{task.assignedAt ? new Date(task.assignedAt).toLocaleDateString() : 'Not set'}</td>
+            <td className={task.deadline && task.status !== 'completed' ? `due-${priority.tone}` : undefined}>{formatDateOnly(task.deadline)}</td>
+            <td><span className={`bdg ${priority.tone}`}>{priority.label}</span></td>
+            <td><div className="progress-cell"><div className="pb-wrap" role="progressbar" aria-label={`Progress for ${task.title}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><div className="pb" style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div></td>
+            <td><select className={`task-status-select ${badgeTone(task.status)}`} value={task.status} aria-label={`Status for ${task.title}`} disabled={updatingTaskId === task.id} onChange={(event) => void updateStatus(task, event.target.value as 'pending' | 'ongoing' | 'for_review' | 'completed')}>
+              <option value="pending">Not Started</option><option value="ongoing">In Progress</option><option value="for_review">For Review</option><option value="completed">Completed</option>
+            </select></td>
+          </tr>;
+        })}</tbody>
+      </table></div> : <Empty>Tasks assigned to you will appear here.</Empty>}
+    </section>
+    <section className="cc" aria-labelledby="connected-task-tools-title">
+      <div className="cc-head"><h3 id="connected-task-tools-title">Connected External Tools</h3></div>
+      {connections === null ? <Empty>Loading connected tools…</Empty> : connectedTools.length ? <div className="g4 legacy-tool-progress">{connectedTools.map((connection) => <div className="mini-state" key={connection.id}>
+        <strong>{connection.tool.name}</strong>
+        <span>{connection._count.linkedResources} linked resource{connection._count.linkedResources === 1 ? '' : 's'}{connection.lastSyncedAt ? ` · synced ${new Date(connection.lastSyncedAt).toLocaleString()}` : ''}</span>
+      </div>)}</div> : <Empty>Connect an external tool to link its files to your tasks.</Empty>}
+    </section>
+  </section>;
 }
 
 export function CalendarPage({ notify }: { notify: Notice }) {
@@ -442,7 +473,10 @@ export function IntegrationsPage({ notify }: { notify: Notice }) {
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
   const [launching, setLaunching] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<ConfirmAction | null>(null);
-  async function loadCatalog() { setTools(await request('/integrations/catalog')); }
+  async function loadCatalog() {
+    const catalog = await request<NonNullable<typeof tools>>('/integrations/catalog');
+    setTools(catalog.filter((tool) => tool.provider !== 'notion'));
+  }
   useEffect(() => {
     void loadCatalog().catch((error: Error) => notify(error.message));
     const provider = new URLSearchParams(window.location.search).get('connected');
@@ -457,7 +491,7 @@ export function IntegrationsPage({ notify }: { notify: Notice }) {
     finally { setDisconnecting(null); }
   }
   async function connect(tool: { provider: string; name: string }) {
-    if (!['google', 'microsoft', 'notion', 'trello', 'asana', 'canva'].includes(tool.provider)) { notify(`${tool.name} is not available yet.`); return; }
+    if (!['google', 'microsoft', 'trello', 'asana', 'canva'].includes(tool.provider)) { notify(`${tool.name} is not available yet.`); return; }
     setConnecting(tool.provider);
     try {
       const returnUrl = new URL('/integrations', window.location.origin).toString();

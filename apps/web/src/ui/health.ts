@@ -43,10 +43,18 @@ export function priorityHealth(priority?: string | null): Health {
   return { tone: 'y', label: 'Medium' };
 }
 
-/** Derive unfinished task priority from calendar days, retaining the assigned priority otherwise. */
-export function taskPriorityHealth(task: { priority?: string | null; deadline?: string | null; status: string }, today = localDateKey()): Health {
-  if (!task.deadline || task.status === 'completed') return priorityHealth(task.priority);
-  const days = daysBetweenCalendarDates(today, dateOnlyKey(task.deadline));
+/** Deadline urgency advances until completion, then stays anchored to the completion day. */
+export function taskPriorityHealth(task: { priority?: string | null; deadline?: string | null; completedAt?: string | null; status: string }, today = localDateKey()): Health {
+  if (!task.deadline) return priorityHealth(task.priority);
+  let referenceDay = today;
+  if (task.status === 'completed') {
+    // Old records without a completion timestamp keep their assigned priority rather than
+    // gaining urgency forever. Completion timestamps are instants, unlike date-only deadlines.
+    const completedAt = task.completedAt ? new Date(task.completedAt) : null;
+    if (!completedAt || !Number.isFinite(completedAt.getTime())) return priorityHealth(task.priority);
+    referenceDay = localDateKey(completedAt);
+  }
+  const days = daysBetweenCalendarDates(referenceDay, dateOnlyKey(task.deadline));
   if (days <= 2) return { tone: 'r', label: 'High' };
   if (days <= 5) return { tone: 'y', label: 'Medium' };
   return { tone: 'ac', label: 'Low' };

@@ -1,18 +1,21 @@
-import { type FormEvent, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { io } from 'socket.io-client';
 import { getAccessToken, request, socketBaseUrl } from '../api';
 import { DateField } from './DateField';
 import { dateOnlyKey, formatDateOnly } from './dates';
-import { deadlineHealth, priorityHealth, taskStatusHealth } from './health';
+import { deadlineHealth, taskPriorityHealth, taskStatusHealth } from './health';
+import { dashboardProjectProgress } from './dashboardProjectProgress';
+import { useLocalDay } from './useLocalDay';
 import { ConfirmDialog } from './ConfirmDialog';
 
-type Project = { id: string; title: string; description: string; status: string; deadline?: string | null; group: { name: string } | null; members?: Array<{ role: string }>; tasks: Array<{ id: string; status: string }> };
-type ProjectTask = { id: string; title: string; description: string; startDate?: string | null; deadline?: string | null; priority: string; status: string; assignments: Array<{ assigneeId: string }>; risk?: { level: 'high' | 'medium' | 'low' } };
+type Project = { id: string; title: string; description: string; status: string; startDate?: string | null; deadline?: string | null; group: { name: string } | null; members?: Array<{ role: string }>; tasks: Array<{ id: string; status: string }> };
+type ProjectTask = { id: string; title: string; description: string; startDate?: string | null; deadline?: string | null; priority: string; status: string; completedAt?: string | null; assignments: Array<{ assigneeId: string }>; risk?: { level: 'high' | 'medium' | 'low' } };
 type Member = { userId: string; role: string; responsibility?: string | null; user: { id: string; fullName: string } };
-type ProjectDetail = { id: string; title: string; description: string; status: string; deadline?: string | null; group: { members: Member[] } | null; members: Member[]; tasks: ProjectTask[] };
+type ProjectDetail = { id: string; title: string; description: string; status: string; startDate?: string | null; deadline?: string | null; group: { members: Member[] } | null; members: Member[]; tasks: ProjectTask[] };
 type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
 
 export function ProjectsPage({ notify }: { notify: (message: string) => void }) {
+  const today = useLocalDay();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
@@ -23,13 +26,13 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
   const [createFormKey, setCreateFormKey] = useState(0);
   const [confirmation, setConfirmation] = useState<ConfirmAction | null>(null);
 
-  const refreshProjects = () => request<Project[]>('/projects').then(setProjects).catch((error: Error) => notify(error.message));
-  useEffect(() => { void refreshProjects(); }, [notify]);
+  const refreshProjects = useCallback(() => request<Project[]>('/projects').then(setProjects).catch((error: Error) => notify(error.message)), [notify]);
+  useEffect(() => { void refreshProjects(); }, [refreshProjects]);
 
   const selectedProject = useMemo(() => projects?.find((project) => project.id === selectedProjectId), [projects, selectedProjectId]);
   const leader = selectedProject?.members?.[0]?.role === 'Project_Leader';
 
-  async function openTasks(projectId: string) {
+  const openTasks = useCallback(async (projectId: string) => {
     if (projectId !== selectedProjectId) setEditing(false);
     setSelectedProjectId(projectId);
     setDetail(null);
@@ -37,19 +40,25 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
     try { setDetail(await request<ProjectDetail>(`/projects/${projectId}`)); }
     catch (error) { notify(error instanceof Error ? error.message : 'Could not load project tasks.'); }
     finally { setLoadingDetail(false); }
-  }
+  }, [selectedProjectId, notify]);
 
-  async function refreshTasks() {
+  const refreshTasks = useCallback(async () => {
     if (selectedProjectId) await openTasks(selectedProjectId);
-  }
+  }, [selectedProjectId, openTasks]);
 
   useEffect(() => {
-    if (!selectedProjectId) return;
     const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    socket.on('connect', () => socket.emit('project:join', selectedProjectId, () => undefined));
-    socket.on('task:updated', () => { void refreshTasks(); });
+    socket.on('connect', () => {
+      void request<Project[]>('/projects').then((items) => {
+        setProjects(items);
+        items.forEach((project) => socket.emit('project:join', project.id, () => undefined));
+      }).catch((error: Error) => notify(error.message));
+      void refreshTasks();
+    });
+    socket.on('task:updated', () => { void Promise.all([refreshProjects(), refreshTasks()]); });
+    socket.on('notification:new', () => { void refreshProjects(); });
     return () => { socket.disconnect(); };
-  }, [selectedProjectId]);
+  }, [refreshProjects, refreshTasks, notify]);
 
   async function createTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -59,14 +68,14 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
     const assigneeId = String(values.get('assigneeId') ?? '');
     setSaving(true);
     try {
-      const task = await request<{ id: string }>(`/projects/${detail.id}/tasks`, { method: 'POST', body: JSON.stringify({ title: values.get('title'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, priority: values.get('priority') }) });
+      const task = await request<{ id: string }>(`/projects/${detail.id}/tasks`, { method: 'POST', body: JSON.stringify({ title: values.get('title'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined }) });
       if (assigneeId) {
         if (!detail.members.some((member) => member.userId === assigneeId)) await request(`/projects/${detail.id}/members`, { method: 'POST', body: JSON.stringify({ userId: assigneeId }) });
         await request(`/tasks/${task.id}/assign`, { method: 'POST', body: JSON.stringify({ assigneeId }) });
       }
       form.reset();
       setCreateFormKey((current) => current + 1);
-      await refreshTasks();
+      await Promise.all([refreshProjects(), refreshTasks()]);
       notify(assigneeId ? 'Task created and assigned.' : 'Task created.');
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not create the task.'); }
     finally { setSaving(false); }
@@ -79,7 +88,7 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
     const assigneeId = String(values.get('assigneeId') ?? '');
     const payload = editingTask.mode === 'reassign'
       ? { assigneeId }
-      : { title: values.get('title'), startDate: values.get('startDate') || null, deadline: values.get('deadline') || null, priority: values.get('priority'), assigneeId: assigneeId || null };
+      : { title: values.get('title'), startDate: values.get('startDate') || null, deadline: values.get('deadline') || null, assigneeId: assigneeId || null };
     setSaving(true);
     try {
       await request(`/tasks/${editingTask.task.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
@@ -96,9 +105,7 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
     const values = new FormData(event.currentTarget);
     setSaving(true);
     try {
-      await request(`/projects/${detail.id}`, { method: 'PATCH', body: JSON.stringify({ title: values.get('title'), description: values.get('description'), deadline: values.get('deadline') || null }) });
-      const status = String(values.get('status') ?? '');
-      if (status && status !== detail.status) await request(`/projects/${detail.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      await request(`/projects/${detail.id}`, { method: 'PATCH', body: JSON.stringify({ title: values.get('title'), startDate: values.get('startDate') || null, deadline: values.get('deadline') || null }) });
       setEditing(false);
       await Promise.all([refreshProjects(), refreshTasks()]);
       notify('Project updated.');
@@ -134,16 +141,15 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
     <section className="cc">
       <div className="cc-head"><h3>Existing Projects</h3></div>
       {projects === null ? <div className="legacy-empty">Loading projects…</div> : projects.length ? <table className="tbl">
-        <thead><tr><th>Project</th><th>Group</th><th>Role</th><th>Progress</th><th>Due Date</th><th>Status</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Project</th><th>Group</th><th>Role</th><th>Progress</th><th>End Date</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>{projects.map((project) => {
-          const complete = project.tasks.filter((task) => task.status === 'completed').length;
-          const progress = project.tasks.length ? Math.round(complete / project.tasks.length * 100) : 0;
+          const { progress, health } = dashboardProjectProgress(project.tasks, project.status);
           const isLeader = project.members?.[0]?.role === 'Project_Leader';
           return <tr key={project.id}>
             <td><strong>{project.title}</strong></td><td>{project.group?.name ?? 'Independent'}</td>
             <td><span className="bdg ac">{isLeader ? 'Leader' : 'Member'}</span></td>
-            <td><div className="progress-cell"><div className="pb-wrap"><div className="pb" style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div></td>
-            <td>{formatDateOnly(project.deadline)}</td><td><span className="bdg g">{project.status}</span></td>
+            <td><div className="progress-cell"><div className="pb-wrap"><div className={`pb ${health.tone}`} style={{ width: `${progress}%` }} /></div><span className={`pb-val ${health.tone}`}>{progress}%</span></div></td>
+            <td>{formatDateOnly(project.deadline)}</td><td><span className={`bdg ${health.tone}`}>{health.label}</span></td>
             <td><div className="task-actions"><button className="btn-o btn-sm" onClick={() => void openTasks(project.id)}>{selectedProjectId === project.id ? 'Refresh Tasks' : isLeader ? 'Manage Tasks' : 'View Tasks'}</button>{isLeader ? <button type="button" className="btn-o btn-sm btn-red" disabled={saving} onClick={() => setConfirmation({ title: 'Delete project?', description: `“${project.title}” and all of its tasks will be permanently deleted.`, confirmLabel: 'Delete project', destructive: true, action: () => void deleteProject(project) })}>Delete</button> : null}</div></td>
           </tr>;
         })}</tbody>
@@ -152,26 +158,24 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
     {selectedProjectId ? <section className="cc task-manager">
       <div className="cc-head"><div><h3>{selectedProject?.title ?? 'Project'} Tasks</h3><span className="task-manager-subtitle">{leader ? 'Create and manage tasks for this project.' : 'View tasks assigned within this project.'}</span></div><div className="ph-acts">{leader ? <button className="btn-o btn-sm" onClick={() => setEditing((value) => !value)}>{editing ? 'Cancel Edit' : 'Edit Project'}</button> : null}<button className="btn-o btn-sm" onClick={() => { setSelectedProjectId(''); setDetail(null); setEditing(false); }}>Close</button></div></div>
       {loadingDetail ? <div className="legacy-empty">Loading project tasks…</div> : detail ? <>
-        {editing && leader ? <form className="task-create-form" onSubmit={(event) => void saveEdit(event)}>
-          <input className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={detail.title} placeholder="Project title" />
-          <input className="ifield" name="description" required defaultValue={detail.description} placeholder="Project description" />
-          <DateField name="deadline" label="Project due date" defaultValue={detail.deadline ? dateOnlyKey(detail.deadline) : ''} />
-          <select className="legacy-select" name="status" defaultValue={detail.status}><option value="active">Active</option><option value="completed">Completed</option><option value="archived">Archived</option><option value="on_hold">On hold</option></select>
+        {editing && leader ? <form className="task-create-form project-edit-form" aria-label="Edit project" onSubmit={(event) => void saveEdit(event)}>
+          <div className="task-form-field"><label className="lbl" htmlFor="project-edit-title">Project Title</label><input id="project-edit-title" className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={detail.title} placeholder="Project title" /></div>
+          <div className="task-form-field"><label className="lbl" htmlFor="project-edit-start-date">Start Date</label><DateField id="project-edit-start-date" name="startDate" label="Project start date" defaultValue={detail.startDate ? dateOnlyKey(detail.startDate) : ''} showJump={false} /></div>
+          <div className="task-form-field"><label className="lbl" htmlFor="project-edit-end-date">End Date</label><DateField id="project-edit-end-date" name="deadline" label="Project end date" defaultValue={detail.deadline ? dateOnlyKey(detail.deadline) : ''} showJump={false} /></div>
           <button className="btn btn-sm" disabled={saving}>{saving ? 'Saving…' : 'Save Changes'}</button>
         </form> : null}
         {leader ? <form className="task-create-form task-entry-form" aria-label="Create task" key={createFormKey} onSubmit={(event) => void createTask(event)}>
           <div className="task-form-field"><label className="lbl" htmlFor="task-create-title">Task Title</label><input id="task-create-title" className="ifield" name="title" required minLength={2} maxLength={180} placeholder="Task title" /></div>
           <div className="task-form-field"><label className="lbl" htmlFor="task-create-start-date">Start Date</label><DateField id="task-create-start-date" name="startDate" label="Task start date" showJump={false} /></div>
           <div className="task-form-field"><label className="lbl" htmlFor="task-create-deadline">Due Date</label><DateField id="task-create-deadline" name="deadline" label="Task due date" showJump={false} /></div>
-          <div className="task-form-field"><label className="lbl" htmlFor="task-create-priority">Priority</label><select id="task-create-priority" className="legacy-select" name="priority" defaultValue="medium"><option value="low">Low priority</option><option value="medium">Medium</option><option value="high">High priority</option></select></div>
           <div className="task-form-field"><label className="lbl" htmlFor="task-create-assignee">Assigned Member</label><select id="task-create-assignee" className="legacy-select" name="assigneeId" defaultValue=""><option value="">Assign later</option>{projectMembers.map((member) => <option value={member.userId} key={member.userId}>{member.user.fullName}</option>)}</select></div>
           <button className="btn btn-sm" disabled={saving}>{saving ? 'Saving…' : 'Create Task'}</button>
         </form> : null}
         {detail.tasks.length ? <table className="tbl">
           <thead><tr><th>Task</th><th>Assignee</th><th>Start Date</th><th>Due Date</th><th>Priority</th><th>Status</th>{leader ? <th>Actions</th> : null}</tr></thead>
           <tbody>{detail.tasks.map((task) => {
-            const due = deadlineHealth(task.deadline);
-            const priority = priorityHealth(task.priority);
+            const due = deadlineHealth(task.deadline, today);
+            const priority = taskPriorityHealth(task, today);
             const status = taskStatusHealth(task.status);
             const needsReassignment = task.status !== 'completed' && (task.risk?.level === 'high' || (due?.days ?? 0) < 0);
             const currentAssignee = task.assignments[0]?.assigneeId;
@@ -198,7 +202,6 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
           <label className="lbl" htmlFor="task-edit-title">Task Title</label><input id="task-edit-title" className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={editingTask.task.title} />
           <label className="lbl" htmlFor="task-edit-start-date">Start Date</label><DateField id="task-edit-start-date" name="startDate" label="Task start date" defaultValue={editingTask.task.startDate ? dateOnlyKey(editingTask.task.startDate) : ''} showJump={false} />
           <label className="lbl" htmlFor="task-edit-deadline">Due Date</label><DateField id="task-edit-deadline" name="deadline" label="Task due date" defaultValue={editingTask.task.deadline ? dateOnlyKey(editingTask.task.deadline) : ''} showJump={false} />
-          <label className="lbl" htmlFor="task-edit-priority">Priority</label><select id="task-edit-priority" className="ifield" name="priority" defaultValue={editingTask.task.priority}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
         </> : <p className="muted">Choose a replacement project member. They will receive a task notification.</p>}
         <label className="lbl" htmlFor="task-edit-assignee">{editingTask.mode === 'reassign' ? 'New Assignee' : 'Assigned Member'}</label>
         <select id="task-edit-assignee" className="ifield" name="assigneeId" required={editingTask.mode === 'reassign'} defaultValue={editingTask.mode === 'reassign' ? '' : editingTask.task.assignments[0]?.assigneeId ?? ''}>
