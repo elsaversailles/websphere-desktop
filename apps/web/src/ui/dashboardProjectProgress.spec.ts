@@ -25,4 +25,16 @@ describe('dashboard project progress', () => {
     const tasks = [...Array.from({ length: 200 }, () => ({ status: 'completed' })), { status: 'for_review' }];
     expect(dashboardProjectProgress(tasks, 'active')).toEqual({ progress: 99, health: { label: 'For Review', tone: 'ac' } });
   });
+
+  it('derives completion from tasks even when the stored project status is active', () => {
+    expect(dashboardProjectProgress([{ status: 'completed' }, { status: 'completed' }], 'active'))
+      .toEqual({ progress: 100, health: { label: 'Completed', tone: 'g' } });
+  });
+
+  it('reflects reopened and newly added tasks without retaining a stale completed label', () => {
+    expect(dashboardProjectProgress([{ status: 'ongoing' }], 'completed'))
+      .toEqual({ progress: 50, health: { label: 'In Progress', tone: 'y' } });
+    expect(dashboardProjectProgress([{ status: 'completed' }, { status: 'pending' }], 'completed'))
+      .toEqual({ progress: 50, health: { label: 'In Progress', tone: 'y' } });
+  });
 });

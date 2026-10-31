@@ -10,7 +10,7 @@ import { useLocalDay } from './useLocalDay';
 import { upcomingDeadlines } from './upcomingDeadlines';
 
 type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string } | null; tasks: Array<{ status: string }>; _count?: { members: number } };
-type DashboardTask = { id: string; title: string; status: string; priority?: string | null; deadline?: string | null; project?: { id: string; title: string } | null };
+type DashboardTask = { id: string; title: string; status: string; priority?: string | null; deadline?: string | null; completedAt?: string | null; project?: { id: string; title: string } | null };
 type DashboardNotification = { id: string; message: string; read: boolean; createdAt?: string; relatedId?: string | null; relatedType?: string | null };
 type DashboardActivity = { id: string; type: string; fromValue?: string | null; toValue?: string | null; createdAt: string; taskTitle?: string | null; projectTitle: string; actor?: { id: string; fullName: string; avatarUrl?: string | null } | null };
 type DashboardTeammate = { id: string; fullName: string; avatarUrl?: string | null; role: string; groupName: string; online: boolean };
@@ -100,8 +100,8 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
     return upcomingDeadlines(data?.tasks ?? [], localDay);
   }, [data, localDay]);
 
-  /** The panel header says "All active projects", so archived and completed work is filtered out. */
-  const activeProjects = useMemo(() => (data?.projects ?? []).filter((project) => project.status === 'active'), [data]);
+  /** Task-derived completion keeps the KPI and overview in sync with the project tables. */
+  const activeProjects = useMemo(() => (data?.projects ?? []).filter((project) => project.status !== 'archived' && project.status !== 'on_hold' && dashboardProjectProgress(project.tasks, project.status).progress < 100), [data]);
   const onlineCount = useMemo(() => (data?.online ?? []).filter((teammate) => teammate.online).length, [data]);
 
   async function openCreateDialog() {
@@ -169,7 +169,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
       <label className="lbl">Team Members</label><fieldset className="project-member-picker" disabled={!createGroupHub}><legend className="sr-only">Team Members</legend>{createGroupHub ? createGroupHub.group.members.map((member) => <label className="project-member-option" key={member.userId}><input type="checkbox" checked={selectedMemberIds.includes(member.userId)} onChange={() => toggleProjectMember(member.userId)} /><span>{member.user.fullName}</span></label>) : <span>Add members by selecting a project group first.</span>}</fieldset>
       <label className="lbl">Task Assignment Per Member</label><div className={`project-responsibilities ${selectedMemberIds.length ? '' : 'empty'}`}>{selectedMemberIds.length ? createGroupHub?.group.members.filter((member) => selectedMemberIds.includes(member.userId)).map((member) => <label key={member.userId}><span>{member.user.fullName}</span><input className="ifield" name={`responsibility-${member.userId}`} minLength={2} maxLength={180} placeholder={`Assign ${member.user.fullName} a task`} /></label>) : <span>Add members first, then assign tasks here.</span>}</div>
       <label className="lbl" htmlFor="external-tools">External Tools Will Be Used</label><select className="ifield project-tools-select" id="external-tools" name="externalTools" defaultValue="" aria-label="External tools used for this project"><option value="" disabled>Select external tools</option><option value="google">Google Workspace</option><option value="microsoft">Microsoft 365</option><option value="trello">Trello</option><option value="asana">Asana</option></select>
-      <div className="project-date-grid"><div><label className="lbl" htmlFor="project-start-date">Start Date</label><DateField id="project-start-date" name="startDate" label="Project start date" showJump={false} /></div><div><label className="lbl" htmlFor="project-deadline">End Date / Deadline</label><DateField id="project-deadline" name="deadline" label="Project due date" showJump={false} /></div></div>
+      <div className="project-date-grid"><div><label className="lbl" htmlFor="project-start-date">Start Date</label><DateField id="project-start-date" name="startDate" label="Project start date" showJump={false} /></div><div><label className="lbl" htmlFor="project-deadline">End Date</label><DateField id="project-deadline" name="deadline" label="Project end date" showJump={false} /></div></div>
       <label className="lbl" htmlFor="project-description">Project Description</label><textarea className="ifield project-description" id="project-description" name="description" required placeholder="Describe the project goals and scope…" />
       <div className="modal-acts project-modal-actions"><button type="button" className="btn-o" onClick={() => setCreateOpen(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Creating…' : 'Create Project'}</button></div>
     </form></div></div> : null}
@@ -179,7 +179,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
       <label className="lbl" htmlFor="support-details">Details</label><textarea className="ifield support-details" id="support-details" name="body" required minLength={1} placeholder="Include anything that will help us understand the request." />
       <div className="modal-acts"><button type="button" className="btn-o" onClick={() => setHelpOpen(false)}>Cancel</button><button className="btn" disabled={helpSaving}>{helpSaving ? 'Sending…' : 'Send request'}</button></div>
     </form></div></div> : null}
-    <div className="krow c3"><Kpi label="Active Projects" value={data.glance.activeProjects} tone="grn" /><Kpi label="Pending Tasks" value={data.glance.pendingTasks} tone="yel" /><Kpi label="Ideas Submitted" value={data.glance.ideasSubmitted} /></div>
+    <div className="krow c3"><Kpi label="Active Projects" value={activeProjects.length} tone="grn" /><Kpi label="Pending Tasks" value={data.glance.pendingTasks} tone="yel" /><Kpi label="Ideas Submitted" value={data.glance.ideasSubmitted} /></div>
     <div className="dashboard-main-grid">
       <div className="g2 dashboard-tables">
         <DataCard title="Recent Projects" action="View All" onAction={() => onPage('projects')}>

@@ -1,38 +1,29 @@
 type ToolLogoSize = 'xs' | 'sm' | 'md' | 'lg';
 
-function normalizedProvider(provider?: string | null, name?: string | null) {
+const TOOL_ICONS = {
+  google: { label: 'Google Drive', src: '/icons/tools/google-drive.png' },
+  forms: { label: 'Google Forms', src: '/icons/tools/google-forms.png' },
+  microsoft: { label: 'Microsoft 365', src: '/icons/tools/office.svg' },
+  word: { label: 'Microsoft Word', src: '/icons/tools/word.svg' },
+  excel: { label: 'Microsoft Excel', src: '/icons/tools/excel.svg' },
+  canva: { label: 'Canva', src: '/icons/tools/canva.png' },
+  trello: { label: 'Trello', src: '/icons/tools/trello.svg' },
+  asana: { label: 'Asana', src: '/icons/tools/asana.svg' },
+} as const;
+type ToolIcon = keyof typeof TOOL_ICONS | 'file';
+
+function normalizedProvider(provider?: string | null, name?: string | null): ToolIcon {
   const value = `${provider ?? ''} ${name ?? ''}`.toLowerCase();
+  // Resolve the individual app before the shared Google/Microsoft OAuth provider.
+  if (value.includes('word')) return 'word';
+  if (value.includes('excel')) return 'excel';
+  if (value.includes('forms')) return 'forms';
   if (value.includes('google')) return 'google';
-  if (value.includes('microsoft') || value.includes('office') || value.includes('word') || value.includes('excel') || value.includes('powerpoint')) return 'microsoft';
+  if (value.includes('microsoft') || value.includes('office') || value.includes('powerpoint')) return 'microsoft';
   if (value.includes('canva')) return 'canva';
   if (value.includes('trello')) return 'trello';
   if (value.includes('asana')) return 'asana';
-  if (value.includes('notion')) return 'notion';
   return 'file';
-}
-
-function GoogleDriveMark() {
-  return <svg viewBox="0 0 48 42" aria-hidden="true"><path fill="#0F9D58" d="M16.6 1.6 1.7 27.4l7.5 13h15L31.7 27z"/><path fill="#4285F4" d="m16.6 1.6 7.6 13h14.9L31.6 1.6z"/><path fill="#F4B400" d="M24.2 40.4h15L46.7 27H31.7z"/></svg>;
-}
-
-function MicrosoftMark() {
-  return <svg viewBox="0 0 40 40" aria-hidden="true"><path fill="#F25022" d="M2 2h17v17H2z"/><path fill="#7FBA00" d="M21 2h17v17H21z"/><path fill="#00A4EF" d="M2 21h17v17H2z"/><path fill="#FFB900" d="M21 21h17v17H21z"/></svg>;
-}
-
-function CanvaMark() {
-  return <svg viewBox="0 0 48 48" aria-hidden="true"><defs><linearGradient id="canva-gradient" x1="0" x2="1" y1="1" y2="0"><stop stopColor="#00C4CC"/><stop offset="1" stopColor="#7D2AE8"/></linearGradient></defs><circle cx="24" cy="24" r="23" fill="url(#canva-gradient)"/><text x="24" y="30" fill="#fff" fontFamily="Georgia,serif" fontSize="25" fontStyle="italic" fontWeight="700" textAnchor="middle">C</text></svg>;
-}
-
-function TrelloMark() {
-  return <svg viewBox="0 0 48 48" aria-hidden="true"><rect width="48" height="48" rx="8" fill="#0C66E4"/><rect x="10" y="10" width="12" height="27" rx="3" fill="#fff"/><rect x="27" y="10" width="11" height="18" rx="3" fill="#fff"/></svg>;
-}
-
-function AsanaMark() {
-  return <svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="14" r="9" fill="#F06A6A"/><circle cx="14" cy="31" r="9" fill="#F06A6A"/><circle cx="34" cy="31" r="9" fill="#F06A6A"/></svg>;
-}
-
-function NotionMark() {
-  return <svg viewBox="0 0 48 48" aria-hidden="true"><rect x="4" y="4" width="40" height="40" rx="5" fill="#fff" stroke="#111" strokeWidth="3"/><text x="24" y="35" fill="#111" fontFamily="Georgia,serif" fontSize="31" fontWeight="700" textAnchor="middle">N</text></svg>;
 }
 
 function FileMark() {
@@ -41,7 +32,9 @@ function FileMark() {
 
 export function ToolLogo({ provider, name, size = 'md', className = '' }: { provider?: string | null; name?: string | null; size?: ToolLogoSize; className?: string }) {
   const kind = normalizedProvider(provider, name);
-  const label = name || ({ google: 'Google Drive', microsoft: 'Microsoft 365', canva: 'Canva', trello: 'Trello', asana: 'Asana', notion: 'Notion', file: 'File' } as const)[kind];
-  const mark = kind === 'google' ? <GoogleDriveMark /> : kind === 'microsoft' ? <MicrosoftMark /> : kind === 'canva' ? <CanvaMark /> : kind === 'trello' ? <TrelloMark /> : kind === 'asana' ? <AsanaMark /> : kind === 'notion' ? <NotionMark /> : <FileMark />;
-  return <span className={`tool-logo tool-logo-${kind} tool-logo-${size} ${className}`.trim()} role="img" aria-label={`${label} logo`}>{mark}</span>;
+  const icon = kind === 'file' ? null : TOOL_ICONS[kind];
+  const label = name || icon?.label || 'File';
+  return <span className={`tool-logo tool-logo-${kind} tool-logo-${size} ${className}`.trim()} role="img" aria-label={`${label} logo`}>
+    {icon ? <img src={icon.src} alt="" draggable={false} /> : <FileMark />}
+  </span>;
 }

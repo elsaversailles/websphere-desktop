@@ -13,8 +13,7 @@ export function dashboardProjectProgress(tasks: Array<{ status: string }>, proje
   // Rounding must not make an unfinished project look complete.
   const progress = average < 100 ? Math.min(99, Math.round(average)) : 100;
   let health: Health;
-  if (projectStatus === 'completed') health = { tone: 'g', label: 'Completed' };
-  else if (projectStatus === 'archived') health = { tone: 'ac', label: 'Archived' };
+  if (projectStatus === 'archived') health = { tone: 'ac', label: 'Archived' };
   else if (projectStatus === 'on_hold') health = { tone: 'y', label: 'On Hold' };
   else if (average === 100) health = { tone: 'g', label: 'Completed' };
   else if (average >= 75) health = { tone: 'ac', label: 'For Review' };
