@@ -1198,7 +1198,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       include: { task: { select: { id: true, title: true } }, project: { select: { id: true, title: true } } },
     });
     const actorIds = [...new Set(events.map((event: any) => event.actorId))];
-    const actors = actorIds.length ? await this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, fullName: true, avatarUrl: true } }) : [];
+    const actors = actorIds.length ? await this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, fullName: true, avatarUrl: true, preference: { select: { profileVisibility: true } } } }) : [];
     return events.map((event: any) => ({
       id: event.id,
       type: event.type,
@@ -1209,7 +1209,10 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       taskTitle: event.task?.title ?? null,
       projectId: event.projectId,
       projectTitle: event.project.title,
-      actor: actors.find((actor: any) => actor.id === event.actorId) ?? null,
+      actor: (() => {
+        const actor = actors.find((item: any) => item.id === event.actorId);
+        return actor ? { id: actor.id, fullName: actor.fullName, avatarUrl: actor.id !== caller.id && actor.preference?.profileVisibility === false ? null : actor.avatarUrl } : null;
+      })(),
     }));
   }
   async markRead(caller: Caller, id: string) { return this.prisma.notification.updateMany({ where: { id, userId: caller.id }, data: { read: true } }); }

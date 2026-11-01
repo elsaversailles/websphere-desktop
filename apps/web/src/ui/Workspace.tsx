@@ -27,7 +27,7 @@ const userSections: Array<{ title: string; links: Link[] }> = [
   { title: 'Account', links: [{ id: 'profile', label: 'Profile & Settings', icon: '♙' }, { id: 'support', label: 'My Support Requests', icon: '?' }] },
 ];
 const adminSections: Array<{ title: string; links: Link[] }> = [
-  { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'archive', label: 'Archive Accounts', icon: '🗄' }, { id: 'notifications', label: 'Notifications', icon: '♧' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
+  { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'archive', label: 'Archived Accounts', icon: '🗄' }, { id: 'notifications', label: 'Notifications', icon: '♧' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
 ];
 
 // The sidebar sections are the source of truth for which pages a role may land on, so a restored
@@ -140,7 +140,9 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     socket.on('call:invite', (event: { groupId: string; kind: CallKind; initiatorUserId: string }) => {
       if (event.initiatorUserId !== session.user.id) setIncomingCall({ groupId: event.groupId, kind: event.kind });
     });
-    socket.on('notification:new', (notification: { message?: string }) => { if (notification?.message) notify(notification.message); });
+    socket.on('notification:new', (notification: { message?: string; relatedType?: string | null }) => {
+      if (notification?.message && notification.relatedType?.trim().toLowerCase() !== 'chat') notify(notification.message);
+    });
     return () => { socket.disconnect(); };
   }, [session.access, session.user.id, notify]);
 
@@ -389,7 +391,7 @@ function AdminArchive({ notify }: { notify: (message: string) => void }) {
     } catch (error) { notify((error as Error).message); }
     finally { setRestoringId(null); }
   }
-  return <section className="sp on"><div className="ph"><div><h2>Archive Accounts</h2><p className="ph-sub">Archived accounts are hidden from Account Management but their records are kept. Restore an account to return it to the active list.</p></div></div><div className="cc"><div className="cc-head"><h3>Archived Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search archived by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search archived accounts by name or email" /></div>{users.length ? users.map((user) => <div className="urow" key={user.id}><span className={`ava tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}{user.archivedAt ? ` · archived ${new Date(user.archivedAt).toLocaleDateString()}` : ''}</small></span><button type="button" className="btn-o btn-sm" disabled={restoringId === user.id} onClick={() => void restore(user)}>{restoringId === user.id ? 'Restoring…' : 'Restore'}</button></div>) : <div className="empty-message">{loading ? 'Loading archived accounts…' : term ? `No archived accounts match “${term}”.` : 'No accounts have been archived yet.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div></section>;
+  return <section className="sp on"><div className="ph"><div><h2>Archived Accounts</h2><p className="ph-sub">Archived accounts are hidden from Account Management but their records are kept. Restore an account to return it to the active list.</p></div></div><div className="cc"><div className="cc-head"><h3>Archived Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search archived by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search archived accounts by name or email" /></div>{users.length ? users.map((user) => <div className="urow" key={user.id}><span className={`ava tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}{user.archivedAt ? ` · archived ${new Date(user.archivedAt).toLocaleDateString()}` : ''}</small></span><button type="button" className="btn-o btn-sm" disabled={restoringId === user.id} onClick={() => void restore(user)}>{restoringId === user.id ? 'Restoring…' : 'Restore'}</button></div>) : <div className="empty-message">{loading ? 'Loading archived accounts…' : term ? `No archived accounts match “${term}”.` : 'No accounts have been archived yet.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div></section>;
 }
 
 function AdminUserRow({ user, onEdit, onArchive, onDeactivate, onActivate }: { user: AdminUser; onEdit: () => void; onArchive: () => void; onDeactivate: () => void; onActivate: () => void }) {
@@ -452,7 +454,7 @@ function AdminUserArchiveModal({ user, onClose, onArchived, notify }: { user: Ad
   return <div className="logout-ov" onMouseDown={(event) => { if (event.target === event.currentTarget && !working) onClose(); }}>
     <div className="logout-box" role="dialog" aria-modal="true" aria-labelledby="ur-arch-title">
       <h3 id="ur-arch-title" className="ur-edit-title">Archive account?</h3>
-      <p className="muted">This moves <strong>{user.fullName}</strong> ({user.email}) to Archive Accounts and signs them out of every device. Their records are kept, and you can restore the account later.</p>
+      <p className="muted">This moves <strong>{user.fullName}</strong> ({user.email}) to Archived Accounts and signs them out of every device. Their records are kept, and you can restore the account later.</p>
       <div className="ur-edit-actions"><button type="button" className="btn-o" disabled={working} onClick={onClose}>Cancel</button><button type="button" className="btn btn-red" disabled={working} onClick={() => void confirmArchive()}>{working ? 'Archiving…' : 'Archive account'}</button></div>
     </div>
   </div>;
