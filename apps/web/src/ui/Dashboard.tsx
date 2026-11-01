@@ -9,6 +9,13 @@ import { dashboardProjectProgress } from './dashboardProjectProgress';
 import { useLocalDay } from './useLocalDay';
 import { upcomingDeadlines } from './upcomingDeadlines';
 
+function DashboardAvatar({ name, id, avatarUrl, className }: { name: string; id: string; avatarUrl?: string | null; className: string }) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const classes = `ava ${className} tone-${avatarTone(id)}`;
+  if (avatarUrl && avatarUrl !== failedUrl) return <img className={`${classes} ava-image`} src={avatarUrl} alt="" aria-hidden="true" onError={() => setFailedUrl(avatarUrl)} />;
+  return <span className={classes} aria-hidden="true">{initials(name)}</span>;
+}
+
 type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string } | null; tasks: Array<{ status: string }>; _count?: { members: number } };
 type DashboardTask = { id: string; title: string; status: string; priority?: string | null; deadline?: string | null; completedAt?: string | null; project?: { id: string; title: string } | null };
 type DashboardNotification = { id: string; message: string; read: boolean; createdAt?: string; relatedId?: string | null; relatedType?: string | null };
@@ -183,11 +190,10 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
     <div className="dashboard-main-grid">
       <div className="g2 dashboard-tables">
         <DataCard title="Recent Projects" action="View All" onAction={() => onPage('projects')}>
-          {data.projects.length ? <table className="tbl"><thead><tr><th>Project</th><th>Course</th><th>Progress</th><th>Status</th></tr></thead><tbody>{data.projects.slice(0, 8).map((project) => {
+          {data.projects.length ? <table className="tbl"><thead><tr><th>Project</th><th>Progress</th><th>Status</th></tr></thead><tbody>{data.projects.slice(0, 8).map((project) => {
             const { progress, health } = dashboardProjectProgress(project.tasks, project.status);
             return <tr key={project.id}>
               <td className="table-title">{project.title}</td>
-              <td className="table-sub">{project.group?.name ?? 'Independent'}</td>
               <td><div className="progress-cell"><div className="pb-wrap"><div className={`pb ${health.tone}`} style={{ width: `${progress}%` }} /></div><span className={`pb-val ${health.tone}`}>{progress}%</span></div></td>
               <td><span className={`bdg ${health.tone}`}>{health.label}</span></td>
             </tr>;
@@ -236,7 +242,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
           const actorName = event.actor?.fullName ?? 'A teammate';
           const described = describeActivity(event);
           return <div className="activity-row" key={event.id}>
-            <span className={`activity-avatar ava tone-${avatarTone(event.actor?.id ?? actorName)}`} aria-hidden="true">{initials(actorName)}</span>
+            <DashboardAvatar className="activity-avatar" id={event.actor?.id ?? actorName} name={actorName} avatarUrl={event.actor?.avatarUrl} />
             <span className="activity-copy"><strong>{actorName} <span className="activity-verb">{described.verb}</span> {described.target}</strong><small>{relativeTime(event.createdAt)}</small></span>
           </div>;
         })}</div> : <Empty text="Your group activity will appear here once collaboration begins." />}
@@ -258,7 +264,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
       </DataCard>
       <DataCard title="Online" note={onlineCount ? `${onlineCount} now online` : 'Now online'}>
         {data.online?.length ? <div className="roster-list">{data.online.map((teammate) => <div className="roster-row" key={teammate.id}>
-          <span className={`ava roster-avatar tone-${avatarTone(teammate.id)}`} aria-hidden="true">{initials(teammate.fullName)}</span>
+          <DashboardAvatar className="roster-avatar" id={teammate.id} name={teammate.fullName} avatarUrl={teammate.avatarUrl} />
           <span className="roster-copy"><strong>{teammate.fullName}</strong><small>{teammate.groupName}{teammate.role === 'Project_Leader' ? ' · Leader' : ''}</small></span>
           <span className={`roster-status ${teammate.online ? 'on' : ''}`} title={teammate.online ? 'Online' : 'Offline'}><span className="sr-only">{teammate.online ? 'Online' : 'Offline'}</span></span>
         </div>)}</div> : <Empty text="Group members will appear here after you invite them." />}

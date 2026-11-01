@@ -5437,7 +5437,7 @@ function toast(msg,type='info'){
   const i={success:'&#10003;',error:'&#10005;',warning:'&#9888;',info:'&#8505;'};
   const t=document.createElement('div');
   t.innerHTML=`<span style="font-size:15px;">${i[type]||'ℹ'}</span><span>${msg}</span>`;
-  Object.assign(t.style,{position:'fixed',bottom:'24px',right:'24px',zIndex:'9999',
+  Object.assign(t.style,{position:'fixed',top:'24px',right:'24px',zIndex:'9999',
     background:'rgba(234,246,252,.98)',border:`1px solid ${c[type]}`,borderLeft:`3px solid ${c[type]}`,
     color:'#0B3A52',padding:'12px 20px',borderRadius:'10px',fontFamily:"'Outfit',sans-serif",
     fontSize:'13px',fontWeight:'600',boxShadow:'0 8px 32px rgba(11,133,178,.12)',
