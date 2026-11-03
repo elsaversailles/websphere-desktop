@@ -486,7 +486,7 @@ export function IntegrationsPage({ notify }: { notify: Notice }) {
   const [confirmation, setConfirmation] = useState<ConfirmAction | null>(null);
   async function loadCatalog() {
     const catalog = await request<NonNullable<typeof tools>>('/integrations/catalog');
-    setTools(catalog.filter((tool) => tool.provider !== 'notion'));
+    setTools(catalog.filter((tool) => !['notion', 'canva'].includes(tool.provider)));
   }
   useEffect(() => {
     void loadCatalog().catch((error: Error) => notify(error.message));
@@ -502,7 +502,7 @@ export function IntegrationsPage({ notify }: { notify: Notice }) {
     finally { setDisconnecting(null); }
   }
   async function connect(tool: { provider: string; name: string }) {
-    if (!['google', 'microsoft', 'trello', 'asana', 'canva'].includes(tool.provider)) { notify(`${tool.name} is not available yet.`); return; }
+    if (!['google', 'microsoft', 'trello', 'asana'].includes(tool.provider)) { notify(`${tool.name} is not available yet.`); return; }
     setConnecting(tool.provider);
     try {
       const returnUrl = new URL('/integrations', window.location.origin).toString();
@@ -527,7 +527,7 @@ export function IntegrationsPage({ notify }: { notify: Notice }) {
   const lastSyncedAt = connected.map((connection) => connection.lastSyncedAt).filter((value): value is string => Boolean(value)).sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
   const sections = useMemo(() => {
     const entries = (tools ?? []).flatMap((tool) => {
-      if (tool.provider === 'microsoft') return [tool, ...[{ name: 'Microsoft Word', launchUrl: 'https://www.office.com/launch/word' }, { name: 'Microsoft Excel', launchUrl: 'https://www.office.com/launch/excel' }].map((app) => ({ ...tool, ...app, id: `${tool.id}-${app.name}`, sharedName: tool.name }))];
+      if (tool.provider === 'microsoft') return [{ name: 'Microsoft Word', launchUrl: 'https://www.office.com/launch/word' }, { name: 'Microsoft Excel', launchUrl: 'https://www.office.com/launch/excel' }].map((app) => ({ ...tool, ...app, id: `${tool.id}-${app.name}`, sharedName: tool.name }));
       if (tool.provider === 'google') return [tool, { ...tool, id: `${tool.id}-forms`, name: 'Google Forms', launchUrl: 'https://forms.google.com/', sharedName: tool.name }];
       return [tool];
     });
