@@ -22,6 +22,7 @@ type TeamMemberWeek = { id: string; fullName: string; role: string; contribution
 type TeamPerformanceWeek = { periodStart: string; periodEnd: string; label: string; members: TeamMemberWeek[]; activeCount: number; inactiveCount: number };
 type TeamMemberSummary = { id: string; fullName: string; role: string; totalContributions: number; totalCompleted: number; activeWeeks: number; performance: number; active: boolean };
 type TeamPerformance = { weeks: TeamPerformanceWeek[]; members: TeamMemberSummary[]; activeMembers: number; inactiveMembers: number };
+type AnalyticsProject = { members: Array<{ role: string; user: { id: string; fullName: string } }>; tasks: Array<{ status: string; assignments: Array<{ assigneeId: string }> }> };
 type ToolUsage = { provider: string; name: string; actions: number; usagePercent: number };
 type WorkflowSummary = { summary: string; recommendations: string[]; insights: Array<{ tone: 'great' | 'notice' | 'action'; label: string; text: string }> };
 type TaskRisk = { taskId: string; title: string; status: string; deadline?: string | null; projectTitle: string; assignees: string[]; score: number; level: 'high' | 'medium' | 'low'; predictedCompletion: string; delayDays: number };
@@ -211,18 +212,28 @@ export function ProjectsAnalyticsPage({ kind, notify }: { kind: 'workflow' | 'pr
   const [trends, setTrends] = useState<{ periods: Array<{ periodStart: string; tasksCompleted: number; progress: number }>; trend: string } | null>(null);
   const [summary, setSummary] = useState<WorkflowSummary | null>(null);
   const [team, setTeam] = useState<TeamPerformance | null>(null);
+  const [analyticsProject, setAnalyticsProject] = useState<AnalyticsProject | null>(null);
   const [tools, setTools] = useState<ToolUsage[] | null>(null);
   useEffect(() => { void request<Project[]>('/projects').then((next) => { setProjects(next); setSelected((current) => current || next[0]?.id || ''); }).catch((error: Error) => notify(error.message)); }, [notify]);
   useEffect(() => {
-    if (!selected) { setAnalytics(null); setTrends(null); setSummary(null); setTeam(null); setTools(null); return; }
+    setAnalyticsProject(null); setTeam(null);
+    if (!selected) { setAnalytics(null); setTrends(null); setSummary(null); setTools(null); return; }
+    let current = true;
+    void request<AnalyticsProject>(`/projects/${selected}`).then((project) => { if (current) setAnalyticsProject(project); }).catch((error: Error) => { if (current) notify(error.message); });
     void request(`/projects/${selected}/analytics`).then(setAnalytics).catch((error: Error) => notify(error.message));
     void request<{ periods: Array<{ periodStart: string; tasksCompleted: number; progress: number }>; trend: string }>(`/projects/${selected}/analytics/trends`).then(setTrends).catch(() => setTrends(null));
     void request<WorkflowSummary>(`/projects/${selected}/analytics/summary`).then(setSummary).catch(() => setSummary(null));
-    void request<TeamPerformance>(`/projects/${selected}/analytics/team`).then(setTeam).catch(() => setTeam(null));
+    void request<TeamPerformance>(`/projects/${selected}/analytics/team`).then((result) => { if (current) setTeam(result); }).catch(() => { if (current) setTeam(null); });
     void request<ToolUsage[]>(`/projects/${selected}/analytics/tools`).then(setTools).catch(() => setTools(null));
+    return () => { current = false; };
   }, [selected, notify]);
+  const performanceMembers = analyticsProject?.members.map(({ user, role }) => {
+    const assigned = analyticsProject.tasks.filter((task) => task.assignments.some((assignment) => assignment.assigneeId === user.id));
+    const activity = team?.members.find((member) => member.id === user.id);
+    return { id: user.id, fullName: user.fullName, role, performance: assigned.length ? Math.round(assigned.filter((task) => task.status === 'completed').length / assigned.length * 100) : 0, totalContributions: activity?.totalContributions ?? 0 };
+  }) ?? null;
   const picker = <select className="legacy-select" value={selected} onChange={(event) => setSelected(event.target.value)}><option value="">Select a project</option>{projects?.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select>;
-  if (kind === 'workflow') return <section className="sp on workflow-analytics"><Head title="Workflow Analytics" action={picker} /><div className="krow c3 workflow-kpis"><Kpi value={analytics ? `${Math.round((analytics.overallEfficiency ?? 0) * 100)}%` : '—'} label="Overall Efficiency" /><Kpi value={analytics?.bottlenecks?.length ?? '—'} label="Bottlenecks Detected" tone="yel" /><Kpi value={analytics?.tasksCompleted ?? '—'} label="Tasks Completed" tone="grn" /></div><div className="g2 workflow-top-grid"><TrendChartCard trends={trends} /><TeamPerformanceCard team={team} /></div><BottleneckAnalysis stages={analytics?.stages ?? null} /><div className="g2 workflow-bottom-grid"><ToolUsageCard tools={tools} /><WorkflowSummaryCard summary={summary} /></div></section>;
+  if (kind === 'workflow') return <section className="sp on workflow-analytics"><Head title="Workflow Analytics" action={picker} /><div className="krow c3 workflow-kpis"><Kpi value={analytics ? `${Math.round((analytics.overallEfficiency ?? 0) * 100)}%` : '—'} label="Overall Efficiency" /><Kpi value={analytics?.bottlenecks?.length ?? '—'} label="Bottlenecks Detected" tone="yel" /><Kpi value={analytics?.tasksCompleted ?? '—'} label="Tasks Completed" tone="grn" /></div><div className="g2 workflow-top-grid"><TrendChartCard trends={trends} /><TeamPerformanceCard members={performanceMembers} /></div><BottleneckAnalysis stages={analytics?.stages ?? null} /><div className="g2 workflow-bottom-grid"><ToolUsageCard tools={tools} /><WorkflowSummaryCard summary={summary} /></div></section>;
   const taskRisks: TaskRisk[] = analytics?.taskRisks ?? [];
   const highRiskTasks = taskRisks.filter((task) => task.level === 'high');
   const delayedTasks = taskRisks.filter((task) => task.delayDays > 0);
@@ -705,12 +716,12 @@ function TrendChartCard({ trends }: { trends: { periods: Array<{ periodStart: st
     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { display: false }, title: { display: true, text: 'Weekly Task Completion', color: '#3789ad', font: { weight: 600 } } }, y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: 'rgba(168,216,240,.45)' } } } },
   }} /> : <Empty>Your project activity will appear here.</Empty>}</div>;
 }
-function TeamPerformanceCard({ team }: { team: TeamPerformance | null }) {
-  const hasData = !!team && team.members.length > 0;
-  const sortedMembers = hasData ? [...team!.members].sort((a, b) => b.performance - a.performance || b.totalContributions - a.totalContributions || a.fullName.localeCompare(b.fullName)) : [];
+function TeamPerformanceCard({ members }: { members: Array<Pick<TeamMemberSummary, 'id' | 'fullName' | 'role' | 'performance' | 'totalContributions'>> | null }) {
+  const hasData = !!members?.length;
+  const sortedMembers = members ? [...members].sort((a, b) => b.performance - a.performance || b.totalContributions - a.totalContributions || a.fullName.localeCompare(b.fullName)) : [];
   return <div className="cc team-performance">
     <div className="cc-head"><h3>Team Member Performance</h3></div>
-    {!hasData ? <Empty>Team member activity will appear here once your group records workflow activity.</Empty> : <>
+    {!hasData ? <Empty>{members ? 'No project members found.' : 'Project members will appear here when a project is selected.'}</Empty> : <>
       <div className="performance-list">{sortedMembers.map((member, index) => <div className={`performance-row tone-${index % 4}`} key={member.id}>
         <div className="performance-label"><span>{member.fullName}{member.role === 'Project_Leader' ? ' (Leader)' : ''}</span><strong>{member.performance}%</strong></div>
         <div className="performance-track"><i style={{ '--performance-progress': member.performance / 100 } as React.CSSProperties} /></div>

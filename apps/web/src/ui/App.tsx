@@ -28,6 +28,6 @@ export function App() {
   if (restoring) return <main className="loading-shell">Loading WebSphere…</main>;
   const signedOut = authEntry
     ? <AuthScreen onAuthenticated={setSession} notify={notify} initialMode={authEntry} onBack={() => setAuthEntry(null)} />
-    : <LandingPage onGetStarted={setAuthEntry} />;
+    : <LandingPage onGetStarted={setAuthEntry} notify={notify} />;
   return <><>{session ? <Workspace session={session} onSessionChange={setSession} onLogout={() => { setSession(null); setAuthEntry(null); }} notify={notify} /> : signedOut}</><Toast message={toast} onDismiss={() => setToast(null)} /></>;
 }
