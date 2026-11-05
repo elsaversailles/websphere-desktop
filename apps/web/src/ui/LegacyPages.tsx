@@ -3,7 +3,9 @@ import { io } from 'socket.io-client';
 import { ApiRequestError, apiUrl, getAccessToken, request, socketBaseUrl, type User } from '../api';
 import { disablePush, enablePush, pushStatus as getPushStatus, type PushStatus } from '../push';
 import { ChartCanvas } from './ChartCanvas';
+import { EventAnnouncementCard, type EventAnnouncement } from './EventAnnouncement';
 import { ToolLogo } from './ToolLogo';
+import { TrackerActivityIcon } from './TrackerActivityIcon';
 import { DateField } from './DateField';
 import { formatDateOnly, localDateFromKey, localDateKey } from './dates';
 import { badgeTone, taskPriorityHealth } from './health';
@@ -43,6 +45,14 @@ export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTa
     socket.on('notification:new', () => { void refreshTasks().catch(() => undefined); });
     return () => { socket.disconnect(); };
   }, [refreshTasks]);
+  const taskProjectIds = [...new Set((tasks ?? []).map((task) => task.project?.id).filter((id): id is string => Boolean(id)))].sort().join(',');
+  useEffect(() => {
+    if (!taskProjectIds) return;
+    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
+    socket.on('connect', () => taskProjectIds.split(',').forEach((id) => socket.emit('project:join', id, () => undefined)));
+    socket.on('task:updated', () => { void refreshTasks().catch(() => undefined); });
+    return () => { socket.disconnect(); };
+  }, [taskProjectIds, refreshTasks]);
   useEffect(() => { void request<Array<{ id: string; provider: string; status: string; lastSyncedAt?: string | null; tool: { name: string; category: string }; _count: { linkedResources: number; usage: number } }>>('/integrations/connections').then(setConnections).catch((error: Error) => notify(error.message)); }, [notify]);
   useEffect(() => {
     if (!focusedTaskId || !tasks?.some((task) => task.id === focusedTaskId)) return;
@@ -89,7 +99,7 @@ export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTa
       {connections === null ? <Empty>Loading connected tools…</Empty> : connectedTools.length ? <div className="g4 legacy-tool-progress">{connectedTools.map((connection) => <div className="mini-state" key={connection.id}>
         <strong>{connection.tool.name}</strong>
         <span>{connection._count.linkedResources} linked resource{connection._count.linkedResources === 1 ? '' : 's'}{connection.lastSyncedAt ? ` · synced ${new Date(connection.lastSyncedAt).toLocaleString()}` : ''}</span>
-      </div>)}</div> : <Empty>Connect an external tool to link its files to your tasks.</Empty>}
+      </div>)}</div> : <Empty>Linked files can be added from the Task Progress Tracker.</Empty>}
     </section>
   </section>;
 }
@@ -241,7 +251,23 @@ export function ProjectsAnalyticsPage({ kind, notify }: { kind: 'workflow' | 'pr
   return <section className="sp on predictive-monitoring"><Head title="Predictive Monitoring" action={picker} /><div className="krow c3 predictive-kpis"><Kpi value={analytics ? highRiskTasks.length : '—'} label="High Risk Tasks" tone="red" /><Kpi value={analytics ? delayedTasks.length : '—'} label="Possible Delays" tone="yel" /><Kpi value={analytics ? onTrackTasks.length : '—'} label="On-Track Tasks" tone="grn" /></div><div className="cc predictive-risk-assessment"><div className="cc-head"><h3>Risk Assessment by Task</h3></div>{analytics ? taskRisks.length ? <div className="risk-cards">{taskRisks.map((task) => <TaskRiskCard task={task} key={task.taskId} />)}</div> : <Empty>Tasks will appear here once they are added to this project.</Empty> : <Empty>Project risk and progress insights will appear here once you have project data.</Empty>}</div><PredictionAlerts tasks={taskRisks} recommendations={analytics?.recommendations ?? []} /><div className="cc predicted-timeline"><div className="cc-head"><h3>Predicted Timeline</h3></div>{analytics ? taskRisks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Assigned Member</th><th>Project</th><th>Original Deadline</th><th>Predicted Completion</th><th>Risk</th><th>Recommendation</th></tr></thead><tbody>{taskRisks.map((task) => <tr key={task.taskId}><td>{task.title}</td><td>{assigneeLabel(task)}</td><td>{task.projectTitle}</td><td>{formatDateOnly(task.deadline)}</td><td className={`timeline-${task.level}`}>{date(task.predictedCompletion)}{task.delayDays ? ` (${task.delayDays > 0 ? '+' : ''}${task.delayDays} days)` : ''}</td><td><Badge value={task.level} /></td><td>{taskRecommendation(task)}</td></tr>)}</tbody></table> : <Empty>Predicted timelines will appear here.</Empty> : <Empty>Predicted timelines will appear here.</Empty>}</div></section>;
 }
 
-export function NotificationsPage({ notify, onNotificationClick }: { notify: Notice; onNotificationClick: (notification: { id: string; read: boolean; relatedId?: string | null; relatedType?: string | null }) => void }) {
+export function AnnouncementsPage({ notify }: { notify: Notice }) {
+  const [items, setItems] = useState<EventAnnouncement[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const refresh = useCallback(async () => {
+    try { setItems(await request<EventAnnouncement[]>('/event-announcements')); setFailed(false); }
+    catch (error) { setFailed(true); notify(error instanceof Error ? error.message : 'Could not load announcements.'); }
+  }, [notify]);
+  useEffect(() => {
+    void refresh();
+    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
+    socket.on('notification:new', () => void refresh());
+    return () => { socket.disconnect(); };
+  }, [refresh]);
+  return <section className="sp on"><Head title="Announcements" /><div className="cc no-bottom announcements-page">{items === null ? <Empty>{failed ? 'Could not load announcements.' : 'Loading announcements…'}</Empty> : items.length ? <div className="announce-list">{items.map((event) => <EventAnnouncementCard event={event} key={event.id} />)}</div> : <Empty>Calendar events will appear here.</Empty>}</div></section>;
+}
+
+export function NotificationsPage({ notify, onNotificationClick }: { notify: Notice; onNotificationClick: (notification: { id: string; read: boolean; type?: string; relatedId?: string | null; relatedType?: string | null }) => void }) {
   const [items, setItems] = useState<Array<{ id: string; message: string; read: boolean; createdAt: string; type?: string; relatedId?: string | null; relatedType?: string | null }> | null>(null);
   async function refresh() { setItems(await request('/notifications')); }
   useEffect(() => { void refresh().catch((error: Error) => notify(error.message)); }, [notify]);
@@ -345,19 +371,12 @@ type TrackerConnection = { id: string; provider: string; platform: string; categ
 type TrackerActivity = { id: string; kind: 'workflow' | 'integration'; createdAt: string; type?: string; taskTitle?: string | null; projectTitle?: string; actor?: { id: string; fullName: string; avatarUrl?: string | null } | null; fromValue?: string | null; toValue?: string | null; action?: string; platform?: string; provider?: string };
 type TrackerData = { tasks: TrackerTask[]; connections: TrackerConnection[]; activity: TrackerActivity[] };
 type TrackerCard = { task: TrackerTask; resource: TrackerResource | null };
-type GooglePickedFile = { connectionId: string; id: string; name: string; url: string };
-
-async function loadGooglePicker() {
-  const browserWindow = window as any;
-  if (!browserWindow.gapi) await new Promise<void>((resolve, reject) => {
-    const existing = document.querySelector<HTMLScriptElement>('script[data-google-picker]');
-    const script = existing ?? document.createElement('script');
-    if (!existing) { script.src = 'https://apis.google.com/js/api.js'; script.async = true; script.dataset.googlePicker = 'true'; document.head.append(script); }
-    script.addEventListener('load', () => resolve(), { once: true });
-    script.addEventListener('error', () => reject(new Error('Google Picker could not be loaded.')), { once: true });
-  });
-  await new Promise<void>((resolve, reject) => browserWindow.gapi.load('picker', { callback: resolve, onerror: () => reject(new Error('Google Picker could not be initialized.')) }));
-}
+const trackerPlatforms = [
+  { provider: 'google', name: 'Google Drive & Docs' },
+  { provider: 'microsoft', name: 'Microsoft 365' },
+  { provider: 'trello', name: 'Trello' },
+  { provider: 'asana', name: 'Asana' },
+];
 
 export function TrackerPage({ notify }: { notify: Notice }) {
   const [data, setData] = useState<TrackerData | null>(null);
@@ -366,8 +385,6 @@ export function TrackerPage({ notify }: { notify: Notice }) {
   const [linkingTaskId, setLinkingTaskId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [editingResourceId, setEditingResourceId] = useState<string | null>(null);
-  const [linkConnectionId, setLinkConnectionId] = useState('');
-  const [pickedGoogleFile, setPickedGoogleFile] = useState<GooglePickedFile | null>(null);
   const [editStatus, setEditStatus] = useState<TrackerTask['status']>('pending');
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -393,9 +410,11 @@ export function TrackerPage({ notify }: { notify: Notice }) {
   const linkingTask = tasks.find((task) => task.id === linkingTaskId) ?? null;
   const editingTask = tasks.find((task) => task.id === editingTaskId) ?? null;
   const editingResource = editingTask?.resources.find((resource) => resource.id === editingResourceId) ?? null;
-  const activeLinkConnection = connectedConnections.find((connection) => connection.id === linkConnectionId) ?? connectedConnections[0];
-  const usingGooglePicker = activeLinkConnection?.provider === 'google';
-  function beginLink(taskId: string) { setLinkingTaskId(taskId); setLinkConnectionId(connectedConnections[0]?.id ?? ''); setPickedGoogleFile(null); }
+  function beginLink(taskId: string) {
+    const task = tasks.find((item) => item.id === taskId);
+    setLinkingTaskId(taskId);
+    setEditStatus(task?.status ?? 'pending');
+  }
 
   async function saveExternalFile(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -403,7 +422,7 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     const form = new FormData(event.currentTarget);
     setSaving(true);
     try {
-      await request(`/resources/${editingResource.id}`, { method: 'PATCH', body: JSON.stringify({ connectionId: form.get('connectionId'), title: form.get('title'), externalUrl: form.get('externalUrl'), ...(editingTask.canAssign ? { assigneeId: form.get('assigneeId') } : {}), ...(editingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
+      await request(`/resources/${editingResource.id}`, { method: 'PATCH', body: JSON.stringify({ provider: form.get('provider'), title: form.get('title'), externalUrl: form.get('externalUrl'), ...(editingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
       await refresh();
       setEditingTaskId(null); setEditingResourceId(null);
       notify('External file link updated.');
@@ -414,37 +433,14 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     event.preventDefault();
     if (!linkingTask) return;
     const form = new FormData(event.currentTarget);
-    const connectionId = String(form.get('connectionId') ?? '');
-    const connection = connectedConnections.find((item) => item.id === connectionId);
-    if (connection?.provider === 'google' && (!pickedGoogleFile || pickedGoogleFile.connectionId !== connectionId)) { notify('Choose a Google Drive file before attaching it.'); return; }
     setSaving(true);
     try {
-      await request(`/tasks/${linkingTask.id}/resources`, { method: 'POST', body: JSON.stringify({ connectionId, title: form.get('title'), externalUrl: form.get('externalUrl'), ...(pickedGoogleFile?.connectionId === connectionId ? { externalId: pickedGoogleFile.id } : {}) }) });
+      await request(`/tasks/${linkingTask.id}/resources`, { method: 'POST', body: JSON.stringify({ provider: form.get('provider'), title: form.get('title'), externalUrl: form.get('externalUrl'), ...(linkingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
       setLinkingTaskId(null);
       await refresh();
       notify('File link attached to the task.');
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not attach this file link.'); }
     finally { setSaving(false); }
-  }
-  async function chooseGoogleFile() {
-    if (!activeLinkConnection || activeLinkConnection.provider !== 'google') return;
-    try {
-      const { accessToken, developerKey, appId } = await request<{ accessToken: string; developerKey: string; appId: string }>(`/integrations/connections/${activeLinkConnection.id}/google-picker-token`);
-      await loadGooglePicker();
-      const google = (window as any).google;
-      const picker = new google.picker.PickerBuilder()
-        .setDeveloperKey(developerKey)
-        .setAppId(appId)
-        .setOAuthToken(accessToken)
-        .setOrigin(window.location.origin)
-        .addView(new google.picker.DocsView(google.picker.ViewId.DOCS).setIncludeFolders(true))
-        .setCallback((data: any) => {
-          if (data[google.picker.Response.ACTION] !== google.picker.Action.PICKED) return;
-          const file = data[google.picker.Response.DOCUMENTS]?.[0];
-          if (file) setPickedGoogleFile({ connectionId: activeLinkConnection.id, id: file[google.picker.Document.ID], name: file[google.picker.Document.NAME], url: file[google.picker.Document.URL] });
-        }).build();
-      picker.setVisible(true);
-    } catch (error) { notify(error instanceof Error ? error.message : 'Could not open Google Drive.'); }
   }
   async function syncFiles() {
     if (!connectedConnections.length) { notify('Connect an external tool before syncing files.'); return; }
@@ -454,20 +450,31 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     finally { setSyncing(false); }
   }
   async function openResource(resource: TrackerResource) {
+    // Open while the click still has browser activation; opening after the request can be blocked as a popup.
+    const tab = window.open('about:blank', '_blank');
+    if (!tab) { notify('Allow pop-ups to open this file.'); return; }
+    tab.opener = null;
     try {
       const launch = await request<{ externalUrl: string }>(`/resources/${resource.id}/launch`, { method: 'POST' });
-      window.open(launch.externalUrl, '_blank', 'noopener,noreferrer');
+      tab.location.replace(launch.externalUrl);
       void refresh();
-    } catch (error) { notify(error instanceof Error ? error.message : 'Could not open this file.'); }
+    } catch (error) { tab.close(); notify(error instanceof Error ? error.message : 'Could not open this file.'); }
   }
 
-  return <section className="sp on tracker-page"><Head title="Task Progress Tracker" action={<div className="tracker-head-actions"><button className="btn-o btn-sm" onClick={() => { if (!tasks.length) notify('Create or receive a task before attaching a file.'); else if (!connectedConnections.length) notify('Connect an external tool before attaching a file.'); else beginLink(tasks[0].id); }}>⌕ Attach File Link</button><button className="btn btn-sm" disabled={syncing} onClick={() => void syncFiles()}>{syncing ? 'Syncing…' : '↻ Sync Files'}</button></div>} />
+  return <section className="sp on tracker-page"><Head title="Task Progress Tracker" action={<div className="tracker-head-actions"><button className="btn-o btn-sm" onClick={() => { if (!tasks.length) notify('Create or receive a task before attaching a file.'); else beginLink(tasks[0].id); }}>⌕ Attach File Link</button><button className="btn btn-sm" disabled={syncing} onClick={() => void syncFiles()}>{syncing ? 'Syncing…' : '↻ Sync Files'}</button></div>} />
     <div className="tracker-kpis"><TrackerKpi icon="▤" value={tasks.reduce((total, task) => total + task.resources.length, 0)} label="Total Files" /><TrackerKpi icon="◷" value={tasks.filter((task) => task.status === 'ongoing').length} label="In Progress" tone="yel" /><TrackerKpi icon="✓" value={complete} label="Completed" tone="grn" /><TrackerKpi icon="▥" value={`${average}%`} label="Avg. Progress" /></div>
-    <div className="tracker-toolbar"><div className="tracker-filter"><span>Filter:</span><div>{trackerFilters.map((value) => <button type="button" className={filter === value ? 'on' : ''} key={value} onClick={() => setFilter(value)}>{trackerFilterLabel[value]}</button>)}</div></div><label className="tracker-platform">Platform:<span className="tracker-selected-platform">{platform !== 'all' ? <ToolLogo provider={platform} size="xs" /> : null}<select value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">All Platforms</option>{connectedConnections.map((connection) => <option key={connection.id} value={connection.provider}>{connection.platform}</option>)}</select></span></label></div>
-    {data === null ? <div className="cc"><Empty>Loading your tracker…</Empty></div> : projectSections.length ? <div className="tracker-project-sections">{projectSections.map((section) => <section className="tracker-project-section" key={section.title}><div className="tracker-project-heading"><span>Project</span><h3>{section.title}</h3></div><div className="tracker-resource-grid">{section.cards.map(({ task, resource }) => <TrackerResourceCard key={resource?.id ?? task.id} task={task} resource={resource} onEdit={() => { if (!resource) return; setEditingTaskId(task.id); setEditingResourceId(resource.id); setEditStatus(task.status); }} onOpen={() => resource && void openResource(resource)} onAttach={() => connectedConnections.length ? beginLink(task.id) : notify('Connect an external tool before attaching a file.')} />)}</div></section>)}</div> : <div className="cc"><Empty>{tasks.length ? 'No linked files match the selected filters.' : 'Tasks from your projects will appear here, along with any files you link to them.'}</Empty></div>}
-    <div className="tracker-lower-grid"><section className="cc tracker-activity"><div className="cc-head"><h3>Recent File Activity</h3><span>Latest updates</span></div>{data?.activity.length ? <div className="tracker-activity-list">{data.activity.slice(0, 8).map((activity) => <div className="tracker-activity-row" key={activity.id}><ToolLogo provider={activity.provider} name={activity.platform} size="sm" /><div><strong>{activityLabel(activity)}</strong><span>{relativeDate(activity.createdAt)}</span></div></div>)}</div> : <Empty>Linked-file and task updates will appear here.</Empty>}</section><section className="cc tracker-collaborators"><div className="cc-head"><h3>Project Collaborators</h3><span>{collaborators.length || '—'} members</span></div>{collaborators.length ? <div className="tracker-collaborator-list">{collaborators.map((member) => <div className="tracker-collaborator" key={member.id}><span className="tracker-collaborator-avatar">{member.avatarUrl ? <img src={member.avatarUrl} alt="" /> : initials(member.fullName)}</span><strong>{member.fullName}</strong></div>)}</div> : <Empty>Collaborators appear when you have assigned project tasks.</Empty>}</section></div>
-    {linkingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLinkingTaskId(null); }}><div className="modal-box tracker-link-modal"><div className="modal-ttl"><span>Attach file link</span><button type="button" className="modal-close" onClick={() => setLinkingTaskId(null)}>×</button></div><p>Attach a file from one of your connected tools to <strong>{linkingTask.title}</strong>.</p><form onSubmit={linkFile}><label className="lbl">Connected platform</label><div className="tracker-link-platform"><ToolLogo provider={activeLinkConnection?.provider} name={activeLinkConnection?.platform} size="sm" /><select className="ifield" name="connectionId" required value={activeLinkConnection?.id ?? ''} onChange={(event) => { setLinkConnectionId(event.target.value); setPickedGoogleFile(null); }}>{connectedConnections.map((connection) => <option key={connection.id} value={connection.id}>{connection.platform}</option>)}</select></div>{usingGooglePicker ? <><label className="lbl">Google Drive file</label><button className="btn-o" type="button" onClick={() => void chooseGoogleFile()}>{pickedGoogleFile ? 'Choose a different Google file' : 'Choose from Google Drive'}</button>{pickedGoogleFile ? <div className="tracker-auto-progress-note">Selected: <strong>{pickedGoogleFile.name}</strong></div> : <div className="tracker-auto-progress-note">Google files must be chosen from Drive so only selected files can be accessed.</div>}<label className="lbl">File name</label><input className="ifield" name="title" required readOnly value={pickedGoogleFile?.name ?? ''} placeholder="Choose a file from Google Drive" /><label className="lbl">File link</label><input className="ifield" name="externalUrl" type="url" required readOnly value={pickedGoogleFile?.url ?? ''} placeholder="Choose a file from Google Drive" /></> : <><label className="lbl">File name</label><input className="ifield" name="title" required minLength={2} maxLength={180} placeholder="e.g. Research presentation slides" /><label className="lbl">File link</label><input className="ifield" name="externalUrl" type="url" required placeholder="https://…" /></>}<div className="modal-acts"><button type="button" className="btn-o" onClick={() => setLinkingTaskId(null)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Attaching…' : 'Attach Link'}</button></div></form></div></div> : null}
-    {editingTask && editingResource ? <div className="modal-ov open tracker-edit-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) { setEditingTaskId(null); setEditingResourceId(null); } }}><div className="modal-box tracker-edit-modal"><div className="modal-ttl"><span>Edit External File Link</span><button type="button" className="modal-close" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>×</button></div><form onSubmit={(event) => void saveExternalFile(event)}><label className="lbl">File name</label><input className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={editingResource.title} /><label className="lbl">External file URL</label><input className="ifield" name="externalUrl" type="url" required defaultValue={editingResource.externalUrl} /><label className="lbl">Platform</label><div className="tracker-platform-options">{connectedConnections.map((connection) => <label className={`tracker-platform-option ${connection.id === editingResource.connectionId ? 'selected' : ''}`} key={connection.id}><input type="radio" name="connectionId" value={connection.id} defaultChecked={connection.id === editingResource.connectionId} required /><ToolLogo provider={connection.provider} name={connection.platform} size="xs" /><span>{connection.platform}</span></label>)}</div>{connectedConnections.length ? null : <div className="tracker-auto-progress-note">Connect an external platform before editing this file link.</div>}<label className="lbl">Assigned member</label><select className="ifield" name="assigneeId" defaultValue={editingTask.assignees[0]?.id ?? ''} disabled={!editingTask.canAssign}>{editingTask.collaborators.map((member) => <option key={member.id} value={member.id}>{member.fullName}</option>)}</select><label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!editingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div><div className="modal-acts"><button type="button" className="btn-o" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>Cancel</button><button className="btn" disabled={saving || !connectedConnections.length}>{saving ? 'Saving…' : 'Save Changes'}</button></div></form></div></div> : null}
+    <div className="tracker-toolbar"><div className="tracker-filter"><span>Filter:</span><div>{trackerFilters.map((value) => <button type="button" className={filter === value ? 'on' : ''} key={value} onClick={() => setFilter(value)}>{trackerFilterLabel[value]}</button>)}</div></div><label className="tracker-platform">Platform:<span className="tracker-selected-platform">{platform !== 'all' ? <ToolLogo provider={platform} size="xs" /> : null}<select value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">All Platforms</option>{trackerPlatforms.map((item) => <option key={item.provider} value={item.provider}>{item.name}</option>)}</select></span></label></div>
+    {data === null ? <div className="cc"><Empty>Loading your tracker…</Empty></div> : projectSections.length ? <div className="tracker-project-sections">{projectSections.map((section) => <section className="tracker-project-section" key={section.title}><div className="tracker-project-heading"><span>Project</span><h3>{section.title}</h3></div><div className="tracker-resource-grid">{section.cards.map(({ task, resource }) => <TrackerResourceCard key={resource?.id ?? task.id} task={task} resource={resource} onEdit={() => { if (!resource) return; setEditingTaskId(task.id); setEditingResourceId(resource.id); setEditStatus(task.status); }} onOpen={() => resource && void openResource(resource)} onAttach={() => beginLink(task.id)} />)}</div></section>)}</div> : <div className="cc"><Empty>{tasks.length ? 'No linked files match the selected filters.' : 'Tasks from your projects will appear here, along with any files you link to them.'}</Empty></div>}
+    <div className="tracker-lower-grid"><section className="cc tracker-activity"><div className="cc-head"><h3>Recent File Activity</h3><span>Latest updates</span></div>{data?.activity.length ? <div className="tracker-activity-list">{data.activity.slice(0, 8).map((activity) => <div className="tracker-activity-row" key={activity.id}><TrackerActivityIcon activity={activity} /><div><strong>{activityLabel(activity)}</strong><span>{relativeDate(activity.createdAt)}</span></div></div>)}</div> : <Empty>Linked-file and task updates will appear here.</Empty>}</section><section className="cc tracker-collaborators"><div className="cc-head"><h3>Project Collaborators</h3><span>{collaborators.length || '—'} members</span></div>{collaborators.length ? <div className="tracker-collaborator-list">{collaborators.map((member) => <div className="tracker-collaborator" key={member.id}><span className="tracker-collaborator-avatar">{member.avatarUrl ? <img src={member.avatarUrl} alt="" /> : initials(member.fullName)}</span><strong>{member.fullName}</strong></div>)}</div> : <Empty>Collaborators appear when you have assigned project tasks.</Empty>}</section></div>
+    {linkingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLinkingTaskId(null); }}><div className="modal-box tracker-link-modal" role="dialog" aria-modal="true" aria-label="Attach file link"><div className="modal-ttl"><span>Attach External File Link</span><button type="button" className="modal-close" aria-label="Close" onClick={() => setLinkingTaskId(null)}>×</button></div><form onSubmit={linkFile}>
+      <label className="lbl" htmlFor="tracker-link-task">Task</label><select className="ifield" id="tracker-link-task" value={linkingTask.id} onChange={(event) => beginLink(event.target.value)}>{tasks.map((task) => <option key={task.id} value={task.id}>{task.project.title} — {task.title}</option>)}</select>
+      <label className="lbl" htmlFor="tracker-file-name">File name</label><input className="ifield" id="tracker-file-name" name="title" required minLength={2} maxLength={180} placeholder="e.g. Research presentation slides" />
+      <label className="lbl" htmlFor="tracker-file-url">External file URL</label><input className="ifield" id="tracker-file-url" name="externalUrl" type="url" required placeholder="https://…" />
+      <fieldset className="tracker-platform-options"><legend className="lbl">Platform</legend>{trackerPlatforms.map((item) => <label className="tracker-platform-option" key={item.provider}><input type="radio" name="provider" value={item.provider} required /><ToolLogo provider={item.provider} name={item.name} size="xs" /><span>{item.name}</span></label>)}</fieldset>
+      <label className="lbl">Assigned member</label><div className="tracker-auto-progress-note">{linkingTask.assignees.map((member) => member.fullName).join(', ') || 'Unassigned'}</div>
+      <label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!linkingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div>
+      <div className="modal-acts"><button type="button" className="btn-o" onClick={() => setLinkingTaskId(null)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Attaching…' : 'Attach Link'}</button></div></form></div></div> : null}
+    {editingTask && editingResource ? <div className="modal-ov open tracker-edit-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) { setEditingTaskId(null); setEditingResourceId(null); } }}><div className="modal-box tracker-edit-modal" role="dialog" aria-modal="true" aria-label="Edit external file link"><div className="modal-ttl"><span>Edit External File Link</span><button type="button" className="modal-close" aria-label="Close" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>×</button></div><form onSubmit={(event) => void saveExternalFile(event)}><label className="lbl" htmlFor="tracker-edit-name">File name</label><input className="ifield" id="tracker-edit-name" name="title" required minLength={2} maxLength={180} defaultValue={editingResource.title} /><label className="lbl" htmlFor="tracker-edit-url">External file URL</label><input className="ifield" id="tracker-edit-url" name="externalUrl" type="url" required defaultValue={editingResource.externalUrl} /><fieldset className="tracker-platform-options"><legend className="lbl">Platform</legend>{[...trackerPlatforms, ...(!trackerPlatforms.some((item) => item.provider === editingResource.provider) ? [{ provider: editingResource.provider, name: editingResource.platform }] : [])].map((item) => <label className="tracker-platform-option" key={item.provider}><input type="radio" name="provider" value={item.provider} defaultChecked={item.provider === editingResource.provider} required /><ToolLogo provider={item.provider} name={item.name} size="xs" /><span>{item.name}</span></label>)}</fieldset><label className="lbl">Assigned member</label><div className="tracker-auto-progress-note">{editingTask.assignees.map((member) => member.fullName).join(', ') || 'Unassigned'}</div><label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!editingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div><div className="modal-acts"><button type="button" className="btn-o" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save Changes'}</button></div></form></div></div> : null}
   </section>;
 }
 

@@ -9,18 +9,19 @@ import { GroupChatPage } from './GroupChatPage';
 import { GroupsPage } from './GroupsPage';
 import { IdeasPage } from './IdeasPage';
 import { ProjectsPage } from './ProjectsPage';
+import { taskNotificationDestination } from './taskNotificationDestination';
 import { SupportRequestsPage } from './SupportRequestsPage';
 import { categoryLabel, statusLabel, ticketStatusOptions, type SupportTicketRecord } from './ticketStatus';
-import { AdminSettingsPage, CalendarPage, IntegrationsPage, NotificationsPage, ProfilePage, ProjectsAnalyticsPage, TasksPage, TrackerPage } from './LegacyPages';
+import { AdminSettingsPage, AnnouncementsPage, CalendarPage, IntegrationsPage, NotificationsPage, ProfilePage, ProjectsAnalyticsPage, TasksPage, TrackerPage } from './LegacyPages';
 
-type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tools' | 'tracker' | 'notifications' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'archive' | 'settings' | 'support';
+type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tools' | 'tracker' | 'notifications' | 'announcements' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'archive' | 'settings' | 'support';
 type WorkspaceProps = { session: Session; onSessionChange: (session: Session) => void; onLogout: () => void; notify: (message: string) => void };
 type Link = { id: Page; label: string; icon: string };
-type NotificationEntry = { id: string; read: boolean; relatedId?: string | null; relatedType?: string | null };
+type NotificationEntry = { id: string; read: boolean; type?: string; relatedId?: string | null; relatedType?: string | null };
 type AdminSupportTicket = SupportTicketRecord & { user: { fullName: string; email: string } };
 
 const userSections: Array<{ title: string; links: Link[] }> = [
-  { title: 'Main', links: [{ id: 'dashboard', label: 'Dashboard', icon: '⌂' }] },
+  { title: 'Main', links: [{ id: 'dashboard', label: 'Dashboard', icon: '⌂' }, { id: 'announcements', label: 'Announcements', icon: '◉' }] },
   { title: 'Groups & Projects', links: [{ id: 'groups', label: 'My Groups', icon: '♧' }, { id: 'chat', label: 'Group Chat', icon: '□' }, { id: 'ideas', label: 'Idea Management', icon: '◇' }, { id: 'projects', label: 'My Projects', icon: '▱' }, { id: 'tasks', label: 'My Tasks', icon: '✓' }] },
   { title: 'Analytics', links: [{ id: 'workflow', label: 'Workflow Analytics', icon: '▥' }, { id: 'predictive', label: 'Predictive Monitoring', icon: '◉' }] },
   { title: 'Tools', links: [{ id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'tools', label: 'Apps/External Tools', icon: '▦' }, { id: 'tracker', label: 'Task Progress Tracker', icon: '▤' }] },
@@ -68,6 +69,8 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const [page, setPage] = useState<Page>(initialNav.page);
   const [selectedGroupId, setSelectedGroupId] = useState(initialNav.selectedGroupId);
   const [selectedTaskId, setSelectedTaskId] = useState(initialNav.selectedTaskId);
+  const [projectTaskFocus, setProjectTaskFocus] = useState<{ projectId: string; taskId: string } | null>(null);
+  const notificationRequestRef = useRef(0);
   const [selectedTicketId, setSelectedTicketId] = useState(initialNav.selectedTicketId);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [incomingCall, setIncomingCall] = useState<{ groupId: string; kind: CallKind } | null>(null);
@@ -107,6 +110,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   }
 
   function openNotification(notification: NotificationEntry) {
+    const requestId = ++notificationRequestRef.current;
     if (!notification.read) void request(`/notifications/${notification.id}/read`, { method: 'PATCH' }).catch(() => undefined);
     switch (notification.relatedType?.trim().toLowerCase()) {
       case 'group':
@@ -118,6 +122,20 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       case 'project': setPage(administrator ? 'notifications' : 'projects'); break;
       case 'task':
         if (administrator) { setPage('notifications'); break; }
+        if (notification.type === 'task_update' && notification.relatedId) {
+          const taskId = notification.relatedId;
+          void request<{ projectId: string; assignments: Array<{ assigneeId: string }> }>(`/tasks/${encodeURIComponent(taskId)}`).then((task) => {
+            if (notificationRequestRef.current !== requestId) return;
+            if (taskNotificationDestination(task, userId) === 'tasks') {
+              setSelectedTaskId(taskId);
+              setPage('tasks');
+            } else {
+              setProjectTaskFocus({ projectId: task.projectId, taskId });
+              setPage('projects');
+            }
+          }).catch((error: Error) => { if (notificationRequestRef.current === requestId) notify(error.message || 'Could not open this task.'); });
+          break;
+        }
         setSelectedTaskId(notification.relatedId ?? '');
         setPage('tasks');
         break;
@@ -208,10 +226,10 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     </aside>
     {sidebarCollapsed ? <button className="sidebar-reopen" type="button" onClick={() => setSidebarCollapsed(false)} aria-label="Show sidebar navigation" title="Show sidebar navigation"><BurgerIcon /></button> : null}
     <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">{systemName}</span></span><select value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}</select></div><div className="main">
-      {page === 'dashboard' ? <Dashboard name={session.user.fullName} notify={notify} onPage={navigate} onNotificationClick={openNotification} /> : null}
+      {page === 'dashboard' ? <Dashboard userId={session.user.id} name={session.user.fullName} notify={notify} onPage={navigate} onNotificationClick={openNotification} /> : null}
       {page === 'groups' ? <GroupsPage selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onChat={() => setPage('chat')} notify={notify} /> : null}
       {page === 'ideas' ? <IdeasPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} /> : null}
-      {page === 'projects' ? <ProjectsPage notify={notify} /> : null}
+      {page === 'projects' ? <ProjectsPage notify={notify} focusedTask={projectTaskFocus} /> : null}
       {page === 'admin' ? <AdminPage notify={notify} /> : null}
       {page === 'accounts' ? <AdminAccounts notify={notify} focusedTicketId={selectedTicketId} /> : null}
       {page === 'archive' ? <AdminArchive notify={notify} /> : null}
@@ -223,6 +241,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'tools' ? <IntegrationsPage notify={notify} /> : null}
       {page === 'tracker' ? <TrackerPage notify={notify} /> : null}
       {page === 'notifications' ? <NotificationsPage notify={notify} onNotificationClick={openNotification} /> : null}
+      {page === 'announcements' ? <AnnouncementsPage notify={notify} /> : null}
       {page === 'profile' ? <ProfilePage user={session.user} onUserUpdated={updateUser} onSessionInvalidated={() => { clearSession(); onLogout(); }} notify={notify} /> : null}
       {page === 'settings' ? <AdminSettingsPage notify={notify} onSessionInvalidated={() => { clearSession(); onLogout(); }} /> : null}
       {page === 'support' ? <SupportRequestsPage notify={notify} focusedTicketId={selectedTicketId} /> : null}
@@ -467,6 +486,7 @@ function BurgerIcon() { return <svg width="20" height="20" viewBox="0 0 24 24" f
 function NavIcon({ page }: { page: Page }) {
   const common = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
   if (page === 'dashboard') return <svg {...common}><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>;
+  if (page === 'announcements') return <svg {...common}><path d="M3 11v2a2 2 0 0 0 2 2h3l3 5h2l-1-5 8 3V6L8 9H5a2 2 0 0 0-2 2z"/><path d="M20 9a3 3 0 0 1 0 6"/></svg>;
   if (page === 'groups' || page === 'accounts') return <svg {...common}><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>;
   if (page === 'chat') return <svg {...common}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>;
   if (page === 'projects') return <svg {...common}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>;

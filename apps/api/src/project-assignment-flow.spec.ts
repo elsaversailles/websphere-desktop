@@ -63,7 +63,7 @@ describe('project creation assignment flow', () => {
       events: { emitNotification },
       jobs: { enqueueNotificationEmail: vi.fn(async () => undefined) },
       push: { deliver: (notification: any) => { const delivery = push.deliver(notification); deliveries.push(delivery); return delivery; } },
-      activityFeed: vi.fn(async () => []), onlineTeammates: vi.fn(async () => []), announcements: vi.fn(async () => []), milestones: vi.fn(async () => []),
+      activityFeed: vi.fn(async () => []), onlineTeammates: vi.fn(async () => []), eventAnnouncements: vi.fn(async () => []), milestones: vi.fn(async () => []),
       logger: { error: vi.fn() },
     }) as AppService;
     const controller = new AppController(service, {} as any, {} as any, {} as any, {} as any);

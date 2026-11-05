@@ -29,6 +29,7 @@ const NotificationType = { task_assignment: 'task_assignment', task_update: 'tas
 type Role = (typeof Role)[keyof typeof Role];
 type TaskStatus = 'pending' | 'ongoing' | 'for_review' | 'completed';
 type ProviderId = 'google' | 'microsoft' | 'notion' | 'trello' | 'asana' | 'canva';
+const providerNames: Record<ProviderId, string> = { google: 'Google Drive & Docs', microsoft: 'Microsoft 365', notion: 'Notion', trello: 'Trello', asana: 'Asana', canva: 'Canva' };
 type NotificationType = (typeof NotificationType)[keyof typeof NotificationType];
 // Outlook has no WebSphere event taxonomy, so mirrored events import as meetings — the best fit for
 // invites/appointments. Module-level so it does not depend on constructor init order.
@@ -701,7 +702,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       return {
         id: task.id, title: task.title, description: task.description, deadline: task.deadline, priority: task.priority, status: task.status,
         progress: taskProgress(task.status), createdAt: task.createdAt, latestActivityAt: new Date(latest), project: { id: task.project.id, title: task.project.title },
-        resources: task.linkedResources.map((resource: any) => ({ id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: resource.connection.provider, platform: resource.connection.tool.name, category: resource.connection.tool.category, createdAt: resource.createdAt })),
+        resources: task.linkedResources.map((resource: any) => ({ id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: resource.provider ?? resource.connection?.provider, platform: resource.connection?.tool.name ?? providerNames[resource.provider as ProviderId] ?? resource.provider, category: resource.connection?.tool.category ?? '', createdAt: resource.createdAt })),
         assignees: task.assignments.map((assignment: any) => task.project.members.find((member: any) => member.userId === assignment.assigneeId)?.user).filter(Boolean),
         canUpdateStatus,
         canAssign,
@@ -722,19 +723,33 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       activity: [...workflowActivity, ...usageActivity].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 24),
     };
   }
-  async linkTaskResource(caller: Caller, taskId: string, input: { connectionId: string; title: string; externalUrl: string; externalId?: string }) {
+  async linkTaskResource(caller: Caller, taskId: string, input: { connectionId?: string; provider?: ProviderId; title: string; externalUrl: string; externalId?: string; status?: TaskStatus }) {
     const task = await this.task(caller, taskId);
-    const connection = await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } });
-    if (!connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before linking a file', 400);
-    const resource = await this.prisma.linkedResource.create({ data: { connectionId: connection.id, projectId: task.projectId, taskId, externalId: input.externalId ?? randomBytes(12).toString('hex'), title: input.title, externalUrl: input.externalUrl }, include: { connection: { include: { tool: true } } } });
-    await Promise.all([
-      this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Linked “${resource.title}” to “${task.title}”` } }),
-      this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: WorkflowEventType.progress_activity, fromValue: 'resource_linked', toValue: resource.title } }),
-    ]);
-    return { id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: connection.provider, platform: connection.tool.name, category: connection.tool.category, createdAt: resource.createdAt };
+    const connection = input.connectionId ? await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } }) : null;
+    if (input.connectionId && !connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before linking a file', 400);
+    const provider = connection?.provider ?? input.provider;
+    if (!provider) fail('VALIDATION_FAILED', 'Choose a platform for this file link', 400);
+    const changedStatus = input.status && input.status !== task.status;
+    if (changedStatus && !task.assignments.some((assignment: any) => assignment.assigneeId === caller.id)) fail('RBAC_FORBIDDEN', 'Only the active assignee can change task status', 403);
+    const now = new Date();
+    const resource = await this.prisma.$transaction(async (tx: any) => {
+      const created = await tx.linkedResource.create({ data: { connectionId: connection?.id ?? null, provider, projectId: task.projectId, taskId, externalId: input.externalId ?? randomBytes(12).toString('hex'), title: input.title, externalUrl: input.externalUrl } });
+      await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: WorkflowEventType.progress_activity, fromValue: 'resource_linked', toValue: input.title } });
+      if (changedStatus) {
+        await tx.task.update({ where: { id: taskId }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: input.status === 'completed' ? now : null } });
+        await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: input.status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: input.status } });
+      }
+      return created;
+    });
+    if (connection) await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Linked “${resource.title}” to “${task.title}”` } });
+    if (changedStatus) {
+      await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
+      await this.notifyTaskStatus(taskId, caller.id, input.status!);
+    }
+    return { ...resource, provider, platform: connection?.tool.name ?? provider, category: connection?.tool.category ?? '' };
   }
-  async updateLinkedResource(caller: Caller, resourceId: string, input: { connectionId: string; title: string; externalUrl: string; assigneeId?: string; status?: TaskStatus }) {
-    const resource = await this.prisma.linkedResource.findUniqueOrThrow({ where: { id: resourceId }, include: { task: { include: { assignments: { where: { active: true } }, project: { include: { members: true } } } } } });
+  async updateLinkedResource(caller: Caller, resourceId: string, input: { connectionId?: string; provider?: ProviderId; title: string; externalUrl: string; assigneeId?: string; status?: TaskStatus }) {
+    const resource = await this.prisma.linkedResource.findUniqueOrThrow({ where: { id: resourceId }, include: { connection: true, task: { include: { assignments: { where: { active: true } }, project: { include: { members: true } } } } } });
     if (!resource.task) fail('VALIDATION_FAILED', 'Only task-linked resources can be edited here', 400);
     const task = resource.task;
     const membership = await this.projectMember(task.projectId, caller.id);
@@ -745,17 +760,19 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (input.assigneeId && input.assigneeId !== activeAssignment?.assigneeId && !isLeader) fail('RBAC_FORBIDDEN', 'Only the project leader can reassign a task', 403);
     if (input.status && input.status !== task.status && !isAssignee) fail('RBAC_FORBIDDEN', 'Only the active assignee can change task status', 403);
     if (input.assigneeId) await this.projectMember(task.projectId, input.assigneeId);
-    const connection = await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } });
-    if (!connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before saving the file link', 400);
+    const connection = input.connectionId ? await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } }) : null;
+    if (input.connectionId && !connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before saving the file link', 400);
+    const provider = input.provider ?? connection?.provider ?? resource.provider;
+    if (!provider && !connection) fail('VALIDATION_FAILED', 'Choose a platform for this file link', 400);
     const now = new Date();
     const reassigned = input.assigneeId && input.assigneeId !== activeAssignment?.assigneeId;
     const changedStatus = input.status && input.status !== task.status;
     await this.prisma.$transaction([
-      this.prisma.linkedResource.update({ where: { id: resource.id }, data: { connectionId: connection.id, title: input.title, externalUrl: input.externalUrl } }),
+      this.prisma.linkedResource.update({ where: { id: resource.id }, data: { ...(input.provider ? { connectionId: resource.connection?.provider === input.provider ? resource.connectionId : null, provider } : { connectionId: connection?.id ?? null }), title: input.title, externalUrl: input.externalUrl } }),
       ...(reassigned ? [this.prisma.taskAssignment.updateMany({ where: { taskId: task.id, active: true }, data: { active: false } }), this.prisma.taskAssignment.create({ data: { taskId: task.id, assigneeId: input.assigneeId, assignerId: caller.id } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: WorkflowEventType.assignment_change, fromValue: activeAssignment?.assigneeId, toValue: input.assigneeId } })] : []),
       ...(changedStatus ? [this.prisma.task.update({ where: { id: task.id }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: input.status === 'completed' ? now : null } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: input.status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: input.status } })] : []),
     ]);
-    await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Updated “${input.title}” linked to “${task.title}”` } });
+    if (connection && !input.provider) await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Updated “${input.title}” linked to “${task.title}”` } });
     if (changedStatus || reassigned) await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
     if (reassigned && input.assigneeId) await this.notify([input.assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}”`, task.id, 'task').catch(() => undefined);
     if (changedStatus) await this.notifyTaskStatus(task.id, caller.id, input.status!);
@@ -764,9 +781,10 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async launchResource(caller: Caller, resourceId: string) {
     const resource = await this.prisma.linkedResource.findUniqueOrThrow({ where: { id: resourceId }, include: { connection: { include: { tool: true } } } });
-    if (resource.connection.userId !== caller.id) fail('RBAC_FORBIDDEN', 'This linked file belongs to another user connection', 403);
+    if (resource.connection && resource.connection.userId !== caller.id) fail('RBAC_FORBIDDEN', 'This linked file belongs to another user connection', 403);
     if (resource.taskId) await this.task(caller, resource.taskId);
     else if (resource.projectId) await this.projectMember(resource.projectId, caller.id);
+    if (!resource.connection) return { externalUrl: resource.externalUrl, platform: resource.provider };
     const externalUrl = await connectors[resource.connection.provider as ProviderId].launchUrl({ projectId: resource.projectId ?? undefined, taskId: resource.taskId ?? undefined, externalId: resource.externalId, title: resource.title, externalUrl: resource.externalUrl });
     await this.prisma.toolUsage.create({ data: { connectionId: resource.connectionId, action: `Opened “${resource.title}”` } });
     return { externalUrl, platform: resource.connection.tool.name };
@@ -1038,6 +1056,18 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     }
     return { events: calendarEvents, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))], notifications };
   }
+  /** User-created events visible on the calendar, shown newest first in Announcements. */
+  async eventAnnouncements(caller: Caller, take?: number) {
+    const events = await this.prisma.calendarEvent.findMany({
+      where: { source: 'websphere', OR: [{ ownerId: caller.id }, { project: { members: { some: { userId: caller.id } } } }] },
+      include: { project: { select: { id: true, title: true } } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      ...(take === undefined ? {} : { take }),
+    });
+    const ownerIds = [...new Set(events.map((event: any) => event.ownerId))] as string[];
+    const owners = ownerIds.length ? await this.prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, fullName: true } }) : [];
+    return events.map((event: any) => ({ id: event.id, title: event.title, type: event.type, startAt: event.startAt, endAt: event.endAt, createdAt: event.createdAt, project: event.project, authorName: owners.find((owner: any) => owner.id === event.ownerId)?.fullName ?? 'Former member' }));
+  }
   async createCalendarEvent(caller: Caller, input: any) {
     if (input.projectId) await this.projectMember(input.projectId, caller.id);
     const event = await this.prisma.calendarEvent.create({ data: { ...input, ownerId: caller.id } });
@@ -1138,17 +1168,17 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       .slice(0, take);
   }
   /** Announcements from every group the caller belongs to, newest first, with the author's group role. */
-  async announcements(caller: Caller, take = 6) {
+  async announcements(caller: Caller, take?: number) {
     const records = await this.prisma.announcement.findMany({
       where: { group: { members: { some: { userId: caller.id } } } },
       orderBy: { createdAt: 'desc' },
-      take,
+      ...(take === undefined ? {} : { take }),
       include: { author: { select: { id: true, fullName: true } }, group: { select: { id: true, name: true } } },
     });
-    const roles = await this.prisma.groupMember.findMany({
+    const roles = records.length ? await this.prisma.groupMember.findMany({
       where: { OR: records.map((record: any) => ({ groupId: record.groupId, userId: record.authorId })) },
       select: { groupId: true, userId: true, role: true },
-    });
+    }) : [];
     return records.map((record: any) => ({
       id: record.id,
       title: record.title,
@@ -1453,7 +1483,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async analyticsToolUsage(caller: Caller, projectId: string) {
     await this.project(caller, projectId);
     const resources = await this.prisma.linkedResource.findMany({
-      where: { projectId },
+      where: { projectId, connectionId: { not: null } },
       select: { connectionId: true, connection: { select: { provider: true, tool: { select: { name: true } } } } },
     });
     const connectionIds = [...new Set(resources.map((resource: any) => resource.connectionId))];

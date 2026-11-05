@@ -429,14 +429,15 @@ model ToolConnection {
 }
 model LinkedResource {
   id String @id @default(cuid())
-  connectionId String
+  connectionId String?
+  provider ProviderId?
   projectId String?
   taskId String?
   externalId String
   externalUrl String @db.Text
   title String
   createdAt DateTime @default(now())
-  connection ToolConnection @relation(fields: [connectionId], references: [id])
+  connection ToolConnection? @relation(fields: [connectionId], references: [id])
   project Project? @relation(fields: [projectId], references: [id])
   task Task? @relation(fields: [taskId], references: [id])
 }

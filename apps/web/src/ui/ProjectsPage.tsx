@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { getAccessToken, request, socketBaseUrl } from '../api';
 import { DateField } from './DateField';
@@ -14,7 +14,7 @@ type Member = { userId: string; role: string; responsibility?: string | null; us
 type ProjectDetail = { id: string; title: string; description: string; status: string; startDate?: string | null; deadline?: string | null; group: { members: Member[] } | null; members: Member[]; tasks: ProjectTask[] };
 type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
 
-export function ProjectsPage({ notify }: { notify: (message: string) => void }) {
+export function ProjectsPage({ notify, focusedTask }: { notify: (message: string) => void; focusedTask?: { projectId: string; taskId: string } | null }) {
   const today = useLocalDay();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState('');
@@ -25,6 +25,7 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
   const [editingTask, setEditingTask] = useState<{ task: ProjectTask; mode: 'edit' | 'reassign' } | null>(null);
   const [createFormKey, setCreateFormKey] = useState(0);
   const [confirmation, setConfirmation] = useState<ConfirmAction | null>(null);
+  const openedFocus = useRef<typeof focusedTask>(null);
 
   const refreshProjects = useCallback(() => request<Project[]>('/projects').then(setProjects).catch((error: Error) => notify(error.message)), [notify]);
   useEffect(() => { void refreshProjects(); }, [refreshProjects]);
@@ -41,6 +42,19 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
     catch (error) { notify(error instanceof Error ? error.message : 'Could not load project tasks.'); }
     finally { setLoadingDetail(false); }
   }, [selectedProjectId, notify]);
+
+  useEffect(() => {
+    if (focusedTask && openedFocus.current !== focusedTask) {
+      openedFocus.current = focusedTask;
+      void openTasks(focusedTask.projectId);
+    }
+  }, [focusedTask, openTasks]);
+
+  useEffect(() => {
+    if (!focusedTask || detail?.id !== focusedTask.projectId || !detail.tasks.some((task) => task.id === focusedTask.taskId)) return;
+    const frame = requestAnimationFrame(() => document.getElementById(`project-task-${focusedTask.taskId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    return () => cancelAnimationFrame(frame);
+  }, [detail, focusedTask]);
 
   const refreshTasks = useCallback(async () => {
     if (selectedProjectId) await openTasks(selectedProjectId);
@@ -180,8 +194,8 @@ export function ProjectsPage({ notify }: { notify: (message: string) => void }) 
             const needsReassignment = task.status !== 'completed' && (task.risk?.level === 'high' || (due?.days ?? 0) < 0);
             const currentAssignee = task.assignments[0]?.assigneeId;
             const replacementAvailable = detail.members.some((member) => member.userId !== currentAssignee);
-            return <tr key={task.id}>
-              <td><strong>{task.title}</strong><span className="task-description">{task.description}</span></td>
+            return <tr key={task.id} id={`project-task-${task.id}`} className={focusedTask?.projectId === detail.id && focusedTask.taskId === task.id ? 'notification-target' : undefined}>
+              <td><strong>{task.title}</strong>{task.description?.trim() && task.description.trim() !== task.title.trim() ? <span className="task-description">{task.description}</span> : null}</td>
               <td>{memberName(currentAssignee)}</td><td>{formatDateOnly(task.startDate)}</td><td>{formatDateOnly(task.deadline)}</td>
               <td><span className={`bdg ${priority.tone}`}>{priority.label}</span></td><td><div className="task-actions"><span className={`bdg ${status.tone}`}>{status.label}</span>{needsReassignment ? <span className="bdg r">{due && due.days < 0 ? 'Overdue' : 'At Risk'}</span> : null}</div></td>
               {leader ? <td><div className="task-actions">
