@@ -7,6 +7,7 @@ import { dateOnlyKey, formatDateOnly, localDateFromKey } from './dates';
 import { type Tone, avatarTone, dateKey, deadlineCountdown, deadlineHealth, initials, taskPriorityHealth, relativeTime, worstTone } from './health';
 import { dashboardProjectProgress } from './dashboardProjectProgress';
 import { useLocalDay } from './useLocalDay';
+import { EventAnnouncementCard, type EventAnnouncement } from './EventAnnouncement';
 import { upcomingDeadlines } from './upcomingDeadlines';
 
 function DashboardAvatar({ name, id, avatarUrl, className }: { name: string; id: string; avatarUrl?: string | null; className: string }) {
@@ -18,10 +19,9 @@ function DashboardAvatar({ name, id, avatarUrl, className }: { name: string; id:
 
 type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string } | null; tasks: Array<{ status: string }>; _count?: { members: number } };
 type DashboardTask = { id: string; title: string; status: string; priority?: string | null; deadline?: string | null; completedAt?: string | null; project?: { id: string; title: string } | null };
-type DashboardNotification = { id: string; message: string; read: boolean; createdAt?: string; relatedId?: string | null; relatedType?: string | null };
+type DashboardNotification = { id: string; message: string; read: boolean; type?: string; createdAt?: string; relatedId?: string | null; relatedType?: string | null };
 type DashboardActivity = { id: string; type: string; fromValue?: string | null; toValue?: string | null; createdAt: string; taskTitle?: string | null; projectTitle: string; actor?: { id: string; fullName: string; avatarUrl?: string | null } | null };
 type DashboardTeammate = { id: string; fullName: string; avatarUrl?: string | null; role: string; groupName: string; online: boolean };
-type DashboardAnnouncement = { id: string; title: string; body: string; priority: 'normal' | 'important' | 'urgent'; createdAt: string; groupName: string; authorName: string; authorRole: string };
 type DashboardMilestone = { id: string; kind: 'achievement' | 'award' | 'next'; icon: 'check' | 'star' | 'target'; title: string; detail: string; at: string };
 type DashboardData = {
   glance: { activeProjects: number; pendingTasks: number; ideasSubmitted: number };
@@ -30,18 +30,16 @@ type DashboardData = {
   notifications: DashboardNotification[];
   activity?: DashboardActivity[];
   online?: DashboardTeammate[];
-  announcements?: DashboardAnnouncement[];
+  announcements?: EventAnnouncement[];
   milestones?: DashboardMilestone[];
 };
-type DashboardProps = { name: string; notify: (message: string) => void; onPage: (page: 'groups' | 'ideas' | 'projects' | 'tasks' | 'assistant' | 'notifications') => void; onNotificationClick: (notification: DashboardNotification) => void };
+type DashboardProps = { userId: string; name: string; notify: (message: string) => void; onPage: (page: 'groups' | 'ideas' | 'projects' | 'tasks' | 'assistant' | 'notifications' | 'announcements') => void; onNotificationClick: (notification: DashboardNotification) => void };
 
 const WEEKDAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
-/** Announcement priority reuses the same scale: urgent demands attention, normal is routine. */
-const ANNOUNCEMENT_TONE: Record<string, Tone> = { urgent: 'r', important: 'y', normal: 'ac' };
 /** Wins are green, awards are blue, and the milestone still ahead of you is red. */
 const MILESTONE_TONE: Record<string, Tone> = { achievement: 'g', award: 'ac', next: 'r' };
 
-export function Dashboard({ name, notify, onPage, onNotificationClick }: DashboardProps) {
+export function Dashboard({ userId, name, notify, onPage, onNotificationClick }: DashboardProps) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [groups, setGroups] = useState<GroupSummary[]>([]);
@@ -55,7 +53,11 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [monthCursor, setMonthCursor] = useState(() => { const now = new Date(); return { year: now.getFullYear(), month: now.getMonth() }; });
   const notificationsRef = useRef<HTMLDivElement | null>(null);
+  const groupRequestRef = useRef(0);
   const localDay = useLocalDay();
+  const projectMembers = createGroupId
+    ? (createGroupHub?.group.members ?? []).filter((member) => selectedMemberIds.includes(member.userId)).map((member) => ({ id: member.userId, name: member.user.fullName }))
+    : [{ id: userId, name }];
 
   const refreshDashboard = useCallback(() => request<DashboardData>('/dashboard').then(setData).catch((error: Error) => notify(error.message)), [notify]);
   useEffect(() => { void refreshDashboard(); }, [refreshDashboard]);
@@ -112,6 +114,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
   const onlineCount = useMemo(() => (data?.online ?? []).filter((teammate) => teammate.online).length, [data]);
 
   async function openCreateDialog() {
+    groupRequestRef.current += 1;
     setCreateOpen(true);
     setCreateGroupId('');
     setCreateGroupHub(null);
@@ -119,23 +122,25 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
     try { setGroups(await request<GroupSummary[]>('/groups')); } catch (error) { notify(error instanceof Error ? error.message : 'Could not load your groups.'); }
   }
   async function pickCreateGroup(groupId: string) {
+    const requestId = ++groupRequestRef.current;
     setCreateGroupId(groupId);
     setCreateGroupHub(null);
     setSelectedMemberIds([]);
     if (!groupId) return;
-    try { setCreateGroupHub(await request<GroupHubData>(`/groups/${groupId}/hub`)); } catch (error) { notify(error instanceof Error ? error.message : 'Could not load group members.'); }
+    try { const hub = await request<GroupHubData>(`/groups/${groupId}/hub`); if (requestId === groupRequestRef.current) setCreateGroupHub(hub); } catch (error) { if (requestId === groupRequestRef.current) notify(error instanceof Error ? error.message : 'Could not load group members.'); }
   }
   async function createProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (saving) return;
     const values = new FormData(event.currentTarget);
-    const initialTasks = selectedMemberIds.flatMap((assigneeId) => {
+    const memberIds = projectMembers.map((member) => member.id);
+    const initialTasks = memberIds.flatMap((assigneeId) => {
       const title = String(values.get(`responsibility-${assigneeId}`) ?? '').trim();
       return title ? [{ assigneeId, title }] : [];
     });
     setSaving(true);
     try {
-      await request('/projects', { method: 'POST', body: JSON.stringify({ ...(createGroupId ? { groupId: createGroupId } : {}), title: values.get('title'), description: values.get('description'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, memberIds: selectedMemberIds, initialTasks }) });
+      await request('/projects', { method: 'POST', body: JSON.stringify({ ...(createGroupId ? { groupId: createGroupId } : {}), title: values.get('title'), description: values.get('description'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, memberIds, initialTasks }) });
       setCreateOpen(false);
       await refreshDashboard();
       notify(initialTasks.length ? 'Project created and tasks assigned.' : 'Project created.');
@@ -173,8 +178,8 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
     {createOpen ? <div className="modal-ov open project-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setCreateOpen(false); }}><div className="modal-box project-modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title"><div className="modal-ttl"><div><span id="project-modal-title">Create New Project</span><small>New Project Details</small></div><button type="button" className="modal-close" onClick={() => setCreateOpen(false)} aria-label="Close new project form">×</button></div><form className="project-create-form" onSubmit={createProject}>
       <label className="lbl" htmlFor="project-title">Project Name</label><input className="ifield" id="project-title" name="title" required minLength={2} maxLength={180} placeholder="Enter project name" />
       <label className="lbl" htmlFor="project-group">Project Group</label><select className="ifield" id="project-group" value={createGroupId} onChange={(event) => void pickCreateGroup(event.target.value)}><option value="">No group — independent project</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select>
-      <label className="lbl">Team Members</label><fieldset className="project-member-picker" disabled={!createGroupHub}><legend className="sr-only">Team Members</legend>{createGroupHub ? createGroupHub.group.members.map((member) => <label className="project-member-option" key={member.userId}><input type="checkbox" checked={selectedMemberIds.includes(member.userId)} onChange={() => toggleProjectMember(member.userId)} /><span>{member.user.fullName}</span></label>) : <span>Add members by selecting a project group first.</span>}</fieldset>
-      <label className="lbl">Task Assignment Per Member</label><div className={`project-responsibilities ${selectedMemberIds.length ? '' : 'empty'}`}>{selectedMemberIds.length ? createGroupHub?.group.members.filter((member) => selectedMemberIds.includes(member.userId)).map((member) => <label key={member.userId}><span>{member.user.fullName}</span><input className="ifield" name={`responsibility-${member.userId}`} minLength={2} maxLength={180} placeholder={`Assign ${member.user.fullName} a task`} /></label>) : <span>Add members first, then assign tasks here.</span>}</div>
+      <label className="lbl">Team Members</label><fieldset className="project-member-picker" disabled={!createGroupId || !createGroupHub}><legend className="sr-only">Team Members</legend>{!createGroupId ? <label className="project-member-option"><input type="checkbox" checked readOnly /><span>{name}</span></label> : createGroupHub ? createGroupHub.group.members.map((member) => <label className="project-member-option" key={member.userId}><input type="checkbox" checked={selectedMemberIds.includes(member.userId)} onChange={() => toggleProjectMember(member.userId)} /><span>{member.user.fullName}</span></label>) : <span>Group members are unavailable.</span>}</fieldset>
+      <label className="lbl">Task Assignment Per Member</label><div className={`project-responsibilities ${projectMembers.length ? '' : 'empty'}`}>{projectMembers.length ? projectMembers.map((member) => <label key={member.id}><span>{member.name}</span><input className="ifield" name={`responsibility-${member.id}`} minLength={2} maxLength={180} placeholder={`Assign ${member.name} a task`} /></label>) : <span>Add members first, then assign tasks here.</span>}</div>
       <label className="lbl" htmlFor="external-tools">External Tools Will Be Used</label><select className="ifield project-tools-select" id="external-tools" name="externalTools" defaultValue="" aria-label="External tools used for this project"><option value="" disabled>Select external tools</option><option value="google">Google Workspace</option><option value="microsoft">Microsoft 365</option><option value="trello">Trello</option><option value="asana">Asana</option></select>
       <div className="project-date-grid"><div><label className="lbl" htmlFor="project-start-date">Start Date</label><DateField id="project-start-date" name="startDate" label="Project start date" showJump={false} /></div><div><label className="lbl" htmlFor="project-deadline">End Date</label><DateField id="project-deadline" name="deadline" label="Project end date" showJump={false} /></div></div>
       <label className="lbl" htmlFor="project-description">Project Description</label><textarea className="ifield project-description" id="project-description" name="description" required placeholder="Describe the project goals and scope…" />
@@ -271,15 +276,8 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
       </DataCard>
     </div>
     <div className="g2 bottom-grid">
-      <DataCard title="Announcements" action="View All" onAction={() => onPage('notifications')}>
-        {data.announcements?.length ? <div className="announce-list">{data.announcements.map((item) => {
-          const tone = ANNOUNCEMENT_TONE[item.priority] ?? 'ac';
-          return <article className={`announce-row tone-${tone}`} key={item.id}>
-            <div className="announce-head"><strong>{item.title}</strong><small>{relativeTime(item.createdAt)}</small></div>
-            <p>{item.body}</p>
-            <cite>— {item.authorName}{item.authorRole === 'Project_Leader' ? ', Leader' : ''} · {item.groupName}</cite>
-          </article>;
-        })}</div> : <Empty text="Announcements from your group leaders will appear here." />}
+      <DataCard title="Announcements" action="View All" onAction={() => onPage('announcements')}>
+        {data.announcements?.length ? <div className="announce-list">{data.announcements.map((event) => <EventAnnouncementCard key={event.id} event={event} />)}</div> : <Empty text="Calendar events will appear here." />}
       </DataCard>
       <DataCard title="Milestones &amp; Achievements">
         {data.milestones?.length ? <div className="milestone-list">{data.milestones.map((item) => {
@@ -291,7 +289,7 @@ export function Dashboard({ name, notify, onPage, onNotificationClick }: Dashboa
         })}</div> : <Empty text="Finish a task or project and your milestones will show up here." />}
       </DataCard>
     </div>
-    <button className="help-btn" type="button" onClick={() => setHelpOpen(true)} aria-haspopup="dialog"><SupportIcon />Need help?</button>
+    <div className="help-actions"><button className="help-btn" type="button" onClick={() => setHelpOpen(true)} aria-haspopup="dialog"><SupportIcon />Need help?</button></div>
   </section>;
 }
 

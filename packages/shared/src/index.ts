@@ -145,10 +145,12 @@ export const taskEditSchema = taskSchema.partial().extend({
   status: taskStatusSchema.shape.status.optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one task change' });
 export const resourceLinkSchema = z.object({
-  connectionId: z.string().cuid(),
+  connectionId: z.string().cuid().optional(),
+  provider: z.enum(['google', 'microsoft', 'trello', 'asana', 'notion', 'canva']).optional(),
   title: z.string().trim().min(2).max(180),
-  externalUrl: z.string().url().max(4000),
+  externalUrl: z.string().url().max(4000).refine((value) => /^https?:\/\//i.test(value), 'Use an HTTP or HTTPS link'),
   externalId: z.string().trim().min(1).max(512).optional(),
+  status: z.enum(['pending', 'ongoing', 'for_review', 'completed']).optional(),
 });
 export const resourceUpdateSchema = resourceLinkSchema.extend({
   assigneeId: z.string().cuid().optional(),
