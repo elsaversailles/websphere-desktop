@@ -9,6 +9,7 @@ function fixture(body = 'Existing project details') {
     create: vi.fn(async ({ data }) => ({ id: idea.id, ...data })),
     findUniqueOrThrow: vi.fn(async () => idea),
     update: vi.fn(async ({ data }) => ({ ...idea, ...data })),
+    delete: vi.fn(async () => idea),
   } };
   const service = Object.assign(Object.create(AppService.prototype), {
     prisma, caller: vi.fn(async () => caller), member: vi.fn(async () => ({})),
@@ -31,6 +32,13 @@ describe('title-only idea submission', () => {
     await expect(controller.idea('author', 'group-1', { title: 'Campus project', body: '  Project details  ' })).resolves.toMatchObject({ body: 'Project details' });
   });
 
+  it('rejects an idea title longer than 50 characters', async () => {
+    const { controller, prisma } = fixture();
+
+    await expect(controller.idea('author', 'group-1', { title: 'a'.repeat(51) })).rejects.toMatchObject({ response: { code: 'VALIDATION_FAILED' } });
+    expect(prisma.idea.create).not.toHaveBeenCalled();
+  });
+
   it('preserves existing details when a revision only changes the title', async () => {
     const { controller } = fixture();
     await expect(controller.revise('author', 'idea-1', { title: 'Updated project' })).resolves.toMatchObject({
@@ -43,5 +51,12 @@ describe('title-only idea submission', () => {
     await expect(controller.revise('author', 'idea-1', { title: 'Updated project', body: '' })).resolves.toMatchObject({
       title: 'Updated project', body: '', status: 'refined', readinessScore: expect.any(Number),
     });
+  });
+
+  it('deletes an unselected idea for its author', async () => {
+    const { controller, prisma } = fixture();
+
+    await expect(controller.deleteIdea('author', 'idea-1')).resolves.toMatchObject({ id: 'idea-1' });
+    expect(prisma.idea.delete).toHaveBeenCalledWith({ where: { id: 'idea-1' } });
   });
 });

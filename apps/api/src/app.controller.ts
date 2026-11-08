@@ -68,6 +68,7 @@ export class AppController {
   @GroupScope() @Get('groups/:id/ideas') async ideas(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.ideas(await this.caller(auth), id); }
   @Patch('ideas/:id') async revise(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.reviseIdea(await this.caller(auth), id, parse(ideaSchema, body)); }
   @Post('ideas/:id/reject') async rejectIdea(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.rejectIdea(await this.caller(auth), id); }
+  @Delete('ideas/:id') async deleteIdea(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.deleteIdea(await this.caller(auth), id); }
   @GroupScope() @Post('groups/:id/ideas/merge') async mergeIdeas(@Headers('authorization') auth: string, @Param('id') id: string, @Body('ideaIds') ideaIds: string[]) { return this.app.mergeIdeas(await this.caller(auth), id, ideaIds); }
   @GroupScope() @Post('groups/:id/polls') async poll(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.openPoll(await this.caller(auth), id, parse(pollCreateSchema, body)); }
   @Post('polls/:id/close') async closePoll(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.closePoll(await this.caller(auth), id); }
