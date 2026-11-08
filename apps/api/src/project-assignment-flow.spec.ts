@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { PushService } from './push.service.js';
@@ -6,7 +6,8 @@ import { PushService } from './push.service.js';
 // Exercise the real request schema, creation, dashboard and mobile notification path together;
 // replace only persistence and delivery so this regression cannot contact real users/devices.
 describe('project creation assignment flow', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-11-06T00:00:00Z')); });
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
   it('makes an initial assignment visible in the member dashboard and sends its mobile alert', async () => {
     const leaderId = 'clw00000000000000000000001';
@@ -69,7 +70,7 @@ describe('project creation assignment flow', () => {
     const controller = new AppController(service, {} as any, {} as any, {} as any, {} as any);
 
     await controller.createProject('leader', {
-      groupId, title: 'Research', description: 'Research project', memberIds: [memberId], deadline: '2026-11-08',
+      groupId, title: 'Research', memberIds: [memberId], startDate: '2026-11-06', deadline: '2026-11-08', externalTools: ['word', 'excel', 'forms', 'google'],
       initialTasks: [{ assigneeId: memberId, title: '  Write chapter 1  ' }],
     });
     const dashboard = await controller.dashboard('member');
@@ -77,8 +78,9 @@ describe('project creation assignment flow', () => {
     await Promise.all(deliveries);
 
     expect(prisma.task.create).toHaveBeenCalledOnce();
+    expect(project).toMatchObject({ description: '', externalTools: ['word', 'excel', 'forms', 'google'] });
     expect(dashboard.glance).toMatchObject({ activeProjects: 1, pendingTasks: 1 });
-    expect(dashboard.tasks).toEqual([expect.objectContaining({ id: 'task-1', title: 'Write chapter 1', status: 'pending', priority: 'medium', deadline: new Date('2026-11-08'), assignedBy: 'Project leader' })]);
+    expect(dashboard.tasks).toEqual([expect.objectContaining({ id: 'task-1', title: 'Write chapter 1', status: 'pending', priority: 'medium', startDate: new Date('2026-11-06'), deadline: new Date('2026-11-08'), assignedBy: 'Project leader' })]);
     expect(calendar.hints.filter((hint: any) => hint.type === 'task_deadline')).toEqual([expect.objectContaining({ id: 'task-1', title: 'Write chapter 1', deadline: new Date('2026-11-08') })]);
     expect(calendar.events).toEqual([]); // Assignment alone is sufficient; no manual calendar event.
     expect(emitNotification).toHaveBeenCalledWith(memberId, expect.objectContaining({ type: 'task_assignment', relatedId: 'task-1', relatedType: 'task' }));

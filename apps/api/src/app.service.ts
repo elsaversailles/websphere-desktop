@@ -14,7 +14,7 @@ import { DomainEventsService } from './domain-events.service.js';
 import { AuditLogService } from './audit-log.service.js';
 import { PushService } from './push.service.js';
 import { LocalStorageService } from './local-storage.service.js';
-import { passwordRequirements, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
+import { passwordRequirements, sameScheduleDate, scheduleDateErrors, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
@@ -435,13 +435,13 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   /** Mints a fresh, unique join code for a group (30-day expiry). Used at creation and to self-heal expired codes. */
   async issueJoinCode(groupId: string) { let code = this.code(); while (await this.prisma.joinCode.findUnique({ where: { code } })) code = this.code(); await this.prisma.joinCode.create({ data: { groupId, code, expiresAt: new Date(Date.now() + 30 * 864e5) } }); return code; }
   async joinGroup(caller: Caller, code: string) { const entry = await this.prisma.joinCode.findUnique({ where: { code }, include: { group: true } }); if (!entry || !entry.active || (entry.expiresAt && entry.expiresAt < new Date())) fail('INVALID_JOIN_CODE', 'Join code is invalid or expired', 400); await this.prisma.groupMember.upsert({ where: { groupId_userId: { groupId: entry.groupId, userId: caller.id } }, update: {}, create: { groupId: entry.groupId, userId: caller.id } }); return entry.group; }
-  async groups(caller: Caller) { return this.prisma.group.findMany({ where: { members: { some: { userId: caller.id } } }, include: { members: { where: { userId: caller.id }, select: { role: true } }, _count: { select: { projects: true, ideas: true } } } }); }
+  async groups(caller: Caller) { return this.prisma.group.findMany({ where: { members: { some: { userId: caller.id } } }, include: { members: { where: { userId: caller.id }, select: { role: true, chatHiddenAt: true, chatUnread: true } }, messages: { orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } }, _count: { select: { projects: true, ideas: true } } } }); }
   async searchGroupChats(caller: Caller, query: string) {
     const term = query.trim();
     if (!term) return this.groups(caller);
     const groups = await this.prisma.group.findMany({
       where: { members: { some: { userId: caller.id } }, OR: [{ name: { contains: term } }, { messages: { some: { body: { contains: term } } } }] },
-      include: { members: { where: { userId: caller.id }, select: { role: true } }, _count: { select: { projects: true, ideas: true } }, messages: { where: { body: { contains: term } }, orderBy: { createdAt: 'desc' }, take: 1, select: { body: true } } },
+      include: { members: { where: { userId: caller.id }, select: { role: true, chatHiddenAt: true, chatUnread: true } }, _count: { select: { projects: true, ideas: true } }, messages: { where: { body: { contains: term } }, orderBy: { createdAt: 'desc' }, take: 1, select: { body: true } } },
       orderBy: { name: 'asc' },
     });
     return groups.map((group: any) => ({ id: group.id, name: group.name, members: group.members, _count: group._count, messageMatch: group.messages[0]?.body ?? null }));
@@ -476,6 +476,15 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return membership;
   }
   async addGroupMemberByEmail(caller: Caller, groupId: string, email: string) { const user = await this.prisma.user.findUnique({ where: { email } }); if (!user) fail('NOT_FOUND', 'No registered account uses that email address', 404); return this.addGroupMember(caller, groupId, user.id); }
+  async setChatState(caller: Caller, groupId: string, action: 'read' | 'unread' | 'hide') {
+    await this.member(groupId, caller.id);
+    return this.prisma.groupMember.update({ where: { groupId_userId: { groupId, userId: caller.id } }, data: action === 'hide' ? { chatHiddenAt: new Date(), chatUnread: false } : action === 'unread' ? { chatUnread: true } : { chatHiddenAt: null, chatUnread: false } });
+  }
+  async promoteGroupMember(caller: Caller, groupId: string, userId: string) {
+    await this.member(groupId, caller.id, true);
+    await this.member(groupId, userId);
+    return this.prisma.groupMember.update({ where: { groupId_userId: { groupId, userId } }, data: { role: ProjectRole.Project_Leader } });
+  }
   async removeGroupMember(caller: Caller, groupId: string, userId: string) { await this.member(groupId, caller.id, true); await this.prisma.groupMember.delete({ where: { groupId_userId: { groupId, userId } } }); this.events.emitGroupMembershipRevoked(groupId, userId); return { ok: true }; }
   /**
    * Self-service exit, unlike removeGroupMember which is leader-only.
@@ -505,6 +514,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       if (responsibilities.has(assigneeId)) fail('VALIDATION_FAILED', 'Provide one initial task per member.', 400, { initialTasks: 'Duplicate assignee' });
       responsibilities.set(assigneeId, title);
     }
+    this.validateSchedule(input);
     // Commit the project, memberships and real assignments together. A failed task must not
     // leave a project that looks successful but requires the leader to enter the work again.
     const { project, tasks } = await this.prisma.$transaction(async (tx: any) => {
@@ -519,7 +529,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       for (const [assigneeId, title] of responsibilities) {
         const task = await tx.task.create({ data: {
           projectId: project.id, title, description: title, createdBy: caller.id,
-          deadline: project.deadline, priority: 'medium', status: 'pending',
+          startDate: project.startDate ?? null, deadline: project.deadline, priority: 'medium', status: 'pending',
           assignments: { create: { assigneeId, assignerId: caller.id } },
           workflow: { create: { projectId: project.id, actorId: caller.id, type: WorkflowEventType.assignment_change, toValue: assigneeId } },
         } });
@@ -536,7 +546,22 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async projects(caller: Caller) { return this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } } }, include: { group: true, members: { where: { userId: caller.id } }, tasks: true, _count: { select: { members: true } } } }); }
   async project(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { group: { include: { members: { include: { user: { select: { id: true, fullName: true } } } } } }, members: { include: { user: { select: { id: true, fullName: true } } } }, tasks: { include: { assignments: { where: { active: true } } } } } }); return { ...project, tasks: project.tasks.map((task: any) => ({ ...task, risk: taskPrediction(task, new Date()) })) }; }
-  async updateProject(caller: Caller, id: string, input: any) { await this.projectMember(id, caller.id, true); const { memberIds, ...data } = input; return this.prisma.project.update({ where: { id }, data }); }
+  private validateSchedule(input: any, previous?: any, kind: 'date' | 'datetime' = 'date', endLabel = 'End date') {
+    const startField = kind === 'date' ? 'startDate' : 'startAt';
+    const endField = kind === 'date' ? 'deadline' : 'endAt';
+    const start = input[startField] === undefined ? previous?.[startField] : input[startField];
+    const end = input[endField] === undefined ? previous?.[endField] : input[endField];
+    if (previous && sameScheduleDate(start, previous[startField], kind) && sameScheduleDate(end, previous[endField], kind)) return;
+    const errors = scheduleDateErrors(start, end, { kind, endLabel, timeZone: process.env.APP_TIME_ZONE ?? 'Asia/Manila' });
+    const fields = { ...(errors.start ? { [startField]: errors.start } : {}), ...(errors.end ? { [endField]: errors.end } : {}) };
+    if (Object.keys(fields).length) fail('VALIDATION_FAILED', Object.values(fields)[0], 400, fields);
+  }
+  async updateProject(caller: Caller, id: string, input: any) {
+    await this.projectMember(id, caller.id, true);
+    if (input.startDate !== undefined || input.deadline !== undefined) this.validateSchedule(input, await this.prisma.project.findUniqueOrThrow({ where: { id }, select: { startDate: true, deadline: true } }));
+    const { memberIds, ...data } = input;
+    return this.prisma.project.update({ where: { id }, data });
+  }
   async deleteProject(caller: Caller, id: string) {
     await this.projectMember(id, caller.id, true);
     await this.prisma.$transaction(async (tx: any) => {
@@ -564,7 +589,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async addProjectMember(caller: Caller, projectId: string, userId: string) { await this.projectMember(projectId, caller.id, true); const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } }); if (!project.groupId) fail('INVALID_OPERATION', 'Connect this independent project to a group before adding members.', 400); await this.member(project.groupId, userId); return this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: ProjectRole.Project_Member } }); }
   async updateResponsibility(caller: Caller, projectId: string, userId: string, responsibility: string) { await this.projectMember(projectId, caller.id, true); await this.projectMember(projectId, userId); return this.prisma.projectMember.update({ where: { projectId_userId: { projectId, userId } }, data: { responsibility } }); }
   async projectProgress(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { tasks: true } }); const analytics = projectAnalytics(project.tasks, project.deadline); return { progress: completionRate(project.tasks.filter((t) => t.status === 'completed').length, project.tasks.length), onTrack: analytics.riskLevel === 'on_track', ...analytics }; }
-  async createTask(caller: Caller, projectId: string, input: any) { await this.projectMember(projectId, caller.id, true); return this.prisma.task.create({ data: { ...input, projectId, createdBy: caller.id } }); }
+  async createTask(caller: Caller, projectId: string, input: any) { await this.projectMember(projectId, caller.id, true); this.validateSchedule(input, undefined, 'date', 'Due date'); return this.prisma.task.create({ data: { ...input, projectId, createdBy: caller.id } }); }
   async task(caller: Caller, id: string) {
     const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, include: { assignments: { where: { active: true } }, project: true } });
     if (!task.assignments.some((assignment: { assigneeId: string }) => assignment.assigneeId === caller.id)) await this.projectMember(task.projectId, caller.id);
@@ -575,11 +600,13 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async updateTask(caller: Caller, id: string, input: any) {
     const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, include: { assignments: { where: { active: true } }, project: { select: { title: true } } } });
     await this.projectMember(task.projectId, caller.id, true);
+    this.validateSchedule(input, task, 'date', 'Due date');
     const { assigneeId, status, ...details } = input;
     if (assigneeId) await this.projectMember(task.projectId, assigneeId);
     const previousAssigneeId = task.assignments[0]?.assigneeId ?? null;
     const reassigned = assigneeId !== undefined && assigneeId !== previousAssigneeId;
     const statusChanged = status !== undefined && status !== task.status;
+    if (statusChanged && status === 'completed') await this.requireTaskResource(id);
     const now = new Date();
     const updated = await this.prisma.$transaction(async (tx: any) => {
       const saved = await tx.task.update({ where: { id }, data: {
@@ -625,6 +652,10 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       if (admins.length) await this.notify(admins.map((admin: { id: string }) => admin.id), NotificationType.task_update, message, taskId, 'task');
     } catch { /* A notification failure must not turn a committed task change into a failed response. */ }
   }
+  private async requireTaskResource(taskId: string) {
+    const resource = await this.prisma.linkedResource.findFirst({ where: { taskId }, select: { id: true } });
+    if (!resource) fail('VALIDATION_FAILED', 'Attach a file link in Task Progress Tracker before marking this task completed.', 400);
+  }
   /** All task mutation routes share the same recipients and human-readable status message. */
   private async notifyTaskStatus(taskId: string, actorId: string, status: TaskStatus) {
     try {
@@ -657,6 +688,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const assignment = await this.prisma.taskAssignment.findFirst({ where: { taskId: id, assigneeId: caller.id, active: true } });
     if (!assignment) await this.projectMember(task.projectId, caller.id, true);
     if (status === task.status) return this.prisma.task.findUniqueOrThrow({ where: { id } });
+    if (status === 'completed') await this.requireTaskResource(id);
     const now = new Date();
     const [updated] = await this.prisma.$transaction([
       this.prisma.task.update({ where: { id }, data: { status, ...(status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: status === 'completed' ? now : null } }),
@@ -676,7 +708,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async tracker(caller: Caller, projectId: string) { await this.projectMember(projectId, caller.id); const tasks = await this.prisma.task.findMany({ where: { projectId } }); const counts = Object.fromEntries(['pending', 'ongoing', 'for_review', 'completed'].map((status) => [status, tasks.filter((task) => task.status === status).length])); return { ...counts, total: tasks.length, progress: completionRate(counts.completed, tasks.length) }; }
   async taskTracker(caller: Caller) {
-    const [tasks, connections, workflow, usage] = await Promise.all([
+    const [tasks, connections, workflow, usage, projects] = await Promise.all([
       this.prisma.task.findMany({
         where: { project: { members: { some: { userId: caller.id } } } },
         orderBy: { createdAt: 'desc' },
@@ -690,6 +722,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       this.prisma.toolConnection.findMany({ where: { userId: caller.id }, include: { tool: true }, orderBy: { lastSyncedAt: 'desc' } }),
       this.prisma.workflowEvent.findMany({ where: { project: { members: { some: { userId: caller.id } } } }, orderBy: { createdAt: 'desc' }, take: 24, include: { task: { select: { id: true, title: true } }, project: { select: { title: true } } } }),
       this.prisma.toolUsage.findMany({ where: { connection: { userId: caller.id } }, orderBy: { createdAt: 'desc' }, take: 24, include: { connection: { include: { tool: true } } } }),
+      this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } } }, select: { id: true, title: true, members: { select: { user: { select: { id: true, fullName: true, avatarUrl: true } } } } }, orderBy: { title: 'asc' } }),
     ]);
     const actorIds = [...new Set(workflow.map((event: any) => event.actorId))];
     const actors = actorIds.length ? await this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, fullName: true, avatarUrl: true } }) : [];
@@ -706,12 +739,12 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
         assignees: task.assignments.map((assignment: any) => task.project.members.find((member: any) => member.userId === assignment.assigneeId)?.user).filter(Boolean),
         canUpdateStatus,
         canAssign,
-        canEditResource: canUpdateStatus || canAssign,
+        canEditResource: canUpdateStatus,
         collaborators: task.project.members.map((member: any) => ({ id: member.user.id, fullName: member.user.fullName, avatarUrl: member.user.avatarUrl })),
       };
     });
     const workflowActivity = workflow.map((event: any) => ({
-      id: `workflow-${event.id}`, kind: 'workflow', type: event.type, taskTitle: event.task?.title ?? null, projectTitle: event.project.title,
+      id: `workflow-${event.id}`, kind: 'workflow', type: event.type, taskTitle: event.task?.title ?? null, projectId: event.projectId, projectTitle: event.project.title,
       actor: actors.find((actor: any) => actor.id === event.actorId) ?? null, fromValue: event.fromValue, toValue: event.toValue, createdAt: event.createdAt,
     }));
     const usageActivity = usage.map((event: any) => ({
@@ -719,18 +752,19 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     }));
     return {
       tasks: taskItems,
+      projects: projects.map((project) => ({ id: project.id, title: project.title, collaborators: project.members.map((member) => member.user) })),
       connections: connections.map((connection: any) => ({ id: connection.id, provider: connection.provider, platform: connection.tool.name, category: connection.tool.category, status: connection.status, syncState: connection.syncState, lastSyncedAt: connection.lastSyncedAt })),
       activity: [...workflowActivity, ...usageActivity].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 24),
     };
   }
   async linkTaskResource(caller: Caller, taskId: string, input: { connectionId?: string; provider?: ProviderId; title: string; externalUrl: string; externalId?: string; status?: TaskStatus }) {
     const task = await this.task(caller, taskId);
+    if (!task.assignments.some((assignment: any) => assignment.assigneeId === caller.id)) fail('RBAC_FORBIDDEN', 'Only the active assignee can attach a file link', 403);
     const connection = input.connectionId ? await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } }) : null;
     if (input.connectionId && !connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before linking a file', 400);
     const provider = connection?.provider ?? input.provider;
     if (!provider) fail('VALIDATION_FAILED', 'Choose a platform for this file link', 400);
     const changedStatus = input.status && input.status !== task.status;
-    if (changedStatus && !task.assignments.some((assignment: any) => assignment.assigneeId === caller.id)) fail('RBAC_FORBIDDEN', 'Only the active assignee can change task status', 403);
     const now = new Date();
     const resource = await this.prisma.$transaction(async (tx: any) => {
       const created = await tx.linkedResource.create({ data: { connectionId: connection?.id ?? null, provider, projectId: task.projectId, taskId, externalId: input.externalId ?? randomBytes(12).toString('hex'), title: input.title, externalUrl: input.externalUrl } });
@@ -754,9 +788,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const task = resource.task;
     const membership = await this.projectMember(task.projectId, caller.id);
     const activeAssignment = task.assignments[0];
-    const isAssignee = activeAssignment?.assigneeId === caller.id;
+    const isAssignee = task.assignments.some((assignment: any) => assignment.assigneeId === caller.id);
     const isLeader = membership.role === ProjectRole.Project_Leader;
-    if (!isAssignee && !isLeader) fail('RBAC_FORBIDDEN', 'Only the active assignee or project leader can edit this file link', 403);
+    if (!isAssignee) fail('RBAC_FORBIDDEN', 'Only the active assignee can edit this file link', 403);
     if (input.assigneeId && input.assigneeId !== activeAssignment?.assigneeId && !isLeader) fail('RBAC_FORBIDDEN', 'Only the project leader can reassign a task', 403);
     if (input.status && input.status !== task.status && !isAssignee) fail('RBAC_FORBIDDEN', 'Only the active assignee can change task status', 403);
     if (input.assigneeId) await this.projectMember(task.projectId, input.assigneeId);
@@ -781,12 +815,12 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async launchResource(caller: Caller, resourceId: string) {
     const resource = await this.prisma.linkedResource.findUniqueOrThrow({ where: { id: resourceId }, include: { connection: { include: { tool: true } } } });
-    if (resource.connection && resource.connection.userId !== caller.id) fail('RBAC_FORBIDDEN', 'This linked file belongs to another user connection', 403);
     if (resource.taskId) await this.task(caller, resource.taskId);
     else if (resource.projectId) await this.projectMember(resource.projectId, caller.id);
+    else if (!resource.connection || resource.connection.userId !== caller.id) fail('RBAC_FORBIDDEN', 'This linked file is not available to you', 403);
     if (!resource.connection) return { externalUrl: resource.externalUrl, platform: resource.provider };
     const externalUrl = await connectors[resource.connection.provider as ProviderId].launchUrl({ projectId: resource.projectId ?? undefined, taskId: resource.taskId ?? undefined, externalId: resource.externalId, title: resource.title, externalUrl: resource.externalUrl });
-    await this.prisma.toolUsage.create({ data: { connectionId: resource.connectionId, action: `Opened “${resource.title}”` } });
+    if (resource.connection.userId === caller.id) await this.prisma.toolUsage.create({ data: { connectionId: resource.connectionId, action: `Opened “${resource.title}”` } });
     return { externalUrl, platform: resource.connection.tool.name };
   }
   /**
@@ -878,9 +912,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (/\b(build|develop|design|create|implement)\b/i.test(body)) score += 5;
     return Math.min(100, score);
   }
-  async idea(caller: Caller, groupId: string, input: any) { await this.member(groupId, caller.id); return this.prisma.idea.create({ data: { ...input, readinessScore: this.ideaReadinessScore(input.title, input.body), groupId, authorId: caller.id } }); }
+  async idea(caller: Caller, groupId: string, input: any) { await this.member(groupId, caller.id); const body = input.body ?? ''; return this.prisma.idea.create({ data: { ...input, body, readinessScore: this.ideaReadinessScore(input.title, body), groupId, authorId: caller.id } }); }
   async ideas(caller: Caller, groupId: string) { await this.member(groupId, caller.id); return this.prisma.idea.findMany({ where: { groupId }, orderBy: { createdAt: 'desc' } }); }
-  async reviseIdea(caller: Caller, id: string, input: any) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can revise an unselected idea', 403); return this.prisma.idea.update({ where: { id }, data: { ...input, readinessScore: this.ideaReadinessScore(input.title, input.body), status: 'refined' } }); }
+  async reviseIdea(caller: Caller, id: string, input: any) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can revise an unselected idea', 403); const body = input.body ?? idea.body; return this.prisma.idea.update({ where: { id }, data: { ...input, body, readinessScore: this.ideaReadinessScore(input.title, body), status: 'refined' } }); }
   async suggestIdea(caller: Caller, id: string) {
     const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } });
     if (idea.authorId !== caller.id) fail('RBAC_FORBIDDEN', 'Only the author can request suggestions for this idea.', 403);
@@ -1070,6 +1104,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async createCalendarEvent(caller: Caller, input: any) {
     if (input.projectId) await this.projectMember(input.projectId, caller.id);
+    this.validateSchedule(input, undefined, 'datetime', 'End time');
     const event = await this.prisma.calendarEvent.create({ data: { ...input, ownerId: caller.id } });
     await this.notifyCalendarEvent(event, caller.id, 'scheduled');
     return event;
@@ -1078,6 +1113,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async updateCalendarEvent(caller: Caller, id: string, input: any) {
     const previous = await this.calendarEventAccess(caller, id);
     if (input.projectId && input.projectId !== previous.projectId) await this.projectMember(input.projectId, caller.id);
+    this.validateSchedule(input, previous, 'datetime', 'End time');
     const event = await this.prisma.calendarEvent.update({ where: { id }, data: input });
     const changed = ['title', 'type', 'projectId'].some((key) => previous[key] !== event[key])
       || previous.startAt.getTime() !== event.startAt.getTime()

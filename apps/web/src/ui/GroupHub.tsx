@@ -1,9 +1,9 @@
 import { FormEvent } from 'react';
 import type { GroupHub as GroupHubData } from './types';
 
-type GroupHubProps = { hub: GroupHubData; userId: string; onAdd: (email: string) => Promise<void>; onRemove: (userId: string) => Promise<void>; onIdeas: () => void; notify: (message: string) => void };
+type GroupHubProps = { hub: GroupHubData; userId: string; onAdd: (email: string) => Promise<void>; onRemove: (userId: string) => Promise<void>; onPromote: (userId: string) => Promise<void>; onIdeas: () => void; notify: (message: string) => void };
 
-export function GroupHub({ hub, userId, onAdd, onRemove, onIdeas, notify }: GroupHubProps) {
+export function GroupHub({ hub, userId, onAdd, onRemove, onPromote, notify }: GroupHubProps) {
   const membership = hub.group.members.find((member) => member.userId === userId);
   const leader = membership?.role === 'Project_Leader';
   const invitation = hub.group.joinCodes[0]?.code;
@@ -24,14 +24,13 @@ export function GroupHub({ hub, userId, onAdd, onRemove, onIdeas, notify }: Grou
   }
 
   return <section className="panel hub">
-    <header className="panel-heading"><div><span className="eyebrow">Collaboration hub</span><h2>{hub.group.name}</h2></div><button className="button primary" onClick={onIdeas}>Open ideas</button></header>
     <div className="hub-grid">
       <div>
         <h3>Invite members</h3>
         {invitation ? <div className="invite-code"><span>Share this code</span><strong>{invitation}</strong><button className="button secondary small" onClick={copyCode}>Copy</button></div> : <p className="muted">No active invitation code.</p>}
         <form className="inline-form" onSubmit={addMember}><input aria-label="Member email" name="email" placeholder="Member email" type="email" /><button className="button secondary small">Add</button></form>
         <h3 className="section-title">Members · {hub.group.members.length}</h3>
-        <div className="member-list">{hub.group.members.map((member) => <div className="member" key={member.userId}><span className="avatar">{member.user.fullName.split(' ').map((part) => part[0]).join('').slice(0, 2)}</span><span className="member-name">{member.user.fullName}</span><span className="pill">{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</span>{leader && member.userId !== userId ? <button className="text-button danger" onClick={() => void onRemove(member.userId)}>Kick</button> : null}</div>)}</div>
+        <div className="member-list">{hub.group.members.map((member) => <div className="member" key={member.userId}><span className="avatar">{member.user.fullName.split(' ').map((part) => part[0]).join('').slice(0, 2)}</span><span className="member-name">{member.user.fullName}</span><span className="pill">{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</span>{leader && member.userId !== userId && member.role !== 'Project_Leader' ? <button type="button" className="text-button" onClick={() => void onPromote(member.userId)}>Make leader</button> : null}{leader && member.userId !== userId ? <button className="text-button danger" onClick={() => void onRemove(member.userId)}>Kick</button> : null}</div>)}</div>
       </div>
       <div>
         <h3>Idea board</h3>

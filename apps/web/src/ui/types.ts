@@ -4,7 +4,8 @@ export type GroupSummary = {
   id: string;
   name: string;
   messageMatch?: string;
-  members: Array<{ role: GroupRole }>;
+  members: Array<{ role: GroupRole; chatHiddenAt?: string | null; chatUnread?: boolean }>;
+  messages?: Array<{ createdAt: string }>;
   _count: { projects: number; ideas: number };
 };
 

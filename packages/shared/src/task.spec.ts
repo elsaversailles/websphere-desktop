@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { taskEditSchema, taskSchema } from './index.js';
 
 describe('task scheduling contract', () => {
+  it.each([taskSchema, taskEditSchema])('enforces the 30-character title limit when creating or editing tasks', (schema) => {
+    expect(schema.safeParse({ title: 'A'.repeat(30) }).success).toBe(true);
+    const result = schema.safeParse({ title: 'A'.repeat(31) });
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues[0].message).toBe('Task titles must be 30 characters or fewer');
+  });
+
   it('accepts a planned start date without requiring a description', () => {
     expect(taskSchema.parse({ title: 'Write chapter 1', startDate: '2026-10-29', deadline: '2026-11-08' })).toEqual({
       title: 'Write chapter 1', description: '', startDate: new Date('2026-10-29'), deadline: new Date('2026-11-08'), priority: 'medium',

@@ -1,7 +1,8 @@
+import { TASK_TITLE_MAX_LENGTH } from '@websphere/shared';
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { getAccessToken, request, socketBaseUrl } from '../api';
-import { DateField } from './DateField';
+import { ScheduleDateFields } from './ScheduleDateFields';
 import { dateOnlyKey, formatDateOnly } from './dates';
 import { deadlineHealth, taskPriorityHealth, taskStatusHealth } from './health';
 import { dashboardProjectProgress } from './dashboardProjectProgress';
@@ -150,12 +151,12 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
 
   const projectMembers = detail?.group?.members ?? detail?.members ?? [];
   const memberName = (assigneeId?: string) => projectMembers.find((member) => member.userId === assigneeId)?.user.fullName ?? 'Unassigned';
-  return <section className="sp on">
+  return <section className="sp on projects-page">
     <div className="ph"><h2>My Projects</h2></div>
     <section className="cc">
       <div className="cc-head"><h3>Existing Projects</h3></div>
-      {projects === null ? <div className="legacy-empty">Loading projects…</div> : projects.length ? <table className="tbl">
-        <thead><tr><th>Project</th><th>Group</th><th>Role</th><th>Progress</th><th>End Date</th><th>Status</th><th>Actions</th></tr></thead>
+      {projects === null ? <div className="legacy-empty">Loading projects…</div> : projects.length ? <div className="project-table-scroll" role="region" aria-label="Existing projects" tabIndex={0}><table className="tbl projects-table">
+        <thead><tr><th>Project</th><th>Group</th><th>Role</th><th>Progress</th><th>Start Date</th><th>End Date</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>{projects.map((project) => {
           const { progress, health } = dashboardProjectProgress(project.tasks, project.status);
           const isLeader = project.members?.[0]?.role === 'Project_Leader';
@@ -163,29 +164,27 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
             <td><strong>{project.title}</strong></td><td>{project.group?.name ?? 'Independent'}</td>
             <td><span className="bdg ac">{isLeader ? 'Leader' : 'Member'}</span></td>
             <td><div className="progress-cell"><div className="pb-wrap"><div className={`pb ${health.tone}`} style={{ width: `${progress}%` }} /></div><span className={`pb-val ${health.tone}`}>{progress}%</span></div></td>
-            <td>{formatDateOnly(project.deadline)}</td><td><span className={`bdg ${health.tone}`}>{health.label}</span></td>
+            <td>{formatDateOnly(project.startDate)}</td><td>{formatDateOnly(project.deadline)}</td><td><span className={`bdg ${health.tone}`}>{health.label}</span></td>
             <td><div className="task-actions"><button className="btn-o btn-sm" onClick={() => void openTasks(project.id)}>{selectedProjectId === project.id ? 'Refresh Tasks' : isLeader ? 'Manage Tasks' : 'View Tasks'}</button>{isLeader ? <button type="button" className="btn-o btn-sm btn-red" disabled={saving} onClick={() => setConfirmation({ title: 'Delete project?', description: `“${project.title}” and all of its tasks will be permanently deleted.`, confirmLabel: 'Delete project', destructive: true, action: () => void deleteProject(project) })}>Delete</button> : null}</div></td>
           </tr>;
         })}</tbody>
-      </table> : <div className="legacy-empty">Your projects will appear here. Create your first project from the dashboard.</div>}
+      </table></div> : <div className="legacy-empty">Your projects will appear here. Create your first project from the dashboard.</div>}
     </section>
     {selectedProjectId ? <section className="cc task-manager">
       <div className="cc-head"><div><h3>{selectedProject?.title ?? 'Project'} Tasks</h3><span className="task-manager-subtitle">{leader ? 'Create and manage tasks for this project.' : 'View tasks assigned within this project.'}</span></div><div className="ph-acts">{leader ? <button className="btn-o btn-sm" onClick={() => setEditing((value) => !value)}>{editing ? 'Cancel Edit' : 'Edit Project'}</button> : null}<button className="btn-o btn-sm" onClick={() => { setSelectedProjectId(''); setDetail(null); setEditing(false); }}>Close</button></div></div>
       {loadingDetail ? <div className="legacy-empty">Loading project tasks…</div> : detail ? <>
         {editing && leader ? <form className="task-create-form project-edit-form" aria-label="Edit project" onSubmit={(event) => void saveEdit(event)}>
           <div className="task-form-field"><label className="lbl" htmlFor="project-edit-title">Project Title</label><input id="project-edit-title" className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={detail.title} placeholder="Project title" /></div>
-          <div className="task-form-field"><label className="lbl" htmlFor="project-edit-start-date">Start Date</label><DateField id="project-edit-start-date" name="startDate" label="Project start date" defaultValue={detail.startDate ? dateOnlyKey(detail.startDate) : ''} showJump={false} /></div>
-          <div className="task-form-field"><label className="lbl" htmlFor="project-edit-end-date">End Date</label><DateField id="project-edit-end-date" name="deadline" label="Project end date" defaultValue={detail.deadline ? dateOnlyKey(detail.deadline) : ''} showJump={false} /></div>
+          <ScheduleDateFields idPrefix="project-edit" endLabel="End Date" initialStart={detail.startDate ? dateOnlyKey(detail.startDate) : ''} initialEnd={detail.deadline ? dateOnlyKey(detail.deadline) : ''} editing fieldClassName="task-form-field" />
           <button className="btn btn-sm" disabled={saving}>{saving ? 'Saving…' : 'Save Changes'}</button>
         </form> : null}
         {leader ? <form className="task-create-form task-entry-form" aria-label="Create task" key={createFormKey} onSubmit={(event) => void createTask(event)}>
-          <div className="task-form-field"><label className="lbl" htmlFor="task-create-title">Task Title</label><input id="task-create-title" className="ifield" name="title" required minLength={2} maxLength={180} placeholder="Task title" /></div>
-          <div className="task-form-field"><label className="lbl" htmlFor="task-create-start-date">Start Date</label><DateField id="task-create-start-date" name="startDate" label="Task start date" showJump={false} /></div>
-          <div className="task-form-field"><label className="lbl" htmlFor="task-create-deadline">Due Date</label><DateField id="task-create-deadline" name="deadline" label="Task due date" showJump={false} /></div>
+          <div className="task-form-field"><label className="lbl" htmlFor="task-create-title">Task Title</label><input id="task-create-title" className="ifield" name="title" required minLength={2} maxLength={TASK_TITLE_MAX_LENGTH} aria-describedby="task-create-title-limit" placeholder="Task title" /><small className="task-title-limit" id="task-create-title-limit">Maximum {TASK_TITLE_MAX_LENGTH} characters</small></div>
+          <ScheduleDateFields idPrefix="task-create" fieldClassName="task-form-field" />
           <div className="task-form-field"><label className="lbl" htmlFor="task-create-assignee">Assigned Member</label><select id="task-create-assignee" className="legacy-select" name="assigneeId" defaultValue=""><option value="">Assign later</option>{projectMembers.map((member) => <option value={member.userId} key={member.userId}>{member.user.fullName}</option>)}</select></div>
           <button className="btn btn-sm" disabled={saving}>{saving ? 'Saving…' : 'Create Task'}</button>
         </form> : null}
-        {detail.tasks.length ? <table className="tbl">
+        {detail.tasks.length ? <div className="project-table-scroll" role="region" aria-label="Project tasks" tabIndex={0}><table className="tbl project-tasks-table">
           <thead><tr><th>Task</th><th>Assignee</th><th>Start Date</th><th>Due Date</th><th>Priority</th><th>Status</th>{leader ? <th>Actions</th> : null}</tr></thead>
           <tbody>{detail.tasks.map((task) => {
             const due = deadlineHealth(task.deadline, today);
@@ -205,7 +204,7 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
               </div></td> : null}
             </tr>;
           })}</tbody>
-        </table> : <div className="legacy-empty">No tasks yet.{leader ? ' Create the first one above.' : ''}</div>}
+        </table></div> : <div className="legacy-empty">No tasks yet.{leader ? ' Create the first one above.' : ''}</div>}
       </> : null}
     </section> : null}
     {confirmation ? <ConfirmDialog {...confirmation} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation.action; setConfirmation(null); action(); }} /> : null}
@@ -213,9 +212,8 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
       <div className="modal-ttl"><div><span id="task-editor-title">{editingTask.mode === 'reassign' ? 'Reassign Task' : 'Edit Task'}</span><small>{editingTask.mode === 'reassign' ? 'Task Assignment' : 'Task Details'}</small></div><button type="button" className="modal-close" disabled={saving} onClick={() => setEditingTask(null)} aria-label="Close task editor">×</button></div>
       <form className="project-create-form" key={`${editingTask.task.id}-${editingTask.mode}`} onSubmit={(event) => void saveTaskEdit(event)}>
         {editingTask.mode === 'edit' ? <>
-          <label className="lbl" htmlFor="task-edit-title">Task Title</label><input id="task-edit-title" className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={editingTask.task.title} />
-          <label className="lbl" htmlFor="task-edit-start-date">Start Date</label><DateField id="task-edit-start-date" name="startDate" label="Task start date" defaultValue={editingTask.task.startDate ? dateOnlyKey(editingTask.task.startDate) : ''} showJump={false} />
-          <label className="lbl" htmlFor="task-edit-deadline">Due Date</label><DateField id="task-edit-deadline" name="deadline" label="Task due date" defaultValue={editingTask.task.deadline ? dateOnlyKey(editingTask.task.deadline) : ''} showJump={false} />
+          <label className="lbl" htmlFor="task-edit-title">Task Title</label><input id="task-edit-title" className="ifield" name="title" required minLength={2} maxLength={TASK_TITLE_MAX_LENGTH} aria-describedby="task-edit-title-limit" defaultValue={editingTask.task.title} /><small className="task-title-limit" id="task-edit-title-limit">Maximum {TASK_TITLE_MAX_LENGTH} characters</small>
+          <ScheduleDateFields idPrefix="task-edit" initialStart={editingTask.task.startDate ? dateOnlyKey(editingTask.task.startDate) : ''} initialEnd={editingTask.task.deadline ? dateOnlyKey(editingTask.task.deadline) : ''} editing />
         </> : <p className="muted">Choose a replacement project member. They will receive a task notification.</p>}
         <label className="lbl" htmlFor="task-edit-assignee">{editingTask.mode === 'reassign' ? 'New Assignee' : 'Assigned Member'}</label>
         <select id="task-edit-assignee" className="ifield" name="assigneeId" required={editingTask.mode === 'reassign'} defaultValue={editingTask.mode === 'reassign' ? '' : editingTask.task.assignments[0]?.assigneeId ?? ''}>

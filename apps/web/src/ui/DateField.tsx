@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { dateOnlyKey, localDateKey } from './dates';
 
 const MONTHS = Array.from({ length: 12 }, (_, index) => new Date(2024, index, 1).toLocaleDateString(undefined, { month: 'short' }));
@@ -11,11 +11,20 @@ type DateFieldProps = {
   required?: boolean;
   id?: string;
   showJump?: boolean;
+  value?: string;
+  onValueChange?: (value: string) => void;
+  min?: string;
+  max?: string;
+  error?: string;
 };
 
 /** Uses the native picker, with optional direct month/year jumps where they add value. */
-export function DateField({ name, label, type = 'date', defaultValue = '', required = false, id, showJump = true }: DateFieldProps) {
-  const [value, setValue] = useState(defaultValue);
+export function DateField({ name, label, type = 'date', defaultValue = '', required = false, id, showJump = true, value: controlledValue, onValueChange, min, max, error }: DateFieldProps) {
+  const [internalValue, setInternalValue] = useState(defaultValue);
+  const value = controlledValue ?? internalValue;
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { inputRef.current?.setCustomValidity(error ?? ''); }, [error]);
+  function setValue(next: string) { setInternalValue(next); onValueChange?.(next); }
   const selected = value ? dateOnlyKey(value) : localDateKey();
   const [year, month] = selected.split('-').map(Number);
   const currentYear = new Date().getFullYear();
@@ -39,6 +48,7 @@ export function DateField({ name, label, type = 'date', defaultValue = '', requi
         {Array.from({ length: endYear - startYear + 1 }, (_, index) => startYear + index).map((option) => <option key={option} value={option}>{option}</option>)}
       </select>
     </div> : null}
-    <input id={id} className="ifield" name={name} type={type} required={required} value={value} onChange={(event) => setValue(event.target.value)} aria-label={label} />
+    <input ref={inputRef} id={id} className="ifield" name={name} type={type} required={required} min={min} max={max} value={value} onChange={(event) => setValue(event.target.value)} aria-label={label} aria-invalid={error ? true : undefined} aria-describedby={error ? `${id ?? name}-error` : undefined} />
+    {error ? <p className="schedule-field-error" id={`${id ?? name}-error`} role="alert">{error}</p> : null}
   </div>;
 }

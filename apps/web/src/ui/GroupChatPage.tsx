@@ -15,6 +15,11 @@ type ChatSearchGroup = GroupSummary & { messageMatch?: string | null };
 type UpcomingEvent = { id: string; title: string; startAt: string; endAt?: string | null; type: string };
 type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
 
+function chatIsVisible(group: GroupSummary) {
+  const hiddenAt = group.members[0]?.chatHiddenAt;
+  return !hiddenAt || !!group.messages?.[0] && new Date(group.messages[0].createdAt).getTime() > new Date(hiddenAt).getTime();
+}
+
 function mediaDeviceErrorMessage(error: unknown, kind: CallKind) {
   const name = error instanceof DOMException ? error.name : '';
   const deviceName = kind === 'video' ? 'microphone or camera' : 'microphone';
@@ -91,6 +96,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const [leaving, setLeaving] = useState(false);
   const [closingPoll, setClosingPoll] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+  const [chatMenu, setChatMenu] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<ConfirmAction | null>(null);
   const [extensionHours, setExtensionHours] = useState('24');
   const refreshHub = useCallback(async () => {
@@ -109,7 +115,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const pendingCandidatesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
   const iceServersRef = useRef<RTCIceServer[]>([]);
 
-  useEffect(() => { void request<GroupSummary[]>('/groups').then((next) => { setGroups(next); if (!selectedGroupId && next[0]) onSelectGroup(next[0].id); }).catch((error: Error) => notify(error.message)); }, [selectedGroupId, onSelectGroup, notify]);
+  useEffect(() => { let active = true; const refresh = () => void request<GroupSummary[]>('/groups').then((next) => { if (!active) return; setGroups(next); if (!selectedGroupId) { const first = next.find(chatIsVisible); if (first) onSelectGroup(first.id); } }).catch((error: Error) => notify(error.message)); refresh(); const timer = window.setInterval(refresh, 15000); return () => { active = false; window.clearInterval(timer); }; }, [selectedGroupId, onSelectGroup, notify]);
   useEffect(() => {
     let cancelled = false;
     void request<{ events: UpcomingEvent[] }>('/calendar').then((calendar) => {
@@ -120,6 +126,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     return () => { cancelled = true; };
   }, []);
   useEffect(() => { setManageOpen(false); if (!selectedGroupId) { setHub(null); return; } void request<GroupHub>(`/groups/${selectedGroupId}/hub`).then(setHub).catch((error: Error) => notify(error.message)); }, [selectedGroupId, notify]);
+  useEffect(() => { if (!selectedGroupId) return; let active = true; void request(`/groups/${selectedGroupId}/chat/read`, { method: 'POST' }).then(() => request<GroupSummary[]>('/groups')).then((next) => { if (active) setGroups(next); }).catch((error: Error) => notify(error.message)); return () => { active = false; }; }, [selectedGroupId, notify]);
   useEffect(() => {
     const term = searchQuery.trim();
     if (!term) { setSearchedGroups(null); return; }
@@ -140,6 +147,12 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [manageOpen]);
+  useEffect(() => {
+    if (!chatMenu) return;
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setChatMenu(null); };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [chatMenu]);
 
   function removePeer(socketId: string) {
     peersRef.current.get(socketId)?.close();
@@ -432,6 +445,24 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     } catch (error: any) { notify(error.message); }
   }
 
+  async function promoteMember(memberUserId: string) {
+    if (!hub || !viewerIsLeader) return;
+    const name = hub.group.members.find((member) => member.userId === memberUserId)?.user.fullName ?? 'Member';
+    try { await request(`/groups/${selectedGroupId}/members/${memberUserId}/promote`, { method: 'POST' }); await refreshHub(); notify(`${name} is now a group leader.`); }
+    catch (error: any) { notify(error.message); }
+  }
+
+  async function setChatState(groupId: string, action: 'read' | 'unread' | 'hide') {
+    try {
+      await request(`/groups/${groupId}/chat/${action}`, { method: 'POST' });
+      const next = await request<GroupSummary[]>('/groups');
+      setGroups(next);
+      if (action === 'hide' && groupId === selectedGroupId) { setHub(null); onSelectGroup(next.find(chatIsVisible)?.id ?? ''); }
+      if (action === 'hide') notify('Chat removed from your list.');
+      if (action === 'unread') notify('Chat marked as unread.');
+    } catch (error: any) { notify(error.message); }
+  }
+
   async function startProject() {
     const winner = hub?.poll?.options.slice().sort((a, b) => b.votes - a.votes)[0];
     if (!winner) return notify('Open a vote in Idea Management first.');
@@ -440,7 +471,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
 
   const participantName = (participantUserId: string) => hub?.group.members.find((member) => member.userId === participantUserId)?.user.fullName ?? 'Group member';
   const searchTerm = searchQuery.trim();
-  const visibleGroups = searchTerm ? searchedGroups ?? groups.filter((group) => group.name.toLocaleLowerCase().includes(searchTerm.toLocaleLowerCase())) : groups;
+  const visibleGroups = (searchTerm ? searchedGroups ?? groups.filter((group) => group.name.toLocaleLowerCase().includes(searchTerm.toLocaleLowerCase())) : groups).filter((group) => { const current = groups.find((item) => item.id === group.id); return current && chatIsVisible(current); });
   const visibleMessages = searchTerm ? matchingMessages ?? hub?.messages.filter((message) => message.body.toLocaleLowerCase().includes(searchTerm.toLocaleLowerCase())) ?? [] : hub?.messages ?? [];
   const ownSocketId = socketRef.current?.id ?? null;
   const isHost = !!ownSocketId && ownSocketId === hostSocketId;
@@ -458,7 +489,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     <div className="ph"><h2>Group Chat</h2></div>
     {incomingCall ? <div className="call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => void joinCall(incomingCall.kind)}>Join call</button><button className="btn-o btn-sm" onClick={onIncomingCallHandled}>Dismiss</button></div> : null}
     <div className="gc-teams-layout">
-      <aside className="gc-left-panel"><div className="gc-left-head"><h3>Chats</h3></div><div className="gc-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search chats or messages..." aria-label="Search group chats and messages" /></div><div className="gc-chat-list">{visibleGroups.length ? visibleGroups.map((group) => <button className={`gc-chat-item ${group.id === selectedGroupId ? 'active' : ''}`} key={group.id} onClick={() => onSelectGroup(group.id)}><GroupAvatar name={group.name} className="gc-list-avatar" /><span><strong>{group.name}</strong><small>{group.messageMatch ? `Message: ${group.messageMatch}` : `${group._count.projects} projects · ${group._count.ideas} ideas`}</small></span></button>) : <div className="gc-panel-empty">{searchTerm ? 'No chats or messages match your search.' : 'Your groups will appear here.'}</div>}</div><div className="gc-mini-calendar"><strong>{new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</strong><span>{searchTerm ? 'Matching messages are shown in the selected chat.' : nextEvent ? `${nextEvent.title} · ${new Date(nextEvent.startAt).toLocaleString()}` : 'No upcoming scheduled events.'}</span></div></aside>
+      <aside className="gc-left-panel"><div className="gc-left-head"><h3>Chats</h3></div><div className="gc-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search chats or messages..." aria-label="Search group chats and messages" /></div><div className="gc-chat-list">{visibleGroups.length ? visibleGroups.map((group) => <div className={`gc-chat-row ${group.id === selectedGroupId ? 'active' : ''}`} key={group.id}><button type="button" className="gc-chat-item" onClick={() => { onSelectGroup(group.id); setChatMenu(null); void setChatState(group.id, 'read'); }}><GroupAvatar name={group.name} className="gc-list-avatar" /><span><strong>{group.name}</strong>{group.messageMatch ? <small>Message: {group.messageMatch}</small> : null}</span>{groups.find((item) => item.id === group.id)?.members[0]?.chatUnread ? <i className="gc-unread-dot" aria-label="Unread" /> : null}</button><div className="gc-chat-options"><button type="button" className="gc-chat-menu-button" aria-label={`Options for ${group.name}`} aria-expanded={chatMenu === group.id} onClick={() => setChatMenu(chatMenu === group.id ? null : group.id)}>⋯</button>{chatMenu === group.id ? <div className="gc-chat-menu"><button type="button" onClick={() => { setChatMenu(null); void setChatState(group.id, 'unread'); }}>Mark as unread</button><button type="button" onClick={() => { setChatMenu(null); setConfirmation({ title: 'Delete chat?', description: `Remove ${group.name} from your chat list? The group and shared messages will remain available.`, confirmLabel: 'Delete chat', destructive: true, action: () => void setChatState(group.id, 'hide') }); }}>Delete</button></div> : null}</div></div>) : <div className="gc-panel-empty">{searchTerm ? 'No chats or messages match your search.' : 'Your groups will appear here.'}</div>}</div><div className="gc-mini-calendar"><strong>{new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</strong><span>{searchTerm ? 'Matching messages are shown in the selected chat.' : nextEvent ? `${nextEvent.title} · ${new Date(nextEvent.startAt).toLocaleString()}` : 'No upcoming scheduled events.'}</span></div></aside>
       {hub ? <>
         <main className="gc-main-chat">
           <header className="gc-chat-header"><GroupAvatar name={hub.group.name} className="gc-list-avatar large" /><div><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => setManageOpen(true)}>Add Members</button><button className="gc-leave-btn" disabled={leaving} onClick={() => setConfirmation({ title: 'Leave group?', description: `You will lose access to ${hub.group.name}’s chat, projects, and tasks.`, confirmLabel: 'Leave group', destructive: true, action: () => void leaveGroup() })}>{leaving ? 'Leaving…' : 'Leave'}</button></div></header>
@@ -475,8 +506,8 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     {confirmation ? <ConfirmDialog {...confirmation} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation.action; setConfirmation(null); action(); }} /> : null}
     {manageOpen && hub ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setManageOpen(false); }}>
       <div className="modal-box hub-modal" role="dialog" aria-modal="true" aria-label={`Group Hub for ${hub.group.name}`}>
-        <div className="modal-ttl"><span>Group Hub · {hub.group.name}</span><button type="button" className="modal-close" aria-label="Close Group Hub" onClick={() => setManageOpen(false)}>×</button></div>
-        <GroupHubPanel hub={hub} userId={userId} notify={notify} onAdd={addMember} onRemove={(memberUserId) => { const member = hub.group.members.find((item) => item.userId === memberUserId); setConfirmation({ title: 'Remove member?', description: `${member?.user.fullName ?? 'This member'} will immediately lose access to this group’s chat, projects, and tasks.`, confirmLabel: 'Remove member', destructive: true, action: () => void removeMember(memberUserId) }); return Promise.resolve(); }} onIdeas={onIdeas} />
+        <div className="modal-ttl"><span>Group Hub · {hub.group.name}</span><div className="hub-heading-actions"><button type="button" className="button primary" onClick={onIdeas}>Open ideas</button><button type="button" className="modal-close" aria-label="Close Group Hub" onClick={() => setManageOpen(false)}>×</button></div></div>
+        <GroupHubPanel hub={hub} userId={userId} notify={notify} onAdd={addMember} onPromote={promoteMember} onRemove={(memberUserId) => { const member = hub.group.members.find((item) => item.userId === memberUserId); setConfirmation({ title: 'Remove member?', description: `${member?.user.fullName ?? 'This member'} will immediately lose access to this group’s chat, projects, and tasks.`, confirmLabel: 'Remove member', destructive: true, action: () => void removeMember(memberUserId) }); return Promise.resolve(); }} onIdeas={onIdeas} />
       </div>
     </div> : null}
   </section>;

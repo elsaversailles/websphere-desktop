@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppService } from './app.service.js';
 import { taskEditSchema, taskSchema } from '@websphere/shared';
 
@@ -28,6 +28,8 @@ function taskService() {
 }
 
 describe('task authorization and persistence', () => {
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-28T00:00:00Z')); });
+  afterEach(() => vi.useRealTimers());
   it('creates a task with a planned start date and no description from the new form', async () => {
     const { service, prisma, projectMember } = taskService();
     const create = vi.fn(async ({ data }) => ({ id: 'task-2', ...data }));
