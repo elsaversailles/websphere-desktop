@@ -11,11 +11,12 @@ type ScheduleDateFieldsProps = {
   editing?: boolean;
   type?: 'date' | 'datetime-local';
   requiredStart?: boolean;
+  requiredEnd?: boolean;
   fieldClassName?: string;
 };
 
 /** Keep both native picker limits and inline errors in sync with the whole schedule. */
-export function ScheduleDateFields({ idPrefix, startLabel = 'Start Date', endLabel = 'Due Date', initialStart = '', initialEnd = '', editing = false, type = 'date', requiredStart = false, fieldClassName }: ScheduleDateFieldsProps) {
+export function ScheduleDateFields({ idPrefix, startLabel = 'Start Date', endLabel = 'Due Date', initialStart = '', initialEnd = '', editing = false, type = 'date', requiredStart = false, requiredEnd = false, fieldClassName }: ScheduleDateFieldsProps) {
   const [start, setStart] = useState(initialStart);
   const [end, setEnd] = useState(initialEnd);
   const [now, setNow] = useState(() => new Date());
@@ -33,6 +34,6 @@ export function ScheduleDateFields({ idPrefix, startLabel = 'Start Date', endLab
   const endId = `${idPrefix}-end`;
   return <>
     <div className={`schedule-date-field ${fieldClassName ?? ''}`}><label className="lbl" htmlFor={startId}>{startLabel}</label><DateField id={startId} name={type === 'date' ? 'startDate' : 'startAt'} label={startLabel} type={type} value={start} onValueChange={setStart} min={validate && type === 'datetime-local' && !end ? minimum : undefined} max={validate && end ? end : undefined} error={errors.start} required={requiredStart} showJump={false} /></div>
-    <div className={`schedule-date-field ${fieldClassName ?? ''}`}><label className="lbl" htmlFor={endId}>{endLabel}</label><DateField id={endId} name={type === 'date' ? 'deadline' : 'endAt'} label={endLabel} type={type} value={end} onValueChange={setEnd} min={endMinimum} error={errors.end} showJump={false} /></div>
+    <div className={`schedule-date-field ${fieldClassName ?? ''}`}><label className="lbl" htmlFor={endId}>{endLabel}</label><DateField id={endId} name={type === 'date' ? 'deadline' : 'endAt'} label={endLabel} type={type} value={end} onValueChange={setEnd} min={endMinimum} error={errors.end} required={requiredEnd} showJump={false} /></div>
   </>;
 }

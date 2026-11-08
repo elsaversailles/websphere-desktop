@@ -81,9 +81,12 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
     const form = event.currentTarget;
     const values = new FormData(form);
     const assigneeId = String(values.get('assigneeId') ?? '');
+    const startDate = String(values.get('startDate') ?? '');
+    const deadline = String(values.get('deadline') ?? '');
+    if (!startDate || !deadline) return notify('Start date and due date are required to create a task.');
     setSaving(true);
     try {
-      const task = await request<{ id: string }>(`/projects/${detail.id}/tasks`, { method: 'POST', body: JSON.stringify({ title: values.get('title'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined }) });
+      const task = await request<{ id: string }>(`/projects/${detail.id}/tasks`, { method: 'POST', body: JSON.stringify({ title: values.get('title'), startDate, deadline }) });
       if (assigneeId) {
         if (!detail.members.some((member) => member.userId === assigneeId)) await request(`/projects/${detail.id}/members`, { method: 'POST', body: JSON.stringify({ userId: assigneeId }) });
         await request(`/tasks/${task.id}/assign`, { method: 'POST', body: JSON.stringify({ assigneeId }) });
@@ -180,7 +183,7 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
         </form> : null}
         {leader ? <form className="task-create-form task-entry-form" aria-label="Create task" key={createFormKey} onSubmit={(event) => void createTask(event)}>
           <div className="task-form-field"><label className="lbl" htmlFor="task-create-title">Task Title</label><input id="task-create-title" className="ifield" name="title" required minLength={2} maxLength={TASK_TITLE_MAX_LENGTH} placeholder="Task title" /></div>
-          <ScheduleDateFields idPrefix="task-create" fieldClassName="task-form-field" />
+          <ScheduleDateFields idPrefix="task-create" fieldClassName="task-form-field" requiredStart requiredEnd />
           <div className="task-form-field"><label className="lbl" htmlFor="task-create-assignee">Assigned Member</label><select id="task-create-assignee" className="legacy-select" name="assigneeId" defaultValue=""><option value="">Assign later</option>{projectMembers.map((member) => <option value={member.userId} key={member.userId}>{member.user.fullName}</option>)}</select></div>
           <button className="btn btn-sm" disabled={saving}>{saving ? 'Saving…' : 'Create Task'}</button>
         </form> : null}

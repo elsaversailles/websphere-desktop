@@ -25,7 +25,6 @@ type TeamPerformanceWeek = { periodStart: string; periodEnd: string; label: stri
 type TeamMemberSummary = { id: string; fullName: string; role: string; totalContributions: number; totalCompleted: number; activeWeeks: number; performance: number; active: boolean };
 type TeamPerformance = { weeks: TeamPerformanceWeek[]; members: TeamMemberSummary[]; activeMembers: number; inactiveMembers: number };
 type AnalyticsProject = { members: Array<{ role: string; user: { id: string; fullName: string } }>; tasks: Array<{ status: string; assignments: Array<{ assigneeId: string }> }> };
-type ToolUsage = { provider: string; name: string; actions: number; usagePercent: number };
 type WorkflowSummary = { summary: string; recommendations: string[]; insights: Array<{ tone: 'great' | 'notice' | 'action'; label: string; text: string }> };
 type TaskRisk = { taskId: string; title: string; status: string; deadline?: string | null; projectTitle: string; assignees: string[]; score: number; level: 'high' | 'medium' | 'low'; predictedCompletion: string; delayDays: number };
 
@@ -218,18 +217,16 @@ export function ProjectsAnalyticsPage({ kind, notify }: { kind: 'workflow' | 'pr
   const [summary, setSummary] = useState<WorkflowSummary | null>(null);
   const [team, setTeam] = useState<TeamPerformance | null>(null);
   const [analyticsProject, setAnalyticsProject] = useState<AnalyticsProject | null>(null);
-  const [tools, setTools] = useState<ToolUsage[] | null>(null);
   useEffect(() => { void request<Project[]>('/projects').then((next) => { setProjects(next); setSelected((current) => current || next[0]?.id || ''); }).catch((error: Error) => notify(error.message)); }, [notify]);
   useEffect(() => {
     setAnalyticsProject(null); setTeam(null);
-    if (!selected) { setAnalytics(null); setTrends(null); setSummary(null); setTools(null); return; }
+    if (!selected) { setAnalytics(null); setTrends(null); setSummary(null); return; }
     let current = true;
     void request<AnalyticsProject>(`/projects/${selected}`).then((project) => { if (current) setAnalyticsProject(project); }).catch((error: Error) => { if (current) notify(error.message); });
     void request(`/projects/${selected}/analytics`).then(setAnalytics).catch((error: Error) => notify(error.message));
     void request<{ periods: Array<{ periodStart: string; tasksCompleted: number; progress: number }>; trend: string }>(`/projects/${selected}/analytics/trends`).then(setTrends).catch(() => setTrends(null));
     void request<WorkflowSummary>(`/projects/${selected}/analytics/summary`).then(setSummary).catch(() => setSummary(null));
     void request<TeamPerformance>(`/projects/${selected}/analytics/team`).then((result) => { if (current) setTeam(result); }).catch(() => { if (current) setTeam(null); });
-    void request<ToolUsage[]>(`/projects/${selected}/analytics/tools`).then(setTools).catch(() => setTools(null));
     return () => { current = false; };
   }, [selected, notify]);
   const performanceMembers = analyticsProject?.members.map(({ user, role }) => {
@@ -238,7 +235,7 @@ export function ProjectsAnalyticsPage({ kind, notify }: { kind: 'workflow' | 'pr
     return { id: user.id, fullName: user.fullName, role, performance: assigned.length ? Math.round(assigned.filter((task) => task.status === 'completed').length / assigned.length * 100) : 0, totalContributions: activity?.totalContributions ?? 0 };
   }) ?? null;
   const picker = <select className="legacy-select" value={selected} onChange={(event) => setSelected(event.target.value)}><option value="">Select a project</option>{projects?.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select>;
-  if (kind === 'workflow') return <section className="sp on workflow-analytics"><Head title="Workflow Analytics" action={picker} /><div className="krow c3 workflow-kpis"><Kpi value={analytics ? `${Math.round((analytics.overallEfficiency ?? 0) * 100)}%` : '—'} label="Overall Efficiency" /><Kpi value={analytics?.bottlenecks?.length ?? '—'} label="Bottlenecks Detected" tone="yel" /><Kpi value={analytics?.tasksCompleted ?? '—'} label="Tasks Completed" tone="grn" /></div><div className="g2 workflow-top-grid"><TrendChartCard trends={trends} /><TeamPerformanceCard members={performanceMembers} /></div><BottleneckAnalysis stages={analytics?.stages ?? null} /><div className="g2 workflow-bottom-grid"><ToolUsageCard tools={tools} /><WorkflowSummaryCard summary={summary} /></div></section>;
+  if (kind === 'workflow') return <section className="sp on workflow-analytics"><Head title="Workflow Analytics" action={picker} /><div className="krow c3 workflow-kpis"><Kpi value={analytics ? `${Math.round((analytics.overallEfficiency ?? 0) * 100)}%` : '—'} label="Overall Efficiency" /><Kpi value={analytics?.bottlenecks?.length ?? '—'} label="Bottlenecks Detected" tone="yel" /><Kpi value={analytics?.tasksCompleted ?? '—'} label="Tasks Completed" tone="grn" /></div><div className="g2 workflow-top-grid"><TrendChartCard trends={trends} /><TeamPerformanceCard members={performanceMembers} /></div><BottleneckAnalysis stages={analytics?.stages ?? null} /><div className="workflow-bottom-grid"><WorkflowSummaryCard summary={summary} /></div></section>;
   const taskRisks: TaskRisk[] = analytics?.taskRisks ?? [];
   const highRiskTasks = taskRisks.filter((task) => task.level === 'high');
   const delayedTasks = taskRisks.filter((task) => task.delayDays > 0);
@@ -771,9 +768,8 @@ function TeamPerformanceCard({ members }: { members: Array<Pick<TeamMemberSummar
   </div>;
 }
 function BottleneckAnalysis({ stages }: { stages: Array<{ taskId: string; stage: string; averageDays: number | null; expectedDays: number | null; delayDays: number; impact: 'high' | 'medium' | 'none' }> | null }) {
-  return <div className="cc workflow-bottlenecks"><div className="cc-head"><h3>Bottleneck Analysis</h3></div>{stages?.length ? <table className="tbl"><thead><tr><th>Stage</th><th>Avg Time Spent</th><th>Planned Window</th><th>Delay</th><th>Impact</th></tr></thead><tbody>{stages.map((stage) => <tr key={stage.taskId}><td>{stage.stage}</td><td>{stage.averageDays === null ? 'Not started' : formatDays(stage.averageDays)}</td><td>{stage.expectedDays === null ? 'Not set' : formatDays(stage.expectedDays)}</td><td className={`delay-${stage.impact}`}>{stage.delayDays > 0 ? `+${formatDays(stage.delayDays)}` : 'On Track'}</td><td><span className={`bdg ${stage.impact === 'high' ? 'r' : stage.impact === 'medium' ? 'y' : 'g'}`}>{stage.impact}</span></td></tr>)}</tbody></table> : <Empty>Stages with scheduled dates will appear here once work begins.</Empty>}</div>;
+  return <div className="cc workflow-bottlenecks"><div className="cc-head"><h3>Bottleneck Analysis</h3></div>{stages?.length ? <table className="tbl"><thead><tr><th>Stage</th><th>Avg Time Spent</th><th>Delay</th><th>Impact</th></tr></thead><tbody>{stages.map((stage) => <tr key={stage.taskId}><td>{stage.stage}</td><td>{stage.averageDays === null ? 'Not started' : formatDays(stage.averageDays)}</td><td className={`delay-${stage.impact}`}>{stage.delayDays > 0 ? `+${formatDays(stage.delayDays)}` : 'On Track'}</td><td><span className={`bdg ${stage.impact === 'high' ? 'r' : stage.impact === 'medium' ? 'y' : 'g'}`}>{stage.impact}</span></td></tr>)}</tbody></table> : <Empty>Stages with scheduled dates will appear here once work begins.</Empty>}</div>;
 }
-function ToolUsageCard({ tools }: { tools: ToolUsage[] | null }) { return <div className="cc tool-usage"><div className="cc-head"><h3>Connected Tool Usage</h3></div>{tools?.length ? <div className="performance-list">{tools.map((tool, index) => <div className={`performance-row tone-${index % 4}`} key={`${tool.provider}-${tool.name}`}><div className="performance-label"><span>{tool.name}</span><strong>{tool.usagePercent}%</strong></div><div className="performance-track"><i style={{ '--performance-progress': tool.usagePercent / 100 } as React.CSSProperties} /></div></div>)}</div> : <Empty>Usage will appear after your team links and uses an external tool.</Empty>}</div>; }
 function WorkflowSummaryCard({ summary }: { summary: WorkflowSummary | null }) { return <div className="cc workflow-summary"><div className="cc-head"><h3>Workflow Summary</h3></div>{summary ? <div className="summary-insights">{summary.insights.map((insight, index) => <div className={`summary-insight ${insight.tone}`} key={index}><strong>{insight.label}:</strong> {insight.text}</div>)}</div> : <Empty>Your workflow summary will appear here.</Empty>}</div>; }
 function formatDays(value: number) { const rounded = Math.round(value * 10) / 10; return `${rounded % 1 === 0 ? rounded.toFixed(0) : rounded} day${rounded === 1 ? '' : 's'}`; }
 function TaskRiskCard({ task }: { task: TaskRisk }) { return <article className={`risk-task-card ${task.level}`}><RiskRing score={task.score} title={task.title} /><div className="risk-attribution"><span>{assigneeLabel(task)}</span><small>{task.projectTitle}</small></div></article>; }

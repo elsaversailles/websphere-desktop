@@ -162,7 +162,7 @@ export const resourceUpdateSchema = resourceLinkSchema.extend({
   assigneeId: z.string().cuid().optional(),
   status: z.enum(['pending', 'ongoing', 'for_review', 'completed']).optional(),
 });
-export const ideaSchema = z.object({ title: z.string().trim().min(2).max(180), body: z.string().trim().optional(), category: z.string().trim().min(2).max(120).default('Academic Project') });
+export const ideaSchema = z.object({ title: z.string().trim().min(2).max(50), body: z.string().trim().optional(), category: z.string().trim().min(2).max(120).default('Academic Project') });
 export const calendarEventSchema = z.object({ title: z.string().trim().min(2), type: z.enum(['meeting','work_session','presentation','activity']), startAt: z.coerce.date(), endAt: z.coerce.date().nullable().optional(), projectId: z.string().cuid().optional() });
 /** `durationHours` is how long members may vote; null/omitted means no time limit (the leader closes it by hand). Up to 30 days. */
 export const pollCreateSchema = z.object({ ideaIds: z.array(z.string().min(1)).min(2), durationHours: z.number().positive().max(720).nullable().optional() });

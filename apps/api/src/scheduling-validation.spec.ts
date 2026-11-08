@@ -43,7 +43,7 @@ describe('scheduling API validation', () => {
   it.each(['project', 'task', 'event'] as const)('rejects a past %s deadline using the app timezone', async (kind) => {
     const { controller } = fixture();
     const operation = kind === 'project' ? controller.createProject('token', { title: 'Research', deadline: '2026-11-08' })
-      : kind === 'task' ? controller.createTask('token', 'project-1', { title: 'Write report', deadline: '2026-11-08' })
+      : kind === 'task' ? controller.createTask('token', 'project-1', { title: 'Write report', startDate: '2026-11-08', deadline: '2026-11-08' })
         : controller.createEvent('token', { title: 'Meeting', type: 'meeting', startAt: '2026-11-08T15:00:00Z', endAt: '2026-11-08T16:00:00Z' });
     await expect(operation).rejects.toThrow('cannot be in the past');
   });
@@ -54,7 +54,18 @@ describe('scheduling API validation', () => {
     vi.mocked(service.caller).mockResolvedValueOnce({ ...caller, id: assigneeId });
     await controller.createProject('token', { title: 'Research', startDate: '2026-11-09', deadline: '2026-11-09', initialTasks: [{ assigneeId, title: 'Write report' }] });
     expect(prisma.task.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ startDate: new Date('2026-11-09'), deadline: new Date('2026-11-09') }) }));
-    await expect(controller.createTask('token', 'project-1', { title: 'Write report', deadline: '2026-11-09' })).resolves.toMatchObject({ deadline: new Date('2026-11-09') });
+    await expect(controller.createTask('token', 'project-1', { title: 'Write report', startDate: '2026-11-09', deadline: '2026-11-09' })).resolves.toMatchObject({ deadline: new Date('2026-11-09') });
+  });
+
+  it.each(['startDate', 'deadline'] as const)('requires a task %s before saving', async (missingField) => {
+    const { controller, prisma } = fixture();
+    const dates = { startDate: '2026-11-09', deadline: '2026-11-10' };
+    delete dates[missingField];
+
+    await expect(controller.createTask('token', 'project-1', { title: 'Write report', ...dates })).rejects.toMatchObject({
+      response: { code: 'VALIDATION_FAILED', fields: { [missingField]: expect.stringContaining('required') } },
+    });
+    expect(prisma.task.create).not.toHaveBeenCalled();
   });
 
   it.each(['project', 'task', 'event'] as const)('merges partial %s date edits with the stored other endpoint', async (kind) => {

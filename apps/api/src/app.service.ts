@@ -633,7 +633,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async addProjectMember(caller: Caller, projectId: string, userId: string) { await this.projectMember(projectId, caller.id, true); const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } }); if (!project.groupId) fail('INVALID_OPERATION', 'Connect this independent project to a group before adding members.', 400); await this.member(project.groupId, userId); return this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: ProjectRole.Project_Member } }); }
   async updateResponsibility(caller: Caller, projectId: string, userId: string, responsibility: string) { await this.projectMember(projectId, caller.id, true); await this.projectMember(projectId, userId); return this.prisma.projectMember.update({ where: { projectId_userId: { projectId, userId } }, data: { responsibility } }); }
   async projectProgress(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { tasks: true } }); const analytics = projectAnalytics(project.tasks, project.deadline); return { progress: completionRate(project.tasks.filter((t) => t.status === 'completed').length, project.tasks.length), onTrack: analytics.riskLevel === 'on_track', ...analytics }; }
-  async createTask(caller: Caller, projectId: string, input: any) { await this.projectMember(projectId, caller.id, true); this.validateSchedule(input, undefined, 'date', 'Due date'); return this.prisma.task.create({ data: { ...input, projectId, createdBy: caller.id } }); }
+  async createTask(caller: Caller, projectId: string, input: any) { await this.projectMember(projectId, caller.id, true); if (!input.startDate || !input.deadline) fail('VALIDATION_FAILED', 'Start date and due date are required to create a task.', 400, { ...(!input.startDate ? { startDate: 'Start date is required' } : {}), ...(!input.deadline ? { deadline: 'Due date is required' } : {}) }); this.validateSchedule(input, undefined, 'date', 'Due date'); return this.prisma.task.create({ data: { ...input, projectId, createdBy: caller.id } }); }
   async task(caller: Caller, id: string) {
     const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, include: { assignments: { where: { active: true } }, project: true } });
     if (!task.assignments.some((assignment: { assigneeId: string }) => assignment.assigneeId === caller.id)) await this.projectMember(task.projectId, caller.id);
@@ -957,7 +957,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return Math.min(100, score);
   }
   async idea(caller: Caller, groupId: string, input: any) { await this.member(groupId, caller.id); const body = input.body ?? ''; return this.prisma.idea.create({ data: { ...input, body, readinessScore: this.ideaReadinessScore(input.title, body), groupId, authorId: caller.id } }); }
-  async ideas(caller: Caller, groupId: string) { await this.member(groupId, caller.id); return this.prisma.idea.findMany({ where: { groupId }, orderBy: { createdAt: 'desc' } }); }
+  async ideas(caller: Caller, groupId: string) { await this.member(groupId, caller.id); return this.prisma.idea.findMany({ where: { groupId, status: { not: 'rejected' } }, orderBy: { createdAt: 'desc' } }); }
   async reviseIdea(caller: Caller, id: string, input: any) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can revise an unselected idea', 403); const body = input.body ?? idea.body; return this.prisma.idea.update({ where: { id }, data: { ...input, body, readinessScore: this.ideaReadinessScore(input.title, body), status: 'refined' } }); }
   async suggestIdea(caller: Caller, id: string) {
     const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } });
@@ -968,6 +968,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return { ideaId: id, ...result };
   }
   async rejectIdea(caller: Caller, id: string) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can reject an unselected idea', 403); return this.prisma.idea.update({ where: { id }, data: { status: 'rejected' } }); }
+  async deleteIdea(caller: Caller, id: string) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can delete an unselected idea', 403); return this.prisma.idea.delete({ where: { id } }); }
   async mergeIdeas(caller: Caller, groupId: string, ideaIds: string[]) {
     await this.member(groupId, caller.id);
     const ideas = await this.prisma.idea.findMany({ where: { id: { in: ideaIds }, groupId } });
