@@ -22,3 +22,19 @@ describe('ICE server endpoint', () => {
     expect(turn.iceServers).not.toHaveBeenCalled();
   });
 });
+
+describe('profile photo removal', () => {
+  it('clears only the authenticated user’s avatar', async () => {
+    const caller = { id: 'user-1' };
+    const app = { caller: vi.fn().mockResolvedValue(caller), updateMe: vi.fn().mockResolvedValue({ id: caller.id, avatarUrl: null }) };
+    const controller = new AppController(app as any, {} as any, {} as any, {} as any, {} as any);
+    await expect(controller.removeAvatar('Bearer token')).resolves.toEqual({ id: 'user-1', avatarUrl: null });
+    expect(app.updateMe).toHaveBeenCalledWith(caller, { avatarUrl: null });
+  });
+  it('does not update a profile when authentication fails', async () => {
+    const app = { caller: vi.fn().mockRejectedValue(new ForbiddenException()), updateMe: vi.fn() };
+    const controller = new AppController(app as any, {} as any, {} as any, {} as any, {} as any);
+    await expect(controller.removeAvatar('Bearer invalid')).rejects.toBeInstanceOf(ForbiddenException);
+    expect(app.updateMe).not.toHaveBeenCalled();
+  });
+});

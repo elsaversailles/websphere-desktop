@@ -1,4 +1,5 @@
 import { z } from 'zod';
+export { SCHEDULING_TIME_ZONE, sameScheduleDate, scheduleDateErrors, schedulingDay, type ScheduleDate, type ScheduleErrors, type ScheduleKind } from './scheduling.js';
 
 export const roles = ['Administrator', 'Project_Leader', 'Project_Member'] as const;
 export type Role = (typeof roles)[number];
@@ -123,11 +124,16 @@ export const profileUpdateSchema = z.object({
   institution: z.string().trim().min(2).max(160).optional(),
   course: z.string().trim().min(2).max(160).optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one profile field' });
+export const TASK_TITLE_MAX_LENGTH = 30;
+const taskTitleSchema = z.string().trim().min(2).max(TASK_TITLE_MAX_LENGTH, 'Task titles must be 30 characters or fewer');
+export const PROJECT_EXTERNAL_TOOLS = { google: 'Google Workspace', word: 'Microsoft Word', excel: 'Microsoft Excel', forms: 'Google Forms', trello: 'Trello', asana: 'Asana' } as const;
+const projectExternalToolsSchema = z.array(z.enum(['google', 'word', 'excel', 'forms', 'trello', 'asana'])).max(6).transform((tools) => [...new Set(tools)]);
 export const projectSchema = z.object({
   // A project can be started independently; linking it to a group chat is optional.
-  groupId: z.string().cuid().optional(), title: z.string().trim().min(2).max(180), description: z.string().trim().min(1),
+  groupId: z.string().cuid().optional(), title: z.string().trim().min(2).max(180), description: z.string().trim().default(''),
   startDate: z.coerce.date().optional(), deadline: z.coerce.date().optional(), memberIds: z.array(z.string().cuid()).default([]),
-  initialTasks: z.array(z.object({ assigneeId: z.string().cuid(), title: z.string().trim().min(2).max(180) })).default([]),
+  initialTasks: z.array(z.object({ assigneeId: z.string().cuid(), title: taskTitleSchema })).default([]),
+  externalTools: projectExternalToolsSchema.default([]),
 });
 export const projectUpdateSchema = z.object({
   title: z.string().trim().min(2).max(180).optional(), description: z.string().trim().min(1).optional(),
@@ -135,7 +141,7 @@ export const projectUpdateSchema = z.object({
   status: z.enum(['active', 'completed', 'archived', 'on_hold']).optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one project change' });
 export const taskSchema = z.object({
-  title: z.string().trim().min(2).max(180), description: z.string().trim().default(''),
+  title: taskTitleSchema, description: z.string().trim().default(''),
   startDate: z.coerce.date().nullable().optional(), deadline: z.coerce.date().nullable().optional(),
   priority: z.enum(['low', 'medium', 'high']).default('medium'), expectedDurationHrs: z.number().positive().optional(),
 });
@@ -156,8 +162,8 @@ export const resourceUpdateSchema = resourceLinkSchema.extend({
   assigneeId: z.string().cuid().optional(),
   status: z.enum(['pending', 'ongoing', 'for_review', 'completed']).optional(),
 });
-export const ideaSchema = z.object({ title: z.string().trim().min(2).max(180), body: z.string().trim().min(1), category: z.string().trim().min(2).max(120).default('Academic Project') });
-export const calendarEventSchema = z.object({ title: z.string().trim().min(2), type: z.enum(['meeting','work_session','presentation','activity']), startAt: z.coerce.date(), endAt: z.coerce.date().optional(), projectId: z.string().cuid().optional() });
+export const ideaSchema = z.object({ title: z.string().trim().min(2).max(180), body: z.string().trim().optional(), category: z.string().trim().min(2).max(120).default('Academic Project') });
+export const calendarEventSchema = z.object({ title: z.string().trim().min(2), type: z.enum(['meeting','work_session','presentation','activity']), startAt: z.coerce.date(), endAt: z.coerce.date().nullable().optional(), projectId: z.string().cuid().optional() });
 /** `durationHours` is how long members may vote; null/omitted means no time limit (the leader closes it by hand). Up to 30 days. */
 export const pollCreateSchema = z.object({ ideaIds: z.array(z.string().min(1)).min(2), durationHours: z.number().positive().max(720).nullable().optional() });
 export const pollExtendSchema = z.object({ hours: z.number().positive().max(720) });

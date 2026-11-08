@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppService } from './app.service.js';
+
+beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-11-06T00:00:00Z')); });
+afterEach(() => vi.useRealTimers());
 
 /**
  * projectSchema defaults memberIds to [], so it always reaches the service. It maps onto the
@@ -22,6 +25,15 @@ function serviceWithPrismaSpy() {
 }
 
 describe('createProject payload', () => {
+  it('persists all selected external tools with the project', async () => {
+    const { service, create } = serviceWithPrismaSpy();
+    const externalTools = ['google', 'word', 'excel', 'forms', 'trello', 'asana'];
+    await service.createProject({ id: 'leader', role: 'Project_Leader', tv: 0 } as any, {
+      title: 'Research', description: 'Scope', externalTools,
+    });
+    expect(create.mock.calls[0][0].data.externalTools).toEqual(externalTools);
+  });
+
   it('maps memberIds onto the members relation instead of passing it as a column', async () => {
     const { service, create } = serviceWithPrismaSpy();
 
@@ -68,9 +80,10 @@ describe('createProject payload', () => {
 
 describe('initial project task assignments', () => {
   const caller = { id: 'leader', role: 'Project_Leader', tv: 0 } as const;
+  const startDate = new Date('2026-11-06T00:00:00.000Z');
   const deadline = new Date('2026-11-08T00:00:00.000Z');
   const input = {
-    groupId: 'group-1', title: 'Research', description: 'Research project', deadline,
+    groupId: 'group-1', title: 'Research', description: 'Research project', startDate, deadline,
     memberIds: ['leader', 'member-1', 'member-2', 'member-3'],
     initialTasks: [{ assigneeId: 'leader', title: 'Write chapter 1' }, { assigneeId: 'member-1', title: 'Write chapter 2' }],
   };
@@ -85,7 +98,7 @@ describe('initial project task assignments', () => {
     for (const { assigneeId, title } of input.initialTasks) {
       expect(taskCreate).toHaveBeenCalledWith({ data: {
         projectId: 'project-1', title, description: title, createdBy: caller.id,
-        deadline, priority: 'medium', status: 'pending',
+        startDate, deadline, priority: 'medium', status: 'pending',
         assignments: { create: { assigneeId, assignerId: caller.id } },
         workflow: { create: { projectId: 'project-1', actorId: caller.id, type: 'assignment_change', toValue: assigneeId } },
       } });
@@ -103,8 +116,14 @@ describe('initial project task assignments', () => {
 
   it('allows an independent project to start with a task for its creator', async () => {
     const { service, taskCreate } = serviceWithPrismaSpy();
-    await service.createProject(caller, { title: 'Solo', description: 'My work', initialTasks: [input.initialTasks[0]] });
-    expect(taskCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ assignments: { create: { assigneeId: 'leader', assignerId: 'leader' } } }) }));
+    await service.createProject(caller, { title: 'Solo', description: 'My work', startDate, deadline, initialTasks: [input.initialTasks[0]] });
+    expect(taskCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ startDate, deadline, assignments: { create: { assigneeId: 'leader', assignerId: 'leader' } } }) }));
+  });
+
+  it('leaves task start dates unset when the project has no start date', async () => {
+    const { service, taskCreate } = serviceWithPrismaSpy();
+    await service.createProject(caller, { ...input, startDate: undefined });
+    for (const [call] of taskCreate.mock.calls) expect(call.data.startDate).toBeNull();
   });
 
   it('rejects assignments to people not selected for the project before writing anything', async () => {

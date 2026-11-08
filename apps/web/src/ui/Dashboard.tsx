@@ -1,8 +1,9 @@
+import { PROJECT_EXTERNAL_TOOLS, TASK_TITLE_MAX_LENGTH } from '@websphere/shared';
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { getAccessToken, request, socketBaseUrl } from '../api';
 import type { GroupHub as GroupHubData, GroupSummary } from './types';
-import { DateField } from './DateField';
+import { ScheduleDateFields } from './ScheduleDateFields';
 import { dateOnlyKey, formatDateOnly, localDateFromKey } from './dates';
 import { type Tone, avatarTone, dateKey, deadlineCountdown, deadlineHealth, initials, taskPriorityHealth, relativeTime, worstTone } from './health';
 import { dashboardProjectProgress } from './dashboardProjectProgress';
@@ -140,7 +141,7 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
     });
     setSaving(true);
     try {
-      await request('/projects', { method: 'POST', body: JSON.stringify({ ...(createGroupId ? { groupId: createGroupId } : {}), title: values.get('title'), description: values.get('description'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, memberIds, initialTasks }) });
+      await request('/projects', { method: 'POST', body: JSON.stringify({ ...(createGroupId ? { groupId: createGroupId } : {}), title: values.get('title'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, memberIds, initialTasks, externalTools: values.getAll('externalTools') }) });
       setCreateOpen(false);
       await refreshDashboard();
       notify(initialTasks.length ? 'Project created and tasks assigned.' : 'Project created.');
@@ -170,19 +171,18 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
     setMonthCursor((current) => { const next = new Date(current.year, current.month + step, 1); return { year: next.getFullYear(), month: next.getMonth() }; });
   }
 
-  if (!data) return <section className="sp on"><div className="cc">Loading your workspace…</div></section>;
+  if (!data) return <section className="sp on dashboard-page"><div className="cc">Loading your workspace…</div></section>;
   const today = new Date();
   const todayKey = dateKey(today);
-  return <section className="sp on">
+  return <section className="sp on dashboard-page">
     <div className="ph"><div><h2>Dashboard</h2><div className="ph-sub dashboard-welcome">Welcome, {name}!</div></div><div className="ph-acts"><button className="ai-head-btn" title="WebSphere AI" onClick={() => onPage('assistant')}>✦</button><button className="new-btn" title="Create new project" onClick={() => void openCreateDialog()}>+</button><div className="notif-popover-wrap" ref={notificationsRef}><button className="notif-head-btn" title="Notifications" aria-label="Notifications" aria-haspopup="dialog" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen((open) => !open)}><BellIcon />{unread ? <span className="notif-head-dot">{unread > 9 ? '9+' : unread}</span> : null}</button>{notificationsOpen ? <section className="notif-popover" role="dialog" aria-label="Notifications"><header className="notif-popover-header"><h3>Notifications</h3><button type="button" onClick={() => { setNotificationsOpen(false); onPage('notifications'); }}>View All</button></header><div className="notif-popover-list">{data.notifications.length ? data.notifications.slice(0, 4).map((item) => <button type="button" className={`notif-popover-item ${item.read ? 'read' : ''}`} key={item.id} onClick={() => activateNotification(item)}><span className="notif-popover-dot" /><span><strong>{item.message}</strong><small>{item.createdAt ? relativeTime(item.createdAt) : item.read ? 'Read' : 'New'}</small></span></button>) : <p className="notif-popover-empty">You have no notifications yet.</p>}</div></section> : null}</div></div></div>
     {createOpen ? <div className="modal-ov open project-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setCreateOpen(false); }}><div className="modal-box project-modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title"><div className="modal-ttl"><div><span id="project-modal-title">Create New Project</span><small>New Project Details</small></div><button type="button" className="modal-close" onClick={() => setCreateOpen(false)} aria-label="Close new project form">×</button></div><form className="project-create-form" onSubmit={createProject}>
       <label className="lbl" htmlFor="project-title">Project Name</label><input className="ifield" id="project-title" name="title" required minLength={2} maxLength={180} placeholder="Enter project name" />
       <label className="lbl" htmlFor="project-group">Project Group</label><select className="ifield" id="project-group" value={createGroupId} onChange={(event) => void pickCreateGroup(event.target.value)}><option value="">No group — independent project</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select>
       <label className="lbl">Team Members</label><fieldset className="project-member-picker" disabled={!createGroupId || !createGroupHub}><legend className="sr-only">Team Members</legend>{!createGroupId ? <label className="project-member-option"><input type="checkbox" checked readOnly /><span>{name}</span></label> : createGroupHub ? createGroupHub.group.members.map((member) => <label className="project-member-option" key={member.userId}><input type="checkbox" checked={selectedMemberIds.includes(member.userId)} onChange={() => toggleProjectMember(member.userId)} /><span>{member.user.fullName}</span></label>) : <span>Group members are unavailable.</span>}</fieldset>
-      <label className="lbl">Task Assignment Per Member</label><div className={`project-responsibilities ${projectMembers.length ? '' : 'empty'}`}>{projectMembers.length ? projectMembers.map((member) => <label key={member.id}><span>{member.name}</span><input className="ifield" name={`responsibility-${member.id}`} minLength={2} maxLength={180} placeholder={`Assign ${member.name} a task`} /></label>) : <span>Add members first, then assign tasks here.</span>}</div>
-      <label className="lbl" htmlFor="external-tools">External Tools Will Be Used</label><select className="ifield project-tools-select" id="external-tools" name="externalTools" defaultValue="" aria-label="External tools used for this project"><option value="" disabled>Select external tools</option><option value="google">Google Workspace</option><option value="microsoft">Microsoft 365</option><option value="trello">Trello</option><option value="asana">Asana</option></select>
-      <div className="project-date-grid"><div><label className="lbl" htmlFor="project-start-date">Start Date</label><DateField id="project-start-date" name="startDate" label="Project start date" showJump={false} /></div><div><label className="lbl" htmlFor="project-deadline">End Date</label><DateField id="project-deadline" name="deadline" label="Project end date" showJump={false} /></div></div>
-      <label className="lbl" htmlFor="project-description">Project Description</label><textarea className="ifield project-description" id="project-description" name="description" required placeholder="Describe the project goals and scope…" />
+      <label className="lbl">Task Assignment Per Member</label><div className={`project-responsibilities ${projectMembers.length ? '' : 'empty'}`}>{projectMembers.length ? projectMembers.map((member) => <label key={member.id}><span>{member.name}</span><input className="ifield" name={`responsibility-${member.id}`} minLength={2} maxLength={TASK_TITLE_MAX_LENGTH} title={`Maximum ${TASK_TITLE_MAX_LENGTH} characters`} placeholder={`Assign ${member.name} a task`} /></label>) : <span>Add members first, then assign tasks here.</span>}</div>
+      <fieldset className="project-tools-picker" disabled={saving}><legend className="lbl">External Tools Will Be Used</legend><p>Select all tools you plan to use.</p><div>{Object.entries(PROJECT_EXTERNAL_TOOLS).map(([value, label]) => <label className="project-tool-option" key={value}><input type="checkbox" name="externalTools" value={value} /><span>{label}</span></label>)}</div></fieldset>
+      <div className="project-date-grid"><ScheduleDateFields idPrefix="new-project" endLabel="End Date" /></div>
       <div className="modal-acts project-modal-actions"><button type="button" className="btn-o" onClick={() => setCreateOpen(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Creating…' : 'Create Project'}</button></div>
     </form></div></div> : null}
     {helpOpen ? <div className="modal-ov open support-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}><div className="modal-box support-modal" role="dialog" aria-modal="true" aria-labelledby="support-request-title"><div className="modal-ttl"><div><span id="support-request-title">Request support</span><small>Tell the WebSphere administrators what you need.</small></div><button type="button" className="modal-close" onClick={() => setHelpOpen(false)} aria-label="Close support request">×</button></div><form onSubmit={submitHelpTicket}>
@@ -195,17 +195,17 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
     <div className="dashboard-main-grid">
       <div className="g2 dashboard-tables">
         <DataCard title="Recent Projects" action="View All" onAction={() => onPage('projects')}>
-          {data.projects.length ? <table className="tbl"><thead><tr><th>Project</th><th>Progress</th><th>Status</th></tr></thead><tbody>{data.projects.slice(0, 8).map((project) => {
+          {data.projects.length ? <div className="dashboard-table-scroll" role="region" aria-label="Recent projects" tabIndex={0}><table className="tbl"><thead><tr><th>Project</th><th>Progress</th><th>Status</th></tr></thead><tbody>{data.projects.slice(0, 8).map((project) => {
             const { progress, health } = dashboardProjectProgress(project.tasks, project.status);
             return <tr key={project.id}>
               <td className="table-title">{project.title}</td>
               <td><div className="progress-cell"><div className="pb-wrap"><div className={`pb ${health.tone}`} style={{ width: `${progress}%` }} /></div><span className={`pb-val ${health.tone}`}>{progress}%</span></div></td>
               <td><span className={`bdg ${health.tone}`}>{health.label}</span></td>
             </tr>;
-          })}</tbody></table> : <Empty text="Your recent projects will appear here after you create or join one." />}
+          })}</tbody></table></div> : <Empty text="Your recent projects will appear here after you create or join one." />}
         </DataCard>
         <DataCard title="My Tasks" action="View All" onAction={() => onPage('tasks')}>
-          {data.tasks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Deadline</th><th>Priority</th></tr></thead><tbody>{data.tasks.slice(0, 8).map((task) => {
+          {data.tasks.length ? <div className="dashboard-table-scroll" role="region" aria-label="My tasks" tabIndex={0}><table className="tbl"><thead><tr><th>Task</th><th>Project</th><th>Deadline</th><th>Priority</th></tr></thead><tbody>{data.tasks.slice(0, 8).map((task) => {
             const priority = taskPriorityHealth(task, localDay);
             const due = task.status !== 'completed' && task.deadline ? priority : deadlineHealth(task.deadline);
             return <tr key={task.id}>
@@ -214,7 +214,7 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
               <td className={`table-sub ${due ? `due-${due.tone}` : ''}`}>{formatDateOnly(task.deadline, { month: 'short', day: 'numeric' })}</td>
               <td><span className={`bdg ${priority.tone}`}>{priority.label}</span></td>
             </tr>;
-          })}</tbody></table> : <Empty text="Tasks assigned to you will appear here." />}
+          })}</tbody></table></div> : <Empty text="Tasks assigned to you will appear here." />}
         </DataCard>
       </div>
       <aside className="cc calendar-card">

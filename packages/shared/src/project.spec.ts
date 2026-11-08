@@ -13,10 +13,30 @@ describe('project creation task contract', () => {
 
   it('keeps clients that create projects without initial tasks compatible', () => {
     expect(projectSchema.parse(project).initialTasks).toEqual([]);
+    expect(projectSchema.parse(project).externalTools).toEqual([]);
   });
 
-  it.each(['', ' ', 'X', 'X'.repeat(181)])('rejects invalid task titles before creating a project: %j', (title) => {
+  it('allows project creation without a description and preserves descriptions sent by existing clients', () => {
+    expect(projectSchema.parse({ title: 'Research' }).description).toBe('');
+    expect(projectSchema.parse({ ...project, description: '  Project scope  ' }).description).toBe('Project scope');
+  });
+
+  it('accepts every tool together, including Word, Excel and Google Forms', () => {
+    const externalTools = ['google', 'word', 'excel', 'forms', 'trello', 'asana'];
+    expect(projectSchema.parse({ ...project, externalTools }).externalTools).toEqual(externalTools);
+  });
+
+  it('deduplicates selections and rejects unsupported tool values', () => {
+    expect(projectSchema.parse({ ...project, externalTools: ['word', 'word', 'excel'] }).externalTools).toEqual(['word', 'excel']);
+    expect(projectSchema.safeParse({ ...project, externalTools: ['microsoft'] }).success).toBe(false);
+  });
+
+  it.each(['', ' ', 'X', 'X'.repeat(31)])('rejects invalid task titles before creating a project: %j', (title) => {
     expect(projectSchema.safeParse({ ...project, initialTasks: [{ assigneeId, title }] }).success).toBe(false);
+  });
+
+  it('accepts a 30-character initial task while keeping project titles independent', () => {
+    expect(projectSchema.safeParse({ ...project, title: 'P'.repeat(180), initialTasks: [{ assigneeId, title: 'T'.repeat(30) }] }).success).toBe(true);
   });
 
   it('rejects invalid assignee IDs', () => {

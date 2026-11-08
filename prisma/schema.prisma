@@ -176,6 +176,8 @@ model GroupMember {
   userId String
   role ProjectRole @default(Project_Member)
   joinedAt DateTime @default(now())
+  chatHiddenAt DateTime?
+  chatUnread Boolean @default(false)
   group Group @relation(fields: [groupId], references: [id])
   user User @relation(fields: [userId], references: [id])
   @@unique([groupId, userId])
@@ -203,6 +205,7 @@ model Project {
   ideaId String? @unique
   title String
   description String @db.Text
+  externalTools Json?
   startDate DateTime?
   deadline DateTime?
   status ProjectStatus @default(active)

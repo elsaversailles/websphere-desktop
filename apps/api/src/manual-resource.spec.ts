@@ -36,6 +36,36 @@ describe('manual task file links', () => {
     expect(prisma.linkedResource.create).not.toHaveBeenCalled();
   });
 
+  it('does not allow another member to attach a link without a status change', async () => {
+    const { service, prisma } = fixture();
+    await expect(service.linkTaskResource({ ...caller, id: 'other' }, 'task-1', link)).rejects.toThrow('Only the active assignee');
+    expect(prisma.linkedResource.create).not.toHaveBeenCalled();
+  });
+
+  it('does not allow even a project leader to edit another assignee’s link', async () => {
+    const { service, prisma } = fixture();
+    prisma.linkedResource.findUniqueOrThrow = vi.fn(async () => ({ id: 'resource-1', connection: null, task: { id: 'task-1', projectId: 'project-1', assignments: [{ assigneeId: 'member-1' }] } }));
+    prisma.linkedResource.update = vi.fn();
+    Object.assign(service, { projectMember: vi.fn(async () => ({ role: 'Project_Leader' })) });
+    await expect(service.updateLinkedResource({ ...caller, id: 'leader' }, 'resource-1', link)).rejects.toThrow('Only the active assignee');
+    expect(prisma.linkedResource.update).not.toHaveBeenCalled();
+  });
+
+  it('lets a project teammate view a linked file owned by another connection', async () => {
+    const { service, prisma } = fixture();
+    prisma.linkedResource.findUniqueOrThrow = vi.fn(async () => ({ id: 'resource-1', taskId: 'task-1', projectId: 'project-1', externalId: 'file-1', title: 'Report', externalUrl: link.externalUrl, connectionId: 'connection-1', connection: { userId: 'owner', provider: 'google', tool: { name: 'Google Drive' } } }));
+    prisma.toolUsage = { create: vi.fn() };
+    await expect(service.launchResource({ ...caller, id: 'teammate' }, 'resource-1')).resolves.toMatchObject({ externalUrl: link.externalUrl });
+    expect(service.task).toHaveBeenCalledWith(expect.objectContaining({ id: 'teammate' }), 'task-1');
+    expect(prisma.toolUsage.create).not.toHaveBeenCalled();
+  });
+
+  it('does not expose another user’s unscoped connection resource', async () => {
+    const { service, prisma } = fixture();
+    prisma.linkedResource.findUniqueOrThrow = vi.fn(async () => ({ taskId: null, projectId: null, connection: { userId: 'owner' } }));
+    await expect(service.launchResource(caller, 'resource-1')).rejects.toThrow('not available to you');
+  });
+
   it('rejects unsafe or malformed links', () => {
     expect(resourceLinkSchema.safeParse({ ...link, externalUrl: 'javascript:alert(1)' }).success).toBe(false);
     expect(resourceLinkSchema.safeParse({ ...link, externalUrl: 'not a URL' }).success).toBe(false);

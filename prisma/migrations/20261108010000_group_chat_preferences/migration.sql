@@ -1,0 +1,1 @@
+ALTER TABLE `GroupMember` ADD COLUMN `chatHiddenAt` DATETIME(3) NULL, ADD COLUMN `chatUnread` BOOLEAN NOT NULL DEFAULT false;

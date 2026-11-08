@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppService } from './app.service.js';
 
 const actor = { id: 'member-1', role: 'Project_Member', tv: 0 } as const;
@@ -18,6 +18,7 @@ function fixture() {
       update: vi.fn(async ({ data }) => Object.assign(task, data)),
     },
     taskAssignment: { findFirst: vi.fn(async () => task.assignments[0]) },
+    linkedResource: { findFirst: vi.fn(async () => ({ id: 'resource-1' })) },
     workflowEvent: { create: vi.fn(async () => ({})) },
     user: {
       findUniqueOrThrow: vi.fn(async () => ({ fullName: 'Alex Santos' })),
@@ -44,7 +45,8 @@ function fixture() {
 }
 
 describe('scheduled event notifications', () => {
-  afterEach(() => vi.unstubAllEnvs());
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-11-01T00:00:00Z')); });
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
   const input = { title: 'Project review', type: 'meeting', startAt: new Date('2026-11-05T02:00:00Z'), endAt: new Date('2026-11-05T03:00:00Z'), projectId: 'project-1' };
 
   it('saves a project event and notifies its owner and active project members through the maintenance delivery pipeline', async () => {
@@ -75,12 +77,12 @@ describe('scheduled event notifications', () => {
     const { service, stored } = fixture();
     const event = await service.createCalendarEvent(actor, input);
     stored.length = 0;
-    await service.updateCalendarEvent(actor, event.id, { startAt: new Date('2026-11-06T02:00:00Z') });
+    await service.updateCalendarEvent(actor, event.id, { startAt: new Date('2026-11-06T02:00:00Z'), endAt: new Date('2026-11-06T03:00:00Z') });
     expect(stored).toHaveLength(2);
     expect(stored[0].message).toContain('updated “Project review”');
     expect(stored[0].message).toContain('Nov 6, 2026');
     stored.length = 0;
-    await service.updateCalendarEvent(actor, event.id, { startAt: new Date('2026-11-06T02:00:00Z') });
+    await service.updateCalendarEvent(actor, event.id, { startAt: new Date('2026-11-06T02:00:00Z'), endAt: new Date('2026-11-06T03:00:00Z') });
     expect(stored).toHaveLength(0);
   });
 
