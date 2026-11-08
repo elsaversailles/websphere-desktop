@@ -46,6 +46,24 @@ export class EmailService {
     return true;
   }
 
+  async sendEmailChangeConfirmation(email: string, token: string) {
+    const configuredBase = this.config.get('OAUTH_CALLBACK_BASE_URL');
+    const callbackBase = configuredBase
+      ?? (this.config.get('NODE_ENV') === 'production'
+        ? new URL('/api/', this.config.get('WEB_ORIGIN').split(',')[0].trim()).toString()
+        : `http://localhost:${this.config.get('PORT')}`);
+    const confirmUrl = new URL('auth/email-change/confirm', `${callbackBase.replace(/\/+$/, '')}/`);
+    confirmUrl.searchParams.set('token', token);
+    await this.send({
+      from: this.config.get('SES_FROM'),
+      to: email,
+      subject: 'Confirm your new WebSphere email address',
+      text: `Confirm your new WebSphere email address: ${confirmUrl.toString()}\n\nThis link expires soon and can only be used once. If you did not request this change, you can ignore this email.`,
+      html: `<p>Confirm your new WebSphere email address by using the link below.</p><p><a href="${confirmUrl.toString()}">Confirm email address</a></p><p>This link expires soon and can only be used once. If you did not request this change, you can ignore this email.</p>`,
+    }, 'Email-change confirmation could not be delivered. Verify the mail configuration and try again.');
+    return true;
+  }
+
   async sendRegistrationVerification(email: string, code: string) {
     await this.send({
       from: this.config.get('SES_FROM'),

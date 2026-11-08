@@ -133,7 +133,7 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     setBusy(true);
     try {
       const result = await request<{ ok: true; resetToken?: string }>('/auth/password/forgot', { method: 'POST', body: JSON.stringify({ email }) });
-      setMessage('If that locked account exists, a reset link has been sent.');
+      setMessage('If an account matches that email, a reset link has been sent.');
       if (result.resetToken) { setResetToken(result.resetToken); setMode('reset'); }
       else setMode('login');
     } catch (error: unknown) { showError(error); } finally { setBusy(false); }
@@ -215,7 +215,7 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <p className="alink"><button type="button" disabled={busy || otpResendInMs > 0} onClick={() => void resendVerification()}>{otpResendInMs > 0 ? `Resend code in ${Math.ceil(otpResendInMs / 1000)}s` : 'Resend code'}</button> · <button type="button" disabled={busy} onClick={() => changeMode('register')}>Edit details</button></p>
     </form> : null}
     {mode === 'forgot' ? <form className="abox" onSubmit={(event) => void submitForgot(event)}>
-      <h1 className="atitle">Reset Password</h1><p className="asub">Locked accounts receive a one-time reset link by email.</p>
+      <h1 className="atitle">Reset Password</h1><p className="asub">We’ll send a one-time reset link to your email.</p>
       <AuthFeedback error={errorMessage} message={message} />
       <AuthField label="Email Address" name="email" type="email" placeholder="your@email.com" />
       <button className="abtn" disabled={busy}>{busy ? 'Sending…' : 'Send Reset Link'}</button>

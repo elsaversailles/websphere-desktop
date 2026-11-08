@@ -16,6 +16,7 @@ const environmentSchema = z.object({
   LOGIN_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
   LOGIN_WINDOW_SECONDS: z.coerce.number().int().positive().default(900),
   PASSWORD_RESET_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
+  EMAIL_CHANGE_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
   REGISTRATION_OTP_TTL_SECONDS: z.coerce.number().int().min(60).max(1800).default(300),
   REGISTRATION_OTP_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
   REGISTRATION_OTP_MAX_SENDS: z.coerce.number().int().min(1).max(10).default(3),

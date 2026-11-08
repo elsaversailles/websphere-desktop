@@ -34,12 +34,14 @@ export class AppController {
   @Public() @Post('auth/login') login(@Body() body: unknown) { const input = parse(loginSchema, body); return this.app.login(input.email, input.password); }
   @Public() @Post('auth/admin/login') adminLogin(@Body() body: unknown) { const input = parse(loginSchema, body); return this.app.login(input.email, input.password, true); }
   @Public() @Post('auth/refresh') refresh(@Body('refresh') refresh: string) { return this.app.refreshToken(refresh); }
+  @Public() @Get('auth/session-valid') async sessionValid(@Headers('authorization') auth?: string) { await this.app.caller(auth, { touchSession: false }); return { ok: true }; }
   @Post('auth/logout') async logout(@Headers('authorization') auth?: string) { return this.app.logout(await this.caller(auth)); }
   @Public() @Post('auth/password/change') async change(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(passwordChangeSchema, body); return this.app.changePassword(await this.app.caller(auth, { allowLocked: true }), input.oldPassword, input.password, input.confirm); }
   @Get('auth/session-policy') async sessionPolicy() { return this.app.sessionPolicy(); }
   @Public() @Post('auth/password/forgot') forgot(@Body() body: unknown) { return this.app.forgot(parse(passwordForgotSchema, body).email); }
   @Public() @Post('auth/deactivation-request') deactivationRequest(@Body() body: unknown) { const input = parse(deactivationRequestSchema, body); return this.app.requestAccountDeactivation(input.email, input.reason); }
   @Public() @Post('auth/password/reset') reset(@Body() body: unknown) { const input = parse(passwordResetSchema, body); return this.app.resetPassword(input.token, input.password, input.confirm); }
+  @Public() @Redirect() @Get('auth/email-change/confirm') async confirmEmailChange(@Query('token') token?: string) { try { await this.app.confirmEmailChange(token ?? ''); return { url: this.app.emailChangeReturnUrl('confirmed'), statusCode: 302 }; } catch { return { url: this.app.emailChangeReturnUrl('invalid'), statusCode: 302 }; } }
   @Get('users/me') async me(@Headers('authorization') auth: string) { return this.app.me(await this.caller(auth)); }
   @Patch('users/me') async updateMe(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.updateMe(await this.caller(auth), parse(profileUpdateSchema, body)); }
   @Delete('users/me') async deleteMe(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(accountDeleteSchema, body); return this.app.deleteMyAccount(await this.caller(auth), input.password); }

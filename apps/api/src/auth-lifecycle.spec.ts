@@ -10,7 +10,7 @@ function serviceWith(overrides: Record<string, unknown> = {}) {
     prisma: { user: { findUniqueOrThrow: vi.fn(), findUnique: vi.fn(), update: vi.fn() } },
     redis: { take: vi.fn(), get: vi.fn(), set: vi.fn(), delete: vi.fn(), setMembers: vi.fn().mockResolvedValue([]) },
     config: { get: vi.fn((key: string) => key === 'PASSWORD_RESET_TTL_SECONDS' ? 3600 : 'test') },
-    email: { sendPasswordReset: vi.fn().mockResolvedValue(false) },
+    email: { sendPasswordReset: vi.fn().mockResolvedValue(false), sendEmailChangeConfirmation: vi.fn().mockResolvedValue(true) },
     audit: { log: vi.fn().mockResolvedValue(undefined) },
     ...overrides,
   });
@@ -18,6 +18,21 @@ function serviceWith(overrides: Record<string, unknown> = {}) {
 }
 
 describe('guided and locked password reset lifecycle', () => {
+  it('keeps only the newest web login active for an account', async () => {
+    const passwordHash = await hash('Valid!Pass9');
+    const update = vi.fn().mockResolvedValue({ id: 'user-1', email: 'member@example.edu', fullName: 'Member', role: 'Project_Member', tokenVersion: 4 });
+    const service = serviceWith({
+      prisma: { user: { findUnique: vi.fn().mockResolvedValue({ id: 'user-1', email: 'member@example.edu', fullName: 'Member', role: 'Project_Member', status: 'active', passwordHash, tokenVersion: 3 }), update } },
+    });
+    service.issue = vi.fn().mockResolvedValue({ access: 'new-access', refresh: 'new-refresh', role: 'Project_Member' });
+
+    await expect(service.login('member@example.edu', 'Valid!Pass9')).resolves.toMatchObject({ access: 'new-access', user: { id: 'user-1' } });
+
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ tokenVersion: { increment: 1 } }) }));
+    expect(service.redis.delete).toHaveBeenCalledWith('auth:login-failures:user-1');
+    expect(service.issue).toHaveBeenCalledWith(expect.objectContaining({ id: 'user-1', tokenVersion: 4 }));
+  });
+
   it('denies guided password changes for locked accounts before checking the old password', async () => {
     const prisma = { user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: 'user-1', status: 'locked', passwordHash: 'unused' }) } };
     const service = serviceWith({ prisma });
@@ -49,14 +64,29 @@ describe('guided and locked password reset lifecycle', () => {
     expect(service.redis.delete).toHaveBeenCalled();
   });
 
-  it('creates a one-time reset token only for a locked account', async () => {
-    const prisma = { user: { findUnique: vi.fn().mockResolvedValue({ id: 'user-1', email: 'locked@example.edu', status: 'locked' }) } };
+  it('keeps an email unchanged until its one-time confirmation link is opened', async () => {
+    const current = { id: 'user-1', email: 'old@example.edu', fullName: 'Member', passwordHash: 'secret' };
+    const update = vi.fn().mockResolvedValue({ ...current, email: 'new@example.edu' });
+    const prisma = { user: { findUniqueOrThrow: vi.fn().mockResolvedValue(current), findFirst: vi.fn().mockResolvedValue(null), update } };
+    const service = serviceWith({ prisma, config: { get: vi.fn((key: string) => key === 'EMAIL_CHANGE_TTL_SECONDS' ? 3600 : 'test') } });
+
+    await expect(service.updateMe({ id: current.id }, { email: 'New@Example.edu' })).resolves.toMatchObject({ email: 'old@example.edu', emailChangePending: true });
+    expect(update).not.toHaveBeenCalled();
+    expect(service.email.sendEmailChangeConfirmation).toHaveBeenCalledWith('new@example.edu', expect.stringMatching(/^[a-f0-9]{64}$/));
+
+    service.redis.take.mockResolvedValue(JSON.stringify({ userId: current.id, email: 'new@example.edu' }));
+    await expect(service.confirmEmailChange('a'.repeat(64))).resolves.toMatchObject({ email: 'new@example.edu' });
+    expect(update).toHaveBeenCalledWith({ where: { id: current.id }, data: { email: 'new@example.edu' } });
+  });
+
+  it.each(['active', 'locked'] as const)('creates a one-time reset token for a %s account', async (status) => {
+    const prisma = { user: { findUnique: vi.fn().mockResolvedValue({ id: 'user-1', email: 'member@example.edu', status }) } };
     const service = serviceWith({ prisma });
-    const result = await service.forgot('locked@example.edu');
+    const result = await service.forgot('member@example.edu');
     expect(result.ok).toBe(true);
     expect(result.resetToken).toHaveLength(64);
     expect(service.redis.set).toHaveBeenCalledTimes(2);
-    expect(service.email.sendPasswordReset).toHaveBeenCalledWith('locked@example.edu', result.resetToken);
+    expect(service.email.sendPasswordReset).toHaveBeenCalledWith('member@example.edu', result.resetToken);
   });
 
   it('consumes the emailed token, unlocks the account, and clears lockout state', async () => {
