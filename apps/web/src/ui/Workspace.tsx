@@ -164,6 +164,14 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     return () => { socket.disconnect(); };
   }, [session.access, session.user.id, notify]);
 
+  // A login on another device increments the account token version immediately. Poll without
+  // touching the idle timer so an open previous session is returned to the landing page promptly.
+  useEffect(() => {
+    const verifyCurrentSession = () => { void request('/auth/session-valid').catch(() => undefined); };
+    const interval = window.setInterval(verifyCurrentSession, 15_000);
+    return () => window.clearInterval(interval);
+  }, [session.access]);
+
   // The API enforces the same policy on every authenticated request. This timer gives an idle user
   // a clear sign-out even when they leave a tab open without making another request.
   useEffect(() => {

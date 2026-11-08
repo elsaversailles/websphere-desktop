@@ -8,6 +8,12 @@ describe('profile and password contracts', () => {
     });
   });
 
+  it('limits full names and schools to 30 characters', () => {
+    expect(profileUpdateSchema.safeParse({ fullName: 'A'.repeat(31) }).success).toBe(false);
+    expect(profileUpdateSchema.safeParse({ institution: 'A'.repeat(31) }).success).toBe(false);
+    expect(profileUpdateSchema.safeParse({ fullName: 'A'.repeat(30), institution: 'B'.repeat(30) }).success).toBe(true);
+  });
+
   it.each([
     [{ fullName: '' }, 'fullName'],
     [{ email: 'not-an-email' }, 'email'],

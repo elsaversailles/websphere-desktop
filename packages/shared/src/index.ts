@@ -119,9 +119,9 @@ export const accountDeleteSchema = z.object({
   password: z.string().min(1, 'Current password is required'),
 });
 export const profileUpdateSchema = z.object({
-  fullName: z.string().trim().min(2).max(120).optional(),
+  fullName: z.string().trim().min(2).max(30, 'Full name must be 30 characters or fewer').optional(),
   email: newAccountEmail.optional(),
-  institution: z.string().trim().min(2).max(160).optional(),
+  institution: z.string().trim().min(2).max(30, 'School must be 30 characters or fewer').optional(),
   course: z.string().trim().min(2).max(160).optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one profile field' });
 export const TASK_TITLE_MAX_LENGTH = 30;

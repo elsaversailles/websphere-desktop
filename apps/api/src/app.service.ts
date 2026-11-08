@@ -2,7 +2,7 @@ import { Injectable, Logger, HttpException, HttpStatus, type OnApplicationShutdo
 import { hash, verify } from 'argon2';
 import { SignJWT, jwtVerify } from 'jose';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
-import { completionRate, projectAnalytics, recommendations } from './analytics.js';
+import { completionRate, projectAnalytics, recommendations, taskScheduleMetrics } from './analytics.js';
 import { CryptoService } from './security.js';
 import { connectors, supportsCalendar, type OAuthTokens } from './connectors.js';
 import { PrismaService } from './prisma.service.js';
@@ -111,6 +111,8 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   private failedLoginKey(userId: string) { return `auth:login-failures:${userId}`; }
   private resetKey(token: string) { return `auth:password-reset:${token}`; }
   private userResetKey(userId: string) { return `auth:password-reset:user:${userId}`; }
+  private emailChangeKey(token: string) { return `auth:email-change:${token}`; }
+  private userEmailChangeKey(userId: string) { return `auth:email-change:user:${userId}`; }
   private registrationOtpKey(verificationId: string) { return `auth:registration-otp:${verificationId}`; }
   private registrationOtpAttemptKey(verificationId: string) { return `auth:registration-otp-attempts:${verificationId}`; }
   private registrationOtpRateKey(email: string) { return `auth:registration-otp-rate:${createHash('sha256').update(email).digest('hex')}`; }
@@ -260,7 +262,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     }
     await this.redis.set(this.sessionKey(sessionId), String(Date.now()), this.refreshTtlSeconds());
   }
-  async caller(header?: string, options: { allowLocked?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); if (typeof verified.payload.sid === 'string') await this.enforceSessionTimeout(verified.payload.sid); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
+  async caller(header?: string, options: { allowLocked?: boolean; touchSession?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); if (typeof verified.payload.sid === 'string' && options.touchSession !== false) await this.enforceSessionTimeout(verified.payload.sid); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
   async sendRegistrationOtp(rawEmail: string) {
     const email = rawEmail.trim().toLowerCase();
     const exists = await this.prisma.user.findUnique({ where: { email } });
@@ -321,7 +323,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.audit.log('AuthModule', 'account_registered', 'info', `New account registered for ${user.email}`, user.id);
     return { user: this.publicUser(user), ...(await this.issue(user)) };
   }
-  async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0, lastLoginAt: new Date() } })]); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in`, user.id); return { user: this.publicUser(user), ...(await this.issue(user)) }; }
+  async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } const updated = await this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0, lastLoginAt: new Date(), tokenVersion: { increment: 1 } } }); await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.removeRefreshSessions(user.id)]); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in; previous web session revoked`, user.id); return { user: this.publicUser(updated), ...(await this.issue(updated)) }; }
   async refreshToken(token: string) {
     try {
       const verified = await jwtVerify(token, this.refreshSecret);
@@ -357,7 +359,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) passwordPolicyFailed(policy.reason); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'password_changed', 'info', 'User changed their password', user.id); return { ok: true }; }
   async forgot(email: string) {
     const user = await this.prisma.user.findUnique({ where: { email } });
-    if (user?.status !== 'locked') return { ok: true };
+    if (!user || !['active', 'locked'].includes(user.status)) return { ok: true };
     const oldToken = await this.redis.get(this.userResetKey(user.id));
     if (oldToken) await this.redis.delete(this.resetKey(oldToken));
     const token = randomBytes(32).toString('hex');
@@ -388,9 +390,51 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     ]);
     return { ok: true };
   }
+  emailChangeReturnUrl(result: 'confirmed' | 'invalid') {
+    const target = new URL(this.config.get('WEB_ORIGIN').split(',')[0].trim());
+    target.searchParams.set('emailChange', result);
+    return target.toString();
+  }
+  private async requestEmailChange(userId: string, nextEmail: string) {
+    const duplicate = await this.prisma.user.findFirst({ where: { email: nextEmail, NOT: { id: userId } } });
+    if (duplicate) fail('EMAIL_IN_USE', 'Email is already in use', 409, { email: 'already in use' });
+    const oldToken = await this.redis.get(this.userEmailChangeKey(userId));
+    if (oldToken) await this.redis.delete(this.emailChangeKey(oldToken));
+    const token = randomBytes(32).toString('hex');
+    const ttl = this.config.get('EMAIL_CHANGE_TTL_SECONDS');
+    await Promise.all([
+      this.redis.set(this.emailChangeKey(token), JSON.stringify({ userId, email: nextEmail }), ttl),
+      this.redis.set(this.userEmailChangeKey(userId), token, ttl),
+    ]);
+    try { await this.email.sendEmailChangeConfirmation(nextEmail, token); }
+    catch (error) { await this.redis.delete(this.emailChangeKey(token), this.userEmailChangeKey(userId)); throw error; }
+  }
+  async confirmEmailChange(token: string) {
+    const raw = await this.redis.take(this.emailChangeKey(token));
+    if (!raw) fail('AUTH_UNAUTHENTICATED', 'This email-change link is invalid or expired', 401);
+    let change: { userId: string; email: string };
+    try { change = JSON.parse(raw!) as { userId: string; email: string }; }
+    catch { fail('AUTH_UNAUTHENTICATED', 'This email-change link is invalid or expired', 401); }
+    if (!change!.userId || !change!.email) fail('AUTH_UNAUTHENTICATED', 'This email-change link is invalid or expired', 401);
+    try {
+      const duplicate = await this.prisma.user.findFirst({ where: { email: change!.email, NOT: { id: change!.userId } } });
+      if (duplicate) fail('EMAIL_IN_USE', 'This email address is already in use', 409);
+      const updated = await this.prisma.user.update({ where: { id: change!.userId }, data: { email: change!.email } });
+      await this.audit.log('Profile', 'email_changed', 'info', 'User confirmed a new email address', change!.userId);
+      return this.publicUser(updated);
+    } finally { await this.redis.delete(this.userEmailChangeKey(change!.userId)); }
+  }
   publicUser(user: any) { const { passwordHash, ...safe } = user; return safe; }
   async me(caller: Caller) { return this.publicUser(await this.prisma.user.findUniqueOrThrow({ where: { id: caller.id } })); }
-  async updateMe(caller: Caller, input: any) { if (input.email) { const duplicate = await this.prisma.user.findFirst({ where: { email: input.email, NOT: { id: caller.id } } }); if (duplicate) fail('EMAIL_IN_USE', 'Email is already in use', 409, { email: 'already in use' }); } return this.publicUser(await this.prisma.user.update({ where: { id: caller.id }, data: input })); }
+  async updateMe(caller: Caller, input: any) {
+    const { email, ...updates } = input;
+    const current = email ? await this.prisma.user.findUniqueOrThrow({ where: { id: caller.id } }) : null;
+    const nextEmail = typeof email === 'string' ? email.trim().toLowerCase() : undefined;
+    const emailChangePending = Boolean(nextEmail && nextEmail !== current!.email.toLowerCase());
+    if (emailChangePending) await this.requestEmailChange(caller.id, nextEmail!);
+    const updated = Object.keys(updates).length ? await this.prisma.user.update({ where: { id: caller.id }, data: updates }) : current!;
+    return { ...this.publicUser(updated), ...(emailChangePending ? { emailChangePending: true } : {}) };
+  }
   /** Erases personal data while retaining an anonymized author row so shared project history remains intact. */
   async deleteMyAccount(caller: Caller, password: string) {
     const user = await this.prisma.user.findUniqueOrThrow({ where: { id: caller.id }, select: { id: true, role: true, passwordHash: true } });
@@ -1428,16 +1472,15 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const taskIds = project.tasks.map((task: any) => task.id);
     const dependencies = taskIds.length ? await this.prisma.taskDependency.findMany({ where: { OR: [{ prerequisiteId: { in: taskIds } }, { dependentId: { in: taskIds } }] }, select: { prerequisiteId: true, dependentId: true } }) : [];
     const now = new Date();
-    const stats = projectAnalytics(project.tasks.map((task: any) => ({ ...task, assigneeId: task.assignments[0]?.assigneeId })), project.deadline, now, dependencies);
+    const analyticsTasks = project.tasks.map((task: any) => ({ ...task, assigneeId: task.assignments[0]?.assigneeId, assignedAt: task.assignments[0]?.assignedAt }));
+    const stats = projectAnalytics(analyticsTasks, project.deadline, now, dependencies);
     const bottlenecksByTask = new Map(stats.bottlenecks.map((bottleneck) => [bottleneck.taskId, bottleneck]));
-    const stages = project.tasks.filter((task: any) => task.expectedDurationHrs && task.startedAt).map((task: any) => {
-      const averageDays = ((task.completedAt ?? now).getTime() - task.startedAt.getTime()) / 86400000;
-      const expectedDays = task.expectedDurationHrs / 24;
-      const delayDays = Math.max(0, averageDays - expectedDays);
+    const stages = project.tasks.map((task: any, index: number) => {
+      const timing = taskScheduleMetrics(analyticsTasks[index], now);
       const bottleneck = bottlenecksByTask.get(task.id);
-      const impact = delayDays >= 3 || (bottleneck?.blastRadius ?? 0) >= 4 ? 'high' : delayDays >= 1 || (bottleneck?.blastRadius ?? 0) >= 2 ? 'medium' : 'none';
-      return { taskId: task.id, stage: task.title, averageDays, expectedDays, delayDays, impact };
-    });
+      const impact = timing.delayDays >= 3 || (bottleneck?.blastRadius ?? 0) >= 4 ? 'high' : timing.delayDays >= 1 || (bottleneck?.blastRadius ?? 0) >= 2 ? 'medium' : 'none';
+      return { taskId: task.id, stage: task.title, averageDays: timing.actualDays, expectedDays: timing.expectedDays, delayDays: timing.delayDays, impact };
+    }).filter((stage) => stage.expectedDays !== null && (stage.averageDays !== null || stage.delayDays > 0));
     const taskRisks = project.tasks.map((task: any) => ({
       taskId: task.id,
       title: task.title,

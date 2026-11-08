@@ -179,7 +179,7 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
           <button className="btn btn-sm" disabled={saving}>{saving ? 'Saving…' : 'Save Changes'}</button>
         </form> : null}
         {leader ? <form className="task-create-form task-entry-form" aria-label="Create task" key={createFormKey} onSubmit={(event) => void createTask(event)}>
-          <div className="task-form-field"><label className="lbl" htmlFor="task-create-title">Task Title</label><input id="task-create-title" className="ifield" name="title" required minLength={2} maxLength={TASK_TITLE_MAX_LENGTH} aria-describedby="task-create-title-limit" placeholder="Task title" /><small className="task-title-limit" id="task-create-title-limit">Maximum {TASK_TITLE_MAX_LENGTH} characters</small></div>
+          <div className="task-form-field"><label className="lbl" htmlFor="task-create-title">Task Title</label><input id="task-create-title" className="ifield" name="title" required minLength={2} maxLength={TASK_TITLE_MAX_LENGTH} placeholder="Task title" /></div>
           <ScheduleDateFields idPrefix="task-create" fieldClassName="task-form-field" />
           <div className="task-form-field"><label className="lbl" htmlFor="task-create-assignee">Assigned Member</label><select id="task-create-assignee" className="legacy-select" name="assigneeId" defaultValue=""><option value="">Assign later</option>{projectMembers.map((member) => <option value={member.userId} key={member.userId}>{member.user.fullName}</option>)}</select></div>
           <button className="btn btn-sm" disabled={saving}>{saving ? 'Saving…' : 'Create Task'}</button>
@@ -212,7 +212,7 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
       <div className="modal-ttl"><div><span id="task-editor-title">{editingTask.mode === 'reassign' ? 'Reassign Task' : 'Edit Task'}</span><small>{editingTask.mode === 'reassign' ? 'Task Assignment' : 'Task Details'}</small></div><button type="button" className="modal-close" disabled={saving} onClick={() => setEditingTask(null)} aria-label="Close task editor">×</button></div>
       <form className="project-create-form" key={`${editingTask.task.id}-${editingTask.mode}`} onSubmit={(event) => void saveTaskEdit(event)}>
         {editingTask.mode === 'edit' ? <>
-          <label className="lbl" htmlFor="task-edit-title">Task Title</label><input id="task-edit-title" className="ifield" name="title" required minLength={2} maxLength={TASK_TITLE_MAX_LENGTH} aria-describedby="task-edit-title-limit" defaultValue={editingTask.task.title} /><small className="task-title-limit" id="task-edit-title-limit">Maximum {TASK_TITLE_MAX_LENGTH} characters</small>
+          <label className="lbl" htmlFor="task-edit-title">Task Title</label><input id="task-edit-title" className="ifield" name="title" required minLength={2} maxLength={TASK_TITLE_MAX_LENGTH} defaultValue={editingTask.task.title} />
           <ScheduleDateFields idPrefix="task-edit" initialStart={editingTask.task.startDate ? dateOnlyKey(editingTask.task.startDate) : ''} initialEnd={editingTask.task.deadline ? dateOnlyKey(editingTask.task.deadline) : ''} editing />
         </> : <p className="muted">Choose a replacement project member. They will receive a task notification.</p>}
         <label className="lbl" htmlFor="task-edit-assignee">{editingTask.mode === 'reassign' ? 'New Assignee' : 'Assigned Member'}</label>
