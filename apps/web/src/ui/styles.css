@@ -570,3 +570,12 @@ fieldset.tracker-platform-options{border:0;padding:0;min-width:0}fieldset.tracke
 @media(max-width:480px){.hub-modal .modal-ttl{align-items:flex-start}.hub-heading-actions{gap:2px}.hub-heading-actions .button{padding:8px;font-size:11px}}
 .tracker-project-picker{display:flex;flex-direction:column;gap:6px;width:min(100%,300px);margin-bottom:20px;color:var(--sub);font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase}.tracker-project-picker select{width:100%;min-width:0;text-transform:none;letter-spacing:normal}
 .profile-name-row{display:flex;align-items:center;justify-content:center;gap:8px}.profile-name-row strong{min-width:0;overflow-wrap:anywhere}.profile-photo-menu{position:relative}.profile-photo-menu-trigger{display:grid;place-items:center;width:28px;height:28px;padding:0;border:1px solid var(--bdr);border-radius:50%;background:transparent;color:var(--ink);font-size:19px;line-height:1}.profile-photo-menu-trigger:hover,.profile-photo-menu-trigger[aria-expanded=true]{background:rgba(0,56,168,.1)}.profile-photo-menu-list{position:absolute;top:calc(100% + 5px);left:0;z-index:5;width:150px;padding:5px;border:1px solid var(--bdr);border-radius:9px;background:var(--modal-surface);box-shadow:0 6px 16px rgba(11,58,82,.2);text-align:left}.profile-photo-menu-list button{display:block;width:100%;padding:8px;border:0;border-radius:5px;background:transparent;color:var(--ink);font-size:12px;text-align:left}.profile-photo-menu-list button:hover:not(:disabled),.profile-photo-menu-list button:focus-visible{background:rgba(0,56,168,.1)}.profile-photo-menu-list button:disabled{opacity:.5}
+
+/* Fallback avatars share one stable colour for each user or group ID. */
+:is(.ava,.profile-avatar,.avatar,.tracker-owner-avatar,.tracker-collaborator-avatar).tone-ac{background:#0038A8;color:#fff}
+:is(.ava,.profile-avatar,.avatar,.tracker-owner-avatar,.tracker-collaborator-avatar).tone-g{background:#1E9E62;color:#fff}
+:is(.ava,.profile-avatar,.avatar,.tracker-owner-avatar,.tracker-collaborator-avatar).tone-y{background:#C97D10;color:#fff}
+:is(.ava,.profile-avatar,.avatar,.tracker-owner-avatar,.tracker-collaborator-avatar).tone-r{background:#D63B3B;color:#fff}
+:is(.ava,.profile-avatar,.avatar,.tracker-owner-avatar,.tracker-collaborator-avatar).tone-v{background:#6B4FE0;color:#fff}
+:is(.ava,.profile-avatar,.avatar,.tracker-owner-avatar,.tracker-collaborator-avatar).tone-tl{background:#0E8FA8;color:#fff}
+:is(.ava,.profile-avatar,.avatar,.tracker-owner-avatar,.tracker-collaborator-avatar).tone-pink{background:#BE185D;color:#fff}

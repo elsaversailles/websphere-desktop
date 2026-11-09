@@ -108,7 +108,7 @@ export function dateKey(date: string | Date): string {
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 }
 
-const AVATAR_TONES = ['ac', 'g', 'y', 'r', 'v', 'tl'] as const;
+const AVATAR_TONES = ['ac', 'g', 'y', 'r', 'v', 'tl', 'pink'] as const;
 export type AvatarTone = (typeof AVATAR_TONES)[number];
 
 /** Deterministic avatar colour so the same person always keeps the same chip. */
@@ -117,6 +117,9 @@ export function avatarTone(seed: string): AvatarTone {
   for (let index = 0; index < seed.length; index += 1) hash = (hash * 31 + seed.charCodeAt(index)) % 100_000;
   return AVATAR_TONES[hash % AVATAR_TONES.length];
 }
+
+const AVATAR_COLORS: Record<AvatarTone, string> = { ac: '#0038A8', g: '#1E9E62', y: '#C97D10', r: '#D63B3B', v: '#6B4FE0', tl: '#0E8FA8', pink: '#BE185D' };
+export function avatarColor(id: string): string { return AVATAR_COLORS[avatarTone(id)]; }
 
 export function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);

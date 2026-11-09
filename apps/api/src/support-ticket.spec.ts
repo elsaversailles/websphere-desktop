@@ -22,6 +22,19 @@ function serviceWith(ticket: Record<string, unknown> | null) {
 const existing = { id: 'ticket-1', userId: 'member-1', subject: 'Cannot log in', status: 'pending', response: null };
 
 describe('support ticket status updates', () => {
+  it('queues signed-out requests without associating an unverified email with an account', async () => {
+    const { service, create, notify } = serviceWith(null);
+    Object.assign(service, { redis: { incrementWithExpiry: vi.fn().mockResolvedValue(1) } });
+    await expect(service.publicTicket({ email: 'PERSON@example.com', category: 'account_reactivation', subject: 'Cannot log in', body: 'Please help' }, '127.0.0.1')).resolves.toEqual({ ok: true });
+    expect(create).toHaveBeenCalledWith({ data: { contactEmail: 'person@example.com', category: 'account_reactivation', subject: 'Cannot log in', body: 'Please help' } });
+    expect(notify).toHaveBeenCalledOnce();
+  });
+
+  it('does not send an in-app notification for a signed-out requester', async () => {
+    const { service, notify } = serviceWith({ ...existing, userId: null, contactEmail: 'person@example.com' });
+    await service.updateTicket(admin, 'ticket-1', { status: 'resolved' as any });
+    expect(notify).not.toHaveBeenCalled();
+  });
   it('forwards a new request to every active administrator', async () => {
     const { service, notify } = serviceWith(null);
 
