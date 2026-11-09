@@ -3,7 +3,7 @@ import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, passwordRequirements } from '
 import { authenticate, request, saveSession, type Session } from '../api';
 
 type AuthScreenProps = { onAuthenticated: (session: Session) => void; notify: (message: string) => void; initialMode?: 'login' | 'register'; onBack?: () => void };
-type AuthMode = 'login' | 'register' | 'verify' | 'admin' | 'forgot' | 'reset' | 'deactivate';
+type AuthMode = 'login' | 'register' | 'verify' | 'admin' | 'forgot' | 'reset' | 'support';
 type RegistrationData = { fullName: string; email: string; password: string; institution: string; course: string };
 
 /** Sentinel option value for "Others" on the course/institution selects — never submitted as-is, see SelectWithOther. */
@@ -33,6 +33,7 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
   const [errorMessage, setErrorMessage] = useState('');
   const [message, setMessage] = useState('');
   const [registration, setRegistration] = useState<RegistrationData | null>(null);
+  const [registrationNames, setRegistrationNames] = useState({ firstName: '', lastName: '' });
   const [verificationId, setVerificationId] = useState('');
   const [registerPassword, setRegisterPassword] = useState('');
   const [resetPassword, setResetPasswordValue] = useState('');
@@ -55,7 +56,12 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
   const otpResendInMs = otpSentAt === null ? 0 : Math.max(0, otpSentAt + OTP_RESEND_COOLDOWN_MS - now);
   const otpCountdownLabel = formatCountdown(otpExpiresInMs);
 
-  function changeMode(next: AuthMode) { setErrorMessage(''); setMessage(''); setMode(next); }
+  function changeMode(next: AuthMode) {
+    setErrorMessage('');
+    setMessage('');
+    if (next === 'register') setRegisterPassword(registration?.password ?? '');
+    setMode(next);
+  }
   function showError(error: unknown) { setErrorMessage(error instanceof Error ? error.message : 'Something went wrong. Please try again.'); }
 
   async function submitLogin(event: FormEvent<HTMLFormElement>, admin: boolean) {
@@ -88,6 +94,7 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     try {
       const result = await request<{ ok: true; verificationId: string }>('/auth/registration/otp', { method: 'POST', body: JSON.stringify({ email: pending.email }) });
       setRegistration(pending);
+      setRegistrationNames({ firstName: String(data.get('firstName') ?? ''), lastName: String(data.get('lastName') ?? '') });
       setVerificationId(result.verificationId);
       setOtpSentAt(Date.now());
       setNow(Date.now());
@@ -119,6 +126,9 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     try {
       await request('/auth/register', { method: 'POST', body: JSON.stringify({ ...registration, verificationId, verificationCode }) });
       setRegistration(null);
+      setRegistrationNames({ firstName: '', lastName: '' });
+      setRegisterPassword('');
+      setAgreedToPrivacy(false);
       setVerificationId('');
       setOtpSentAt(null);
       setMessage('Email verified. Your account is ready—please sign in.');
@@ -139,16 +149,15 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     } catch (error: unknown) { showError(error); } finally { setBusy(false); }
   }
 
-  async function submitDeactivation(event: FormEvent<HTMLFormElement>) {
+  async function submitSupport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const email = String(data.get('email') ?? '').trim();
-    const reason = String(data.get('reason') ?? '').trim();
     setErrorMessage('');
     setBusy(true);
     try {
-      await request('/auth/deactivation-request', { method: 'POST', body: JSON.stringify({ email, reason }) });
-      setMessage('Your deactivation request has been sent to our support team. They will reach out to the email you provided.');
+      await request('/support/public-tickets', { method: 'POST', body: JSON.stringify({ email, category: data.get('category'), subject: data.get('subject'), body: data.get('body') }) });
+      setMessage('Your support request was sent to the administrators.');
       setMode('login');
     } catch (error: unknown) { showError(error); } finally { setBusy(false); }
   }
@@ -180,7 +189,7 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <button className="aforgot" type="button" onClick={() => changeMode('forgot')}>Forgot password?</button>
       <button className="abtn" disabled={busy}>{busy ? 'Signing In…' : 'Sign In'}</button>
       <p className="alink">Don&apos;t have an account? <button type="button" onClick={() => changeMode('register')}>Register here</button></p>
-      <p className="alink admin-link"><button type="button" onClick={() => changeMode('admin')}>Admin login</button> · <button type="button" onClick={() => changeMode('deactivate')}>Need help?</button></p>
+      <p className="alink admin-link"><button type="button" onClick={() => changeMode('admin')}>Admin login</button> · <button type="button" onClick={() => changeMode('support')}>Need help?</button></p>
     </form> : null}
     {mode === 'admin' ? <form className="abox" onSubmit={(event) => void submitLogin(event, true)}>
       <h1 className="atitle admin-title">Administrator Login</h1>
@@ -194,13 +203,13 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     {mode === 'register' ? <form className="abox register-box" onSubmit={(event) => void submitRegister(event)}>
       <h1 className="atitle register-title">Create an Account</h1>
       <AuthFeedback error={errorMessage} message={message} />
-      <div className="auth-two"><AuthField label="First Name" name="firstName" placeholder="First Name" /><AuthField label="Last Name" name="lastName" placeholder="Last Name" /></div>
-      <AuthField label="Email Address" name="email" type="email" placeholder="your@email.com" />
-      <SelectWithOther label="Course" name="course" options={courses} placeholder="Select your course" />
-      <SelectWithOther label="School / Institution" name="institution" options={schools} placeholder="Select your school" />
-      <AuthField label="Password" name="password" type="password" placeholder="Enter your password" onChange={(event) => setRegisterPassword(event.target.value)} />
+      <div className="auth-two"><AuthField label="First Name" name="firstName" placeholder="First Name" defaultValue={registrationNames.firstName} /><AuthField label="Last Name" name="lastName" placeholder="Last Name" defaultValue={registrationNames.lastName} /></div>
+      <AuthField label="Email Address" name="email" type="email" placeholder="your@email.com" defaultValue={registration?.email} />
+      <SelectWithOther label="Course" name="course" options={courses} placeholder="Select your course" defaultValue={registration?.course} />
+      <SelectWithOther label="School / Institution" name="institution" options={schools} placeholder="Select your school" defaultValue={registration?.institution} />
+      <AuthField label="Password" name="password" type="password" placeholder="Enter your password" defaultValue={registration?.password} onChange={(event) => setRegisterPassword(event.target.value)} />
       <PasswordChecklist password={registerPassword} />
-      <AuthField label="Confirm Password" name="confirm" type="password" placeholder="Confirm your password" />
+      <AuthField label="Confirm Password" name="confirm" type="password" placeholder="Confirm your password" defaultValue={registration?.password} />
       <label className="auth-consent"><input type="checkbox" required checked={agreedToPrivacy} onChange={(event) => setAgreedToPrivacy(event.target.checked)} /><span>I agree to the <button type="button" className="auth-inline-link" onClick={() => setPrivacyOpen(true)}>Privacy Policy</button><span className="required-mark" aria-hidden="true"> *</span></span></label>
       <button className="abtn register-submit" disabled={busy}>{busy ? 'Sending code…' : 'Continue'}</button>
       <p className="alink">Already have an account? <button type="button" onClick={() => changeMode('login')}>Sign in here</button></p>
@@ -221,12 +230,14 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <button className="abtn" disabled={busy}>{busy ? 'Sending…' : 'Send Reset Link'}</button>
       <p className="alink"><button type="button" onClick={() => changeMode('login')}>Back to sign in</button></p>
     </form> : null}
-    {mode === 'deactivate' ? <form className="abox" onSubmit={(event) => void submitDeactivation(event)}>
-      <h1 className="atitle">Deactivate Account</h1><p className="asub">Send a request to our support team to deactivate your account. We&apos;ll follow up at the email you provide.</p>
+    {mode === 'support' ? <form className="abox" onSubmit={(event) => void submitSupport(event)}>
+      <h1 className="atitle">Request support</h1><p className="asub">Tell the WebSphere administrators what you need. Provide an email address where they can reach you.</p>
       <AuthFeedback error={errorMessage} message={message} />
       <AuthField label="Email Address" name="email" type="email" placeholder="your@email.com" />
-      <label className="auth-field"><span className="lbl">Reason (optional)</span><textarea className="afield" name="reason" rows={3} maxLength={1000} placeholder="Let us know why you'd like to deactivate your account" /></label>
-      <button className="abtn" disabled={busy}>{busy ? 'Sending…' : 'Send Deactivation Request'}</button>
+      <label className="auth-field"><span className="lbl">Category</span><select className="afield" name="category" defaultValue="bug_report"><option value="bug_report">Report a problem</option><option value="account_reactivation">Account access</option><option value="password_concern">Password concern</option><option value="account_deletion">Account deletion</option><option value="other">Other request</option></select></label>
+      <AuthField label="Subject" name="subject" placeholder="Briefly describe the issue" />
+      <label className="auth-field"><span className="lbl">Details<span className="required-mark" aria-hidden="true"> *</span></span><textarea className="afield" name="body" required rows={4} maxLength={5000} placeholder="Include anything that will help us understand the request." /></label>
+      <button className="abtn" disabled={busy}>{busy ? 'Sending…' : 'Send request'}</button>
       <p className="alink"><button type="button" onClick={() => changeMode('login')}>Back to sign in</button></p>
     </form> : null}
     {mode === 'reset' ? <form className="abox" onSubmit={(event) => void submitReset(event)}>
@@ -266,16 +277,16 @@ function EyeIcon({ open }: { open: boolean }) {
   </svg>;
 }
 
-function AuthField({ label, name, type = 'text', placeholder, onChange }: { label: string; name: string; type?: string; placeholder: string; onChange?: (event: ChangeEvent<HTMLInputElement>) => void }) {
+function AuthField({ label, name, type = 'text', placeholder, onChange, defaultValue }: { label: string; name: string; type?: string; placeholder: string; onChange?: (event: ChangeEvent<HTMLInputElement>) => void; defaultValue?: string }) {
   const [visible, setVisible] = useState(false);
-  return <label className="auth-field"><span className="lbl">{label}<span className="required-mark" aria-hidden="true"> *</span></span><span className="auth-input-wrap"><input className={`afield${type === 'password' ? ' afield-pw' : ''}`} required minLength={type === 'password' ? PASSWORD_MIN_LENGTH : undefined} maxLength={type === 'password' ? PASSWORD_MAX_LENGTH : undefined} name={name} type={type === 'password' && visible ? 'text' : type} placeholder={placeholder} onChange={onChange} />{type === 'password' ? <button className="auth-eye" type="button" aria-label={visible ? 'Hide password' : 'Show password'} onClick={() => setVisible((value) => !value)}><EyeIcon open={visible} /></button> : null}</span></label>;
+  return <label className="auth-field"><span className="lbl">{label}<span className="required-mark" aria-hidden="true"> *</span></span><span className="auth-input-wrap"><input className={`afield${type === 'password' ? ' afield-pw' : ''}`} required minLength={type === 'password' ? PASSWORD_MIN_LENGTH : undefined} maxLength={type === 'password' ? PASSWORD_MAX_LENGTH : undefined} name={name} type={type === 'password' && visible ? 'text' : type} placeholder={placeholder} defaultValue={defaultValue} onChange={onChange} />{type === 'password' ? <button className="auth-eye" type="button" aria-label={visible ? 'Hide password' : 'Show password'} onClick={() => setVisible((value) => !value)}><EyeIcon open={visible} /></button> : null}</span></label>;
 }
 
 /** Guided choice with a required-field asterisk and a free-text fallback when the user picks "Others" —
  * when Others is selected the <select> itself carries no `name`, so only the typed value is submitted. */
-function SelectWithOther({ label, name, options, placeholder }: { label: string; name: string; options: string[]; placeholder: string }) {
+function SelectWithOther({ label, name, options, placeholder, defaultValue = '' }: { label: string; name: string; options: string[]; placeholder: string; defaultValue?: string }) {
   const id = `field-${name}`;
-  const [choice, setChoice] = useState('');
+  const [choice, setChoice] = useState(() => defaultValue && !options.includes(defaultValue) ? OTHER_OPTION : defaultValue);
   const isOther = choice === OTHER_OPTION;
   return <div className="auth-field">
     <label className="lbl" htmlFor={id}>{label}<span className="required-mark" aria-hidden="true"> *</span></label>
@@ -284,7 +295,7 @@ function SelectWithOther({ label, name, options, placeholder }: { label: string;
       {options.map((option) => <option key={option} value={option}>{option}</option>)}
       <option value={OTHER_OPTION}>Others</option>
     </select>
-    {isOther ? <input className="afield" style={{ marginTop: 8 }} required name={name} maxLength={160} placeholder={`Please specify your ${label.toLowerCase()}`} /> : null}
+    {isOther ? <input className="afield" style={{ marginTop: 8 }} required name={name} maxLength={160} defaultValue={options.includes(defaultValue) ? '' : defaultValue} placeholder={`Please specify your ${label.toLowerCase()}`} /> : null}
   </div>;
 }
 

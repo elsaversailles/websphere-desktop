@@ -1,0 +1,2 @@
+ALTER TABLE `SupportTicket` MODIFY `userId` VARCHAR(191) NULL,
+    ADD COLUMN `contactEmail` VARCHAR(320) NULL;

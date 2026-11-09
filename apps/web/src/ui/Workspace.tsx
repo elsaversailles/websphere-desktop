@@ -18,7 +18,7 @@ type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | '
 type WorkspaceProps = { session: Session; onSessionChange: (session: Session) => void; onLogout: () => void; notify: (message: string) => void };
 type Link = { id: Page; label: string; icon: string };
 type NotificationEntry = { id: string; read: boolean; type?: string; relatedId?: string | null; relatedType?: string | null };
-type AdminSupportTicket = SupportTicketRecord & { user: { fullName: string; email: string } };
+type AdminSupportTicket = SupportTicketRecord & { user: { fullName: string; email: string } | null; contactEmail: string | null };
 
 const userSections: Array<{ title: string; links: Link[] }> = [
   { title: 'Main', links: [{ id: 'dashboard', label: 'Dashboard', icon: '⌂' }, { id: 'announcements', label: 'Announcements', icon: '◉' }] },
@@ -230,7 +230,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
       <div className="sb-head"><button className="sb-brand" onClick={() => setPage(administrator ? 'admin' : 'dashboard')}><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">{systemName}</span></button><button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'} title={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'}><BurgerIcon /></button></div>
       <nav aria-label="Main navigation">{sections.map((section) => <div className="sb-inline-sec" key={section.title}><div className="sb-sec-label">{section.title}</div>{section.links.map((link) => <button type="button" className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => setPage(link.id)}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>)}</nav>
-      <div className="sb-bot"><div className="uchip">{session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className="ava">{initials(session.user.fullName)}</span>}<span className="user-detail"><strong className="u-name">{session.user.fullName}</strong><small className="u-role">{administrator ? 'Administrator' : 'Member'}</small></span></div><button className="logout-btn" onClick={() => setLogoutOpen(true)} title={sidebarCollapsed ? 'Log out' : undefined}><span aria-hidden="true">↪</span><span className="logout-label">Logout</span></button></div>
+      <div className="sb-bot"><div className="uchip">{session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className={`ava tone-${avatarTone(session.user.id)}`}>{initials(session.user.fullName)}</span>}<span className="user-detail"><strong className="u-name">{session.user.fullName}</strong><small className="u-role">{administrator ? 'Administrator' : 'Member'}</small></span></div><button className="logout-btn" onClick={() => setLogoutOpen(true)} title={sidebarCollapsed ? 'Log out' : undefined}><span aria-hidden="true">↪</span><span className="logout-label">Logout</span></button></div>
     </aside>
     {sidebarCollapsed ? <button className="sidebar-reopen" type="button" onClick={() => setSidebarCollapsed(false)} aria-label="Show sidebar navigation" title="Show sidebar navigation"><BurgerIcon /></button> : null}
     <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">{systemName}</span></span><select value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}</select></div><div className="main">
@@ -294,16 +294,17 @@ function AdminTicketCard({ ticket, notify, onSaved, focused }: { ticket: AdminSu
     setSaving(true);
     try {
       await request(`/admin/support/tickets/${ticket.id}`, { method: 'PATCH', body: JSON.stringify({ status, response }) });
-      notify(`Request set to ${statusLabel(status)}. ${ticket.user.fullName} has been notified.`);
+      notify(ticket.user ? `Request set to ${statusLabel(status)}. ${ticket.user.fullName} has been notified.` : `Request set to ${statusLabel(status)}.`);
       onSaved();
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not update the support request.'); } finally { setSaving(false); }
   }
   return <article id={`admin-ticket-${ticket.id}`} className={`support-ticket ${focused ? 'focused' : ''}`}>
-    <div className="support-ticket-top"><div><strong>{ticket.subject}</strong><span>{ticket.user.fullName} · {ticket.user.email}</span></div><span className={`support-ticket-status ${ticket.status}`}>{statusLabel(ticket.status)}</span></div>
+    <div className="support-ticket-top"><div><strong>{ticket.subject}</strong><span>{ticket.user ? `${ticket.user.fullName} · ${ticket.user.email}` : `Signed-out request · ${ticket.contactEmail} (unverified)`}</span></div><span className={`support-ticket-status ${ticket.status}`}>{statusLabel(ticket.status)}</span></div>
+    {!ticket.user && ticket.contactEmail ? <p>Contact the requester directly: <a href={`mailto:${encodeURIComponent(ticket.contactEmail)}?subject=${encodeURIComponent(`Re: ${ticket.subject}`)}`}>{ticket.contactEmail}</a>. Verify their identity before making account changes.</p> : null}
     <p>{ticket.body}</p>
     <div className="support-ticket-controls">
       <label>Status<select className="legacy-select" value={status} onChange={(event) => setStatus(event.target.value as TicketStatus)} disabled={saving}>{ticketStatusOptions.map((option) => <option key={option} value={option}>{statusLabel(option)}</option>)}</select></label>
-      <label className="support-ticket-reply-field">Reply to user<textarea className="ifield" rows={2} maxLength={2000} value={response} onChange={(event) => setResponse(event.target.value)} placeholder="Optional message shown with the status update" disabled={saving} /></label>
+      {ticket.user ? <label className="support-ticket-reply-field">Reply to user<textarea className="ifield" rows={2} maxLength={2000} value={response} onChange={(event) => setResponse(event.target.value)} placeholder="Optional message shown with the status update" disabled={saving} /></label> : <span>Use email to reply to signed-out requesters.</span>}
       <button type="button" className="btn btn-sm" disabled={!dirty || saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save & Notify'}</button>
     </div>
     <footer><span>{categoryLabel(ticket.category)}</span><time dateTime={ticket.createdAt}>{new Date(ticket.createdAt).toLocaleString()}</time></footer>

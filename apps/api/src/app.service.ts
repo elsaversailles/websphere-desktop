@@ -1579,7 +1579,17 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     })).sort((a: any, b: any) => b.usagePercent - a.usagePercent || b.actions - a.actions);
   }
   async ticket(caller: Caller, input: any) {
-    const ticket = await this.prisma.supportTicket.create({ data: { ...input, userId: caller.id } });
+    return this.createSupportTicket({ ...input, userId: caller.id });
+  }
+  async publicTicket(input: { email: string; category: any; subject: string; body: string }, ip: string) {
+    const rateKey = `support:public-rate:${createHash('sha256').update(ip || 'unknown').digest('hex')}`;
+    if (await this.redis.incrementWithExpiry(rateKey, 3600) > 10) fail('RATE_LIMITED', 'Too many requests. Please try again later.', 429);
+    const { email, ...details } = input;
+    await this.createSupportTicket({ ...details, contactEmail: email.trim().toLowerCase() });
+    return { ok: true };
+  }
+  private async createSupportTicket(data: any) {
+    const ticket = await this.prisma.supportTicket.create({ data });
     const administrators = await this.prisma.user.findMany({ where: { role: Role.Administrator, status: 'active' }, select: { id: true } });
     if (administrators.length) await this.notify(administrators.map((administrator: any) => administrator.id), NotificationType.ticket_update, `New support request: “${this.clip(ticket.subject, 120)}”`, ticket.id, 'ticket');
     return ticket;
@@ -1597,7 +1607,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (statusChanged || replied) {
       const subject = this.clip(updated.subject, 90);
       const message = statusChanged ? `Your request “${subject}” is now ${ticketStatusLabels[input.status]}` : `The administrator replied to your request “${subject}”`;
-      await this.notify([updated.userId], NotificationType.ticket_update, message, updated.id, 'ticket');
+      if (updated.userId) await this.notify([updated.userId], NotificationType.ticket_update, message, updated.id, 'ticket');
       await this.audit.log('AdminModule', 'support_ticket_update', 'info', `Administrator set support request ${updated.id} to ${input.status}`, caller.id);
     }
     return updated;

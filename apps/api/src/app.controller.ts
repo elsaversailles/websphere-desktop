@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Post, Put, Query, Redirect, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, HttpException, Ip, Param, Patch, Post, Put, Query, Redirect, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { z } from 'zod';
 import { accountDeleteSchema, adminGeneralSettingsSchema, aiAskSchema, announcementSchema, calendarEventSchema, deactivationRequestSchema, ideaSchema, loginSchema, maintenanceAnnouncementSchema, mobilePushTokenSchema, notificationPreferencesSchema, passwordChangeSchema, passwordForgotSchema, passwordResetSchema, pollCreateSchema, pollExtendSchema, profileUpdateSchema, pushSubscriptionSchema, pushUnsubscribeSchema, registrationOtpRequestSchema, projectSchema, projectUpdateSchema, resourceLinkSchema, resourceUpdateSchema, supportTicketSchema, taskEditSchema, taskSchema, ticketUpdateSchema, taskStatusSchema, verifiedRegisterSchema } from '@websphere/shared';
@@ -8,6 +8,7 @@ import { RedisService } from './redis.service.js';
 import { GroupScope, ProjectScope, Public, Roles } from './auth.decorators.js';
 import { RealtimeGateway } from './realtime.gateway.js';
 import { TurnService } from './turn.service.js';
+import { publicSupportTicketSchema } from '@websphere/shared';
 
 // A single failing field (the common case — e.g. a blank or disposable email) surfaces its own
 // message directly, so "Email is required" reaches the user instead of a generic banner; multiple
@@ -145,6 +146,7 @@ export class AppController {
   @Post('resources/:id/launch') async launchResource(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.launchResource(await this.caller(auth), id); }
   @Patch('resources/:id') async updateResource(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { const caller = await this.caller(auth); const updated = await this.app.updateLinkedResource(caller, id, parse(resourceUpdateSchema, body)); this.realtime.publishTaskUpdated(updated.projectId, await this.app.task(caller, updated.taskId)); return updated; }
   @Post('support/tickets') async ticket(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.ticket(await this.caller(auth), parse(supportTicketSchema, body)); }
+  @Public() @Post('support/public-tickets') publicTicket(@Ip() ip: string, @Body() body: unknown) { return this.app.publicTicket(parse(publicSupportTicketSchema, body), ip); }
   @Get('support/tickets') async myTickets(@Headers('authorization') auth: string) { return this.app.myTickets(await this.caller(auth)); }
   @Roles('Administrator') @Patch('admin/support/tickets/:id') async updateTicket(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.updateTicket(await this.caller(auth), id, parse(ticketUpdateSchema, body)); }
   @Roles('Administrator') @Get('admin/monitoring') async monitoring(@Headers('authorization') auth: string) { return this.app.monitoring(await this.caller(auth)); }
