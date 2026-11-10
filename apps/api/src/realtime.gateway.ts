@@ -77,7 +77,8 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
       const room = `call:${body.groupId}`;
       const members = await this.server.in(room).fetchSockets();
       if (members.length >= 6) throw new HttpException({ code: 'CALL_FULL', message: 'This call has reached its six-participant limit' }, 409);
-      const participants = members.map((member) => ({ socketId: member.id, userId: String(member.data.caller?.id ?? '') }));
+      const participants = members.map((member) => ({ socketId: member.id, userId: String(member.data.caller?.id ?? ''), muted: member.data.callMuteStates?.[body.groupId] === true }));
+      socket.data.callMuteStates = { ...socket.data.callMuteStates, [body.groupId]: false };
       await socket.join(room);
       const hostSocketId = this.callHosts.get(body.groupId) ?? socket.id;
       this.callHosts.set(body.groupId, hostSocketId);
@@ -89,6 +90,13 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
   @SubscribeMessage('call:leave') callLeave(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string }) { return this.ack(async () => { this.assertAuthenticated(socket); if (!body?.groupId) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Group ID is required' }, 400); await this.removeCallParticipant(body.groupId, socket.id); }); }
   @SubscribeMessage('call:signal') async callSignal(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; targetSocketId: string; signal: CallSignal }) { return this.ack(async () => { this.assertAuthenticated(socket); if (!body?.groupId || !body?.targetSocketId || !body.signal || !['offer', 'answer', 'ice-candidate'].includes(body.signal.type)) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Invalid call signal' }, 400); const room = `call:${body.groupId}`; if (!socket.rooms.has(room)) throw new HttpException({ code: 'RBAC_FORBIDDEN', message: 'Join the call before signaling' }, 403); const recipients = await this.server.in(room).fetchSockets(); if (!recipients.some((recipient) => recipient.id === body.targetSocketId)) throw new HttpException({ code: 'RBAC_FORBIDDEN', message: 'Call participant is unavailable' }, 403); this.server.to(body.targetSocketId).emit('call:signal', { groupId: body.groupId, fromSocketId: socket.id, signal: body.signal }); }); }
   @SubscribeMessage('call:screen-share') callScreenShare(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; sharing: boolean }) { return this.ack(async () => { this.assertAuthenticated(socket); if (!body?.groupId || typeof body.sharing !== 'boolean' || !socket.rooms.has(`call:${body.groupId}`)) throw new HttpException({ code: 'RBAC_FORBIDDEN', message: 'Join the call before changing presentation state' }, 403); socket.to(`call:${body.groupId}`).emit('call:screen-share', { groupId: body.groupId, socketId: socket.id, sharing: body.sharing }); }); }
+  @SubscribeMessage('call:mute-state') callMuteState(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; muted: boolean }) { return this.ack(async () => {
+    this.assertAuthenticated(socket);
+    const room = `call:${body?.groupId}`;
+    if (!body?.groupId || typeof body.muted !== 'boolean' || !socket.rooms.has(room)) throw new HttpException({ code: 'RBAC_FORBIDDEN', message: 'Join the call before changing microphone state' }, 403);
+    socket.data.callMuteStates = { ...socket.data.callMuteStates, [body.groupId]: body.muted };
+    socket.to(room).emit('call:mute-state', { groupId: body.groupId, socketId: socket.id, muted: body.muted });
+  }); }
   @SubscribeMessage('call:raise-hand') callRaiseHand(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; raised: boolean }) { return this.ack(async () => {
     this.assertAuthenticated(socket);
     const room = `call:${body?.groupId}`;
