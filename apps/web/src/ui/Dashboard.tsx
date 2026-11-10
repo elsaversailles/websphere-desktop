@@ -105,7 +105,7 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
   }, [data, localDay]);
 
   const monthCells = useMemo(() => monthMatrix(monthCursor.year, monthCursor.month), [monthCursor]);
-  /** Overdue first, then soonest — matches the "Next 14 days" framing in the panel header. */
+  /** Show overdue deadlines first, then the soonest upcoming deadlines. */
   const upcoming = useMemo(() => {
     return upcomingDeadlines(data?.tasks ?? [], localDay);
   }, [data, localDay]);
@@ -235,12 +235,12 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
       </aside>
     </div>
     <div className="g2">
-      <DataCard title="Upcoming Deadlines" note="Next 14 days">
+      <DataCard title="Upcoming Deadlines">
         {upcoming.length ? upcoming.map(({ task, health }) => <div className={`deadline-row tone-${health.tone}`} key={task.id}>
           <span className={`deadline-date ${health.tone}`}><strong>{localDateFromKey(dateOnlyKey(task.deadline!)).getDate()}</strong><small>{formatDateOnly(task.deadline, { month: 'short' }).toUpperCase()}</small></span>
           <span className="deadline-copy"><strong>{task.title}</strong><small>{task.project?.title ?? 'Unassigned project'} · {deadlineCountdown(health.days)}</small></span>
           <span className={`bdg ${task.status === 'completed' ? 'g' : health.tone}`}>{task.status === 'completed' ? 'Completed' : health.label}</span>
-        </div>) : <Empty text="Nothing is due in the next 14 days. Add tasks with due dates to see them here." />}
+        </div>) : <Empty text="No upcoming deadlines. Add tasks with due dates to see them here." />}
       </DataCard>
       <DataCard title="Team Activity" note="Live feed">
         {data.activity?.length ? <div className="activity-list">{data.activity.map((event) => {
