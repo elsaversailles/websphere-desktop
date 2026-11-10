@@ -31,7 +31,7 @@ function mediaDeviceErrorMessage(error: unknown, kind: CallKind) {
   return error instanceof Error ? error.message : 'Could not start the call.';
 }
 
-function MediaTile({ label, stream, muted, local, presenting, handRaised }: { label: string; stream: MediaStream; muted?: boolean; local?: boolean; presenting?: boolean; handRaised?: boolean }) {
+function MediaTile({ label, stream, muted, micMuted, local, presenting, handRaised }: { label: string; stream: MediaStream; muted?: boolean; micMuted: boolean; local?: boolean; presenting?: boolean; handRaised?: boolean }) {
   const media = useRef<HTMLVideoElement | null>(null);
   const hasVideo = stream.getVideoTracks().some((track) => track.enabled);
   useEffect(() => { if (media.current) media.current.srcObject = stream; }, [stream]);
@@ -39,6 +39,7 @@ function MediaTile({ label, stream, muted, local, presenting, handRaised }: { la
     <video ref={media} autoPlay playsInline muted={muted} />
     {!hasVideo ? <span className="call-avatar">{label.slice(0, 1).toUpperCase()}</span> : null}
     {handRaised ? <span className="call-hand-indicator" aria-label={`${local ? 'You have' : `${label} has`} raised a hand`} title="Hand raised"><CallIcon name="hand" /></span> : null}
+    <span className={`call-mic-indicator ${micMuted ? 'is-muted' : ''}`} aria-label={`${label}: microphone ${micMuted ? 'muted' : 'unmuted'}`} title={micMuted ? 'Muted' : 'Unmuted'}><CallIcon name={micMuted ? 'microphoneOff' : 'microphone'} /></span>
     <small>{local ? 'You' : label}{presenting ? ' is presenting' : ''}</small>
   </div>;
 }
@@ -85,6 +86,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const [call, setCall] = useState<ActiveCall | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
   const [muted, setMuted] = useState(false);
+  const [remoteMuteStates, setRemoteMuteStates] = useState<Record<string, boolean>>({});
   const [cameraEnabled, setCameraEnabled] = useState(false);
   const [hostSocketId, setHostSocketId] = useState<string | null>(null);
   const [presenterSocketId, setPresenterSocketId] = useState<string | null>(null);
@@ -173,6 +175,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     setCall(null);
     setRemoteStreams([]);
     setMuted(false);
+    setRemoteMuteStates({});
     setCameraEnabled(false);
     setHostSocketId(null);
     setPresenterSocketId(null);
@@ -260,6 +263,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       setCameraEnabled(stream.getVideoTracks().some((track) => track.enabled));
       const result = await new Promise<{ ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }>((resolve) => socketRef.current?.emit('call:join', active, resolve));
       if (!result?.ok) throw new Error(result?.error?.message ?? 'Could not join the call.');
+      setRemoteMuteStates((current) => ({ ...Object.fromEntries((result.participants ?? []).map((participant) => [participant.socketId, !!participant.muted])), ...current }));
       setHostSocketId(result.hostSocketId ?? null);
       setRaisedHandSocketIds(result.raisedHandSocketIds ?? []);
       onIncomingCallHandled();
@@ -281,6 +285,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     const next = !muted;
     localStreamRef.current?.getAudioTracks().forEach((track) => { track.enabled = !next; });
     setMuted(next);
+    if (callRef.current) socketRef.current?.emit('call:mute-state', { groupId: callRef.current.groupId, muted: next }, () => undefined);
   }
 
   function toggleCamera() {
@@ -364,12 +369,13 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     socket.on('chat:message', (message: GroupHub['messages'][number]) => setHub((current) => current ? { ...current, messages: [message, ...current.messages.filter((item) => item.id !== message.id)] } : current));
     socket.on('group:removed', (event: { groupId: string }) => { if (event.groupId === selectedGroupId) { if (callRef.current?.groupId === selectedGroupId) clearCall(); setManageOpen(false); setHub(null); onSelectGroup(''); notify('You were removed from this group.'); } });
     socket.on('call:participant-joined', (event: { groupId: string; participant: CallParticipant; hostSocketId: string }) => { if (event.groupId === callRef.current?.groupId) { setHostSocketId(event.hostSocketId); void createPeer(event.participant, true); } });
-    socket.on('call:participant-left', (event: { groupId: string; socketId: string }) => { if (event.groupId === callRef.current?.groupId) removePeer(event.socketId); });
+    socket.on('call:participant-left', (event: { groupId: string; socketId: string }) => { if (event.groupId === callRef.current?.groupId) { removePeer(event.socketId); setRemoteMuteStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); } });
+    socket.on('call:mute-state', (event: { groupId: string; socketId: string; muted: boolean }) => { if (event.groupId === callRef.current?.groupId) setRemoteMuteStates((current) => ({ ...current, [event.socketId]: event.muted })); });
     socket.on('call:signal', (event: { groupId: string; fromSocketId: string; signal: CallSignal }) => { if (event.groupId === callRef.current?.groupId) void acceptSignal(event.fromSocketId, event.signal); });
     socket.on('call:host-changed', (event: { groupId: string; hostSocketId: string | null }) => { if (event.groupId === callRef.current?.groupId) setHostSocketId(event.hostSocketId); });
     socket.on('call:screen-share', (event: { groupId: string; socketId: string; sharing: boolean }) => { if (event.groupId === callRef.current?.groupId) setPresenterSocketId(event.sharing ? event.socketId : (current) => current === event.socketId ? null : current); });
     socket.on('call:raise-hand', (event: { groupId: string; socketId: string; raised: boolean }) => { if (event.groupId === callRef.current?.groupId) setRaisedHandSocketIds((current) => event.raised ? [...new Set([...current, event.socketId])] : current.filter((id) => id !== event.socketId)); });
-    socket.on('call:mute-request', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { localStreamRef.current?.getAudioTracks().forEach((track) => { track.enabled = false; }); setMuted(true); notify('The host asked everyone to mute.'); } });
+    socket.on('call:mute-request', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { localStreamRef.current?.getAudioTracks().forEach((track) => { track.enabled = false; }); setMuted(true); socket.emit('call:mute-state', { groupId: event.groupId, muted: true }, () => undefined); notify('The host asked everyone to mute.'); } });
     socket.on('call:removed', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { clearCall(); notify('The host removed you from this meeting.'); } });
     socket.on('call:ended', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { clearCall(); notify('The host ended the meeting.'); } });
     return () => { if (callRef.current?.groupId === selectedGroupId) clearCall(); socketRef.current = null; socket.disconnect(); };
@@ -475,11 +481,11 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const callStage = call ? <div className="call-stage" role="region" aria-label={`${call.kind === 'video' ? 'Video' : 'Voice'} call`}>
       <header className="call-stage-head"><div><strong>{hub?.group.name ?? 'Group meeting'}</strong><span>{call.kind === 'video' ? 'Video meeting' : 'Voice meeting'} · {remoteStreams.length + 1} participant{remoteStreams.length ? 's' : ''}</span></div><div className="call-stage-status"><span className="call-live-dot" />{isHost ? 'You are host' : 'In meeting'}</div></header>
       <main className={`call-media-grid ${presenterSocketId ? 'has-presentation' : ''}`}>
-        {presentationStream ? <MediaTile label="You" stream={presentationStream} muted local presenting handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} /> : null}
-        {remoteStreams.map((item) => <MediaTile key={item.socketId} label={participantName(item.userId)} stream={item.stream} presenting={item.socketId === presenterSocketId} handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
-        <MediaTile label="You" stream={localStreamRef.current!} muted local handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} />
+        {presentationStream ? <MediaTile label="You" stream={presentationStream} muted micMuted={muted} local presenting handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} /> : null}
+        {remoteStreams.map((item) => <MediaTile key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} presenting={item.socketId === presenterSocketId} handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
+        <MediaTile label="You" stream={localStreamRef.current!} muted micMuted={muted} local handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} />
       </main>
-      {peopleOpen ? <aside className="call-people-panel"><div className="call-people-head"><strong>People</strong><button type="button" onClick={() => setPeopleOpen(false)} aria-label="Close people panel" title="Close people panel">×</button></div><div className="call-person-row"><span>You {isHost ? '(Host)' : ''}</span>{ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? <small className="call-hand-state">Hand raised</small> : <small>In meeting</small>}</div>{remoteStreams.map((item) => <div className="call-person-row" key={item.socketId}><span>{participantName(item.userId)}{item.socketId === hostSocketId ? ' (Host)' : ''}</span>{isHost ? <button type="button" className="call-remove" onClick={() => requestHostAction('remove-participant', item.socketId)}>Remove</button> : raisedHandSocketIds.includes(item.socketId) ? <small className="call-hand-state">Hand raised</small> : <small>In meeting</small>}</div>)}{isHost ? <div className="call-host-actions"><strong>Host controls</strong><button type="button" onClick={() => requestHostAction('mute-all')}>Mute all</button><button type="button" className="call-end-all" onClick={() => requestHostAction('end-call')}>End call for everyone</button></div> : null}</aside> : null}
+      {peopleOpen ? <aside className="call-people-panel"><div className="call-people-head"><strong>People</strong><button type="button" onClick={() => setPeopleOpen(false)} aria-label="Close people panel" title="Close people panel">×</button></div><div className="call-person-row"><span>You {isHost ? '(Host)' : ''}</span><small>{muted ? 'Muted' : 'Unmuted'}</small>{ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? <small className="call-hand-state">Hand raised</small> : <small>In meeting</small>}</div>{remoteStreams.map((item) => <div className="call-person-row" key={item.socketId}><span>{participantName(item.userId)}{item.socketId === hostSocketId ? ' (Host)' : ''}</span><small>{remoteMuteStates[item.socketId] ? 'Muted' : 'Unmuted'}</small>{isHost ? <button type="button" className="call-remove" onClick={() => requestHostAction('remove-participant', item.socketId)}>Remove</button> : raisedHandSocketIds.includes(item.socketId) ? <small className="call-hand-state">Hand raised</small> : <small>In meeting</small>}</div>)}{isHost ? <div className="call-host-actions"><strong>Host controls</strong><button type="button" onClick={() => requestHostAction('mute-all')}>Mute all</button><button type="button" className="call-end-all" onClick={() => requestHostAction('end-call')}>End call for everyone</button></div> : null}</aside> : null}
       <footer className="call-controls"><button type="button" className={`call-control ${muted ? 'is-off' : ''}`} onClick={toggleMute} aria-label={muted ? 'Turn microphone on' : 'Turn microphone off'} title={muted ? 'Turn microphone on' : 'Turn microphone off'}><CallIcon name={muted ? 'microphoneOff' : 'microphone'} /></button>{call.kind === 'video' ? <button type="button" className={`call-control ${cameraEnabled ? '' : 'is-off'}`} onClick={toggleCamera} aria-label={cameraEnabled ? 'Turn camera off' : 'Turn camera on'} title={cameraEnabled ? 'Turn camera off' : 'Turn camera on'}><CallIcon name={cameraEnabled ? 'camera' : 'cameraOff'} /></button> : null}<button type="button" className={`call-control ${presentationStream ? 'is-sharing' : ''}`} onClick={() => void togglePresenting()} aria-label={presentationStream ? 'Stop presenting' : 'Present screen'} title={presentationStream ? 'Stop presenting' : 'Present screen'}><CallIcon name="screen" /></button><button type="button" className={`call-control ${ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'is-active' : ''}`} onClick={toggleRaiseHand} aria-label={ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'Lower hand' : 'Raise hand'} title={ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'Lower hand' : 'Raise hand'}><CallIcon name="hand" /></button><button type="button" className={`call-control ${peopleOpen ? 'is-active' : ''}`} onClick={() => setPeopleOpen((open) => !open)} aria-label="Show people and host controls" title="Show people and host controls"><CallIcon name="people" /></button><button type="button" className="call-control call-hangup" onClick={leaveCall} aria-label="Leave call" title="Leave call"><CallIcon name="phone" /></button></footer>
     </div> : null;
   return <section className="sp on">
@@ -496,10 +502,10 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
           <section><div className="gc-side-title"><h3>Members</h3><span>{hub.group.members.length}</span></div>{hub.group.members.map((member) => <div className="gc-member-row" key={member.userId}><MemberAvatar id={member.userId} name={member.user.fullName} avatarUrl={member.user.avatarUrl} /><span><strong>{member.user.fullName}</strong><small>{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</small></span>{viewerIsLeader && member.userId !== userId ? <button type="button" className="gc-member-remove" aria-label={`Remove ${member.user.fullName} from the group`} title={`Remove ${member.user.fullName}`} onClick={() => setConfirmation({ title: 'Remove member?', description: `${member.user.fullName} will immediately lose access to this group’s chat, projects, and tasks.`, confirmLabel: 'Remove member', destructive: true, action: () => void removeMember(member.userId) })}>Remove</button> : <i />}</div>)}<button type="button" className="gc-manage-members" onClick={() => setManageOpen(true)}>{viewerIsLeader ? 'Manage members' : 'Add members'}</button></section>
           <section className="gc-voting"><div className="gc-side-title"><h3>Idea Voting</h3></div>{poll ? <><div className="gc-poll-status"><PollStatus poll={poll} onExpired={refreshHub} />{poll.open && viewerIsLeader ? <><label className="gc-vote-extend"><span className="sr-only">Hours to extend voting</span><input type="number" min="1" max="720" value={extensionHours} onChange={(event) => setExtensionHours(event.target.value)} aria-label="Hours to extend voting" /><button type="button" onClick={() => void extendVoting()}>Extend</button></label><button type="button" className="gc-close-vote" disabled={closingPoll} onClick={() => setConfirmation({ title: 'Close voting?', description: 'Members will no longer be able to vote in this poll.', confirmLabel: 'Close voting', action: () => void closeVoting() })}>{closingPoll ? 'Closing…' : 'Close voting'}</button></> : null}</div><div className="gc-poll-options">{poll.options.map((option) => <IdeaVoteCard key={option.optionId} option={option} totalVotes={poll.options.reduce((total, value) => total + value.votes, 0)} viewerOptionId={poll.viewerOptionId} viewerId={userId} votingOpen={poll.open} onVote={(optionId) => void vote(optionId)} />)}</div></> : <div className="gc-panel-empty">Your group vote starts in Idea Management.</div>}</section>
           <button className="gc-start-project" disabled={!hub.poll} onClick={() => void startProject()}>Start Project</button>
+          {hub?.poll && !hub.poll.open && viewerIsLeader ? <button type="button" className="btn-o btn-sm btn-red" onClick={() => setConfirmation({ title: 'Delete finished voting?', description: 'This removes the completed vote and its unused ideas. Ideas already turned into projects will be kept.', confirmLabel: 'Delete finished voting', destructive: true, action: () => void deleteFinishedVoting() })}>Delete finished voting</button> : null}
         </aside>
       </> : <div className="gc-no-selection"><strong>Your workspace is ready</strong><span>Choose or create a group to begin a conversation.</span></div>}
     </div>
-    {hub?.poll && !hub.poll.open && viewerIsLeader ? <button type="button" className="btn-o btn-sm btn-red" onClick={() => setConfirmation({ title: 'Delete finished voting?', description: 'This removes the completed vote and its unused ideas. Ideas already turned into projects will be kept.', confirmLabel: 'Delete finished voting', destructive: true, action: () => void deleteFinishedVoting() })}>Delete finished voting</button> : null}
     {confirmation ? <ConfirmDialog {...confirmation} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation.action; setConfirmation(null); action(); }} /> : null}
     {manageOpen && hub ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setManageOpen(false); }}>
       <div className="modal-box hub-modal" role="dialog" aria-modal="true" aria-label={`Group Hub for ${hub.group.name}`}>

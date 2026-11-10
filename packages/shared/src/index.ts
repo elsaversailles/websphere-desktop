@@ -6,7 +6,7 @@ export type Role = (typeof roles)[number];
 export type ApiError = { code: string; message: string; fields?: Record<string, string> };
 export type AckDto = { ok: boolean; error?: ApiError };
 export type CallKind = 'voice' | 'video';
-export type CallParticipant = { socketId: string; userId: string; fullName?: string };
+export type CallParticipant = { socketId: string; userId: string; fullName?: string; muted?: boolean };
 export type CallSignal = { type: 'offer' | 'answer' | 'ice-candidate'; sdp?: string; candidate?: RTCIceCandidateInit | null };
 export type CallHostAction = 'mute-all' | 'remove-participant' | 'end-call';
 export type IceServerConfig = { urls: string | string[]; username?: string; credential?: string };
@@ -217,6 +217,7 @@ export type ServerToClientEvents = {
   'call:mute-request': (call: { groupId: string }) => void;
   'call:removed': (call: { groupId: string }) => void;
   'call:ended': (call: { groupId: string }) => void;
+  'call:mute-state': (call: { groupId: string; socketId: string; muted: boolean }) => void;
   'call:raise-hand': (call: { groupId: string; socketId: string; raised: boolean }) => void;
 };
 export type ClientToServerEvents = {
@@ -229,6 +230,7 @@ export type ClientToServerEvents = {
   'call:signal': (signal: { groupId: string; targetSocketId: string; signal: CallSignal }, ack: (result: AckDto) => void) => void;
   'call:screen-share': (share: { groupId: string; sharing: boolean }, ack: (result: AckDto) => void) => void;
   'call:host-action': (action: { groupId: string; action: CallHostAction; targetSocketId?: string }, ack: (result: AckDto) => void) => void;
+  'call:mute-state': (state: { groupId: string; muted: boolean }, ack: (result: AckDto) => void) => void;
   'call:raise-hand': (hand: { groupId: string; raised: boolean }, ack: (result: AckDto) => void) => void;
 };
 
