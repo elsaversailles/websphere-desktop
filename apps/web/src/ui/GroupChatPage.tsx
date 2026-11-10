@@ -31,13 +31,26 @@ function mediaDeviceErrorMessage(error: unknown, kind: CallKind) {
   return error instanceof Error ? error.message : 'Could not start the call.';
 }
 
-function MediaTile({ label, stream, muted, micMuted, local, presenting, handRaised }: { label: string; stream: MediaStream; muted?: boolean; micMuted: boolean; local?: boolean; presenting?: boolean; handRaised?: boolean }) {
+function MediaTile({ label, stream, muted, micMuted, cameraOn, local, presenting, handRaised }: { label: string; stream: MediaStream; muted?: boolean; micMuted: boolean; cameraOn?: boolean; local?: boolean; presenting?: boolean; handRaised?: boolean }) {
   const media = useRef<HTMLVideoElement | null>(null);
-  const hasVideo = stream.getVideoTracks().some((track) => track.enabled);
-  useEffect(() => { if (media.current) media.current.srcObject = stream; }, [stream]);
+  const [playbackBlocked, setPlaybackBlocked] = useState(false);
+  const hasVideo = cameraOn !== false && stream.getVideoTracks().some((track) => track.enabled && track.readyState === 'live');
+  useEffect(() => {
+    const element = media.current;
+    if (!element) return;
+    let active = true;
+    element.srcObject = stream;
+    setPlaybackBlocked(false);
+    void element.play().catch(() => { if (active) setPlaybackBlocked(true); });
+    return () => { active = false; element.srcObject = null; };
+  }, [stream]);
+  function resumePlayback() {
+    void media.current?.play().then(() => setPlaybackBlocked(false)).catch(() => setPlaybackBlocked(true));
+  }
   return <div className={`call-media-tile ${hasVideo ? 'has-video' : ''} ${presenting ? 'is-presenting' : ''}`}>
     <video ref={media} autoPlay playsInline muted={muted} />
     {!hasVideo ? <span className="call-avatar">{label.slice(0, 1).toUpperCase()}</span> : null}
+    {playbackBlocked ? <button type="button" className="call-resume-playback" onClick={resumePlayback}>Play {local ? 'your video' : `${label}’s audio and video`}</button> : null}
     {handRaised ? <span className="call-hand-indicator" aria-label={`${local ? 'You have' : `${label} has`} raised a hand`} title="Hand raised"><CallIcon name="hand" /></span> : null}
     <span className={`call-mic-indicator ${micMuted ? 'is-muted' : ''}`} aria-label={`${label}: microphone ${micMuted ? 'muted' : 'unmuted'}`} title={micMuted ? 'Muted' : 'Unmuted'}><CallIcon name={micMuted ? 'microphoneOff' : 'microphone'} /></span>
     <small>{local ? 'You' : label}{presenting ? ' is presenting' : ''}</small>
@@ -86,6 +99,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const [call, setCall] = useState<ActiveCall | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
   const [muted, setMuted] = useState(false);
+  const [remoteCameraStates, setRemoteCameraStates] = useState<Record<string, boolean>>({});
   const [remoteMuteStates, setRemoteMuteStates] = useState<Record<string, boolean>>({});
   const [cameraEnabled, setCameraEnabled] = useState(false);
   const [hostSocketId, setHostSocketId] = useState<string | null>(null);
@@ -176,6 +190,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     setRemoteStreams([]);
     setMuted(false);
     setRemoteMuteStates({});
+    setRemoteCameraStates({});
     setCameraEnabled(false);
     setHostSocketId(null);
     setPresenterSocketId(null);
@@ -209,11 +224,12 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     presentation?.getAudioTracks().forEach((track) => peer.addTrack(track, presentation));
     peer.onicecandidate = (event) => { if (event.candidate) void sendSignal(participant.socketId, { type: 'ice-candidate', candidate: event.candidate.toJSON() }); };
     peer.ontrack = (event) => {
-      const incoming = event.streams[0];
-      if (incoming) setRemoteStreams((current) => {
+      const incomingTracks = event.streams[0]?.getTracks() ?? [event.track];
+      setRemoteStreams((current) => {
         const existing = current.find((item) => item.socketId === participant.socketId);
-        const stream = existing?.stream ?? new MediaStream();
-        incoming.getTracks().forEach((track) => { if (!stream.getTracks().some((currentTrack) => currentTrack.id === track.id)) stream.addTrack(track); });
+        const tracks = [...(existing?.stream.getTracks() ?? [])];
+        for (const track of incomingTracks) if (!tracks.some((currentTrack) => currentTrack.id === track.id)) tracks.push(track);
+        const stream = new MediaStream(tracks);
         return [...current.filter((item) => item.socketId !== participant.socketId), { socketId: participant.socketId, userId: peerUserIdsRef.current.get(participant.socketId) ?? '', stream }];
       });
     };
@@ -261,8 +277,9 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       callRef.current = active;
       setCall(active);
       setCameraEnabled(stream.getVideoTracks().some((track) => track.enabled));
-      const result = await new Promise<{ ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }>((resolve) => socketRef.current?.emit('call:join', active, resolve));
+      const result = await new Promise<{ ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }>((resolve) => socketRef.current?.emit('call:join', { ...active, cameraEnabled: stream.getVideoTracks().some((track) => track.enabled) }, resolve));
       if (!result?.ok) throw new Error(result?.error?.message ?? 'Could not join the call.');
+      setRemoteCameraStates((current) => ({ ...Object.fromEntries((result.participants ?? []).filter((participant) => participant.cameraEnabled !== undefined).map((participant) => [participant.socketId, participant.cameraEnabled!])), ...current }));
       setRemoteMuteStates((current) => ({ ...Object.fromEntries((result.participants ?? []).map((participant) => [participant.socketId, !!participant.muted])), ...current }));
       setHostSocketId(result.hostSocketId ?? null);
       setRaisedHandSocketIds(result.raisedHandSocketIds ?? []);
@@ -292,6 +309,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     const next = !cameraEnabled;
     localStreamRef.current?.getVideoTracks().forEach((track) => { track.enabled = next; });
     setCameraEnabled(next);
+    if (callRef.current) socketRef.current?.emit('call:camera-state', { groupId: callRef.current.groupId, enabled: next }, () => undefined);
   }
 
   async function stopPresenting(notifyOthers = true) {
@@ -368,8 +386,9 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     socket.on('poll:tally', (tally: { groupId?: string }) => { if (tally.groupId === selectedGroupId) void refreshHub(); });
     socket.on('chat:message', (message: GroupHub['messages'][number]) => setHub((current) => current ? { ...current, messages: [message, ...current.messages.filter((item) => item.id !== message.id)] } : current));
     socket.on('group:removed', (event: { groupId: string }) => { if (event.groupId === selectedGroupId) { if (callRef.current?.groupId === selectedGroupId) clearCall(); setManageOpen(false); setHub(null); onSelectGroup(''); notify('You were removed from this group.'); } });
-    socket.on('call:participant-joined', (event: { groupId: string; participant: CallParticipant; hostSocketId: string }) => { if (event.groupId === callRef.current?.groupId) { setHostSocketId(event.hostSocketId); void createPeer(event.participant, true); } });
-    socket.on('call:participant-left', (event: { groupId: string; socketId: string }) => { if (event.groupId === callRef.current?.groupId) { removePeer(event.socketId); setRemoteMuteStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); } });
+    socket.on('call:participant-joined', (event: { groupId: string; participant: CallParticipant; hostSocketId: string }) => { if (event.groupId === callRef.current?.groupId) { setHostSocketId(event.hostSocketId); if (event.participant.cameraEnabled !== undefined) setRemoteCameraStates((current) => ({ ...current, [event.participant.socketId]: event.participant.cameraEnabled! })); void createPeer(event.participant, true); } });
+    socket.on('call:participant-left', (event: { groupId: string; socketId: string }) => { if (event.groupId === callRef.current?.groupId) { removePeer(event.socketId); setRemoteCameraStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); setRemoteMuteStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); } });
+    socket.on('call:camera-state', (event: { groupId: string; socketId: string; enabled: boolean }) => { if (event.groupId === callRef.current?.groupId) setRemoteCameraStates((current) => ({ ...current, [event.socketId]: event.enabled })); });
     socket.on('call:mute-state', (event: { groupId: string; socketId: string; muted: boolean }) => { if (event.groupId === callRef.current?.groupId) setRemoteMuteStates((current) => ({ ...current, [event.socketId]: event.muted })); });
     socket.on('call:signal', (event: { groupId: string; fromSocketId: string; signal: CallSignal }) => { if (event.groupId === callRef.current?.groupId) void acceptSignal(event.fromSocketId, event.signal); });
     socket.on('call:host-changed', (event: { groupId: string; hostSocketId: string | null }) => { if (event.groupId === callRef.current?.groupId) setHostSocketId(event.hostSocketId); });
@@ -482,8 +501,8 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       <header className="call-stage-head"><div><strong>{hub?.group.name ?? 'Group meeting'}</strong><span>{call.kind === 'video' ? 'Video meeting' : 'Voice meeting'} · {remoteStreams.length + 1} participant{remoteStreams.length ? 's' : ''}</span></div><div className="call-stage-status"><span className="call-live-dot" />{isHost ? 'You are host' : 'In meeting'}</div></header>
       <main className={`call-media-grid ${presenterSocketId ? 'has-presentation' : ''}`}>
         {presentationStream ? <MediaTile label="You" stream={presentationStream} muted micMuted={muted} local presenting handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} /> : null}
-        {remoteStreams.map((item) => <MediaTile key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} presenting={item.socketId === presenterSocketId} handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
-        <MediaTile label="You" stream={localStreamRef.current!} muted micMuted={muted} local handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} />
+        {remoteStreams.map((item) => <MediaTile key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} cameraOn={item.socketId === presenterSocketId || remoteCameraStates[item.socketId] !== false} presenting={item.socketId === presenterSocketId} handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
+        <MediaTile label="You" stream={localStreamRef.current!} muted micMuted={muted} cameraOn={cameraEnabled} local handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} />
       </main>
       {peopleOpen ? <aside className="call-people-panel"><div className="call-people-head"><strong>People</strong><button type="button" onClick={() => setPeopleOpen(false)} aria-label="Close people panel" title="Close people panel">×</button></div><div className="call-person-row"><span>You {isHost ? '(Host)' : ''}</span><small>{muted ? 'Muted' : 'Unmuted'}</small>{ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? <small className="call-hand-state">Hand raised</small> : <small>In meeting</small>}</div>{remoteStreams.map((item) => <div className="call-person-row" key={item.socketId}><span>{participantName(item.userId)}{item.socketId === hostSocketId ? ' (Host)' : ''}</span><small>{remoteMuteStates[item.socketId] ? 'Muted' : 'Unmuted'}</small>{isHost ? <button type="button" className="call-remove" onClick={() => requestHostAction('remove-participant', item.socketId)}>Remove</button> : raisedHandSocketIds.includes(item.socketId) ? <small className="call-hand-state">Hand raised</small> : <small>In meeting</small>}</div>)}{isHost ? <div className="call-host-actions"><strong>Host controls</strong><button type="button" onClick={() => requestHostAction('mute-all')}>Mute all</button><button type="button" className="call-end-all" onClick={() => requestHostAction('end-call')}>End call for everyone</button></div> : null}</aside> : null}
       <footer className="call-controls"><button type="button" className={`call-control ${muted ? 'is-off' : ''}`} onClick={toggleMute} aria-label={muted ? 'Turn microphone on' : 'Turn microphone off'} title={muted ? 'Turn microphone on' : 'Turn microphone off'}><CallIcon name={muted ? 'microphoneOff' : 'microphone'} /></button>{call.kind === 'video' ? <button type="button" className={`call-control ${cameraEnabled ? '' : 'is-off'}`} onClick={toggleCamera} aria-label={cameraEnabled ? 'Turn camera off' : 'Turn camera on'} title={cameraEnabled ? 'Turn camera off' : 'Turn camera on'}><CallIcon name={cameraEnabled ? 'camera' : 'cameraOff'} /></button> : null}<button type="button" className={`call-control ${presentationStream ? 'is-sharing' : ''}`} onClick={() => void togglePresenting()} aria-label={presentationStream ? 'Stop presenting' : 'Present screen'} title={presentationStream ? 'Stop presenting' : 'Present screen'}><CallIcon name="screen" /></button><button type="button" className={`call-control ${ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'is-active' : ''}`} onClick={toggleRaiseHand} aria-label={ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'Lower hand' : 'Raise hand'} title={ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'Lower hand' : 'Raise hand'}><CallIcon name="hand" /></button><button type="button" className={`call-control ${peopleOpen ? 'is-active' : ''}`} onClick={() => setPeopleOpen((open) => !open)} aria-label="Show people and host controls" title="Show people and host controls"><CallIcon name="people" /></button><button type="button" className="call-control call-hangup" onClick={leaveCall} aria-label="Leave call" title="Leave call"><CallIcon name="phone" /></button></footer>

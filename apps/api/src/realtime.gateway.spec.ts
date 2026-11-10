@@ -90,8 +90,23 @@ describe('RealtimeGateway room authorization', () => {
     gateway.server = { in: vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([client]) })), to: vi.fn(() => ({ emit: vi.fn() })) } as any;
     const joiner = socket({ id: 'user-2' });
     const result = await gateway.callJoin(joiner, { groupId: 'group-1', kind: 'voice' });
-    expect(result.participants).toEqual([{ socketId: 'socket-1', userId: 'user-1', muted: true }]);
+    expect(result.participants).toEqual([{ socketId: 'socket-1', userId: 'user-1', muted: true, cameraEnabled: undefined }]);
     await expect(gateway.callMuteState(joiner, { groupId: 'group-1', muted: true })).resolves.toMatchObject({ ok: false });
+  });
+
+  it('shares camera state and supplies it to participants joining later', async () => {
+    const emit = vi.fn();
+    const client = socket({ id: 'user-1' });
+    client.rooms.add('call:group-1');
+    client.to = vi.fn(() => ({ emit }));
+    const gateway = new RealtimeGateway({ member: vi.fn().mockResolvedValue({}) } as any, {} as any, events);
+    await expect(gateway.callCameraState(client, { groupId: 'group-1', enabled: false })).resolves.toEqual({ ok: true });
+    expect(emit).toHaveBeenCalledWith('call:camera-state', { groupId: 'group-1', socketId: 'socket-1', enabled: false });
+    gateway.server = { in: vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([client]) })), to: vi.fn(() => ({ emit: vi.fn() })) } as any;
+    const joiner = socket({ id: 'user-2' });
+    const result = await gateway.callJoin(joiner, { groupId: 'group-1', kind: 'video' });
+    expect(result.participants?.[0].cameraEnabled).toBe(false);
+    await expect(gateway.callCameraState(joiner, { groupId: 'group-1', enabled: true })).resolves.toMatchObject({ ok: false });
   });
 
   it('broadcasts a chat message and notifies the other group members by name', async () => {

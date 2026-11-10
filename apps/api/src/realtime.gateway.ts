@@ -69,7 +69,7 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
     } catch { /* notification is a side effect; never fail the delivered message over it */ }
   }
   @SubscribeMessage('sync:request') async reconcile(@ConnectedSocket() socket: Socket, @MessageBody() body: { projectId: string }) { await this.app.projectMember(body.projectId, socket.data.caller.id); const tasks = await this.app.prisma.task.findMany({ where: { projectId: body.projectId }, include: { assignments: { where: { active: true } } } }); return { projectId: body.projectId, tasks }; }
-  @SubscribeMessage('call:join') async callJoin(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; kind: 'voice' | 'video' }): Promise<AckDto & { participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[] }> {
+  @SubscribeMessage('call:join') async callJoin(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; kind: 'voice' | 'video'; cameraEnabled?: boolean }): Promise<AckDto & { participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[] }> {
     try {
       this.assertAuthenticated(socket);
       if (!body?.groupId || !['voice', 'video'].includes(body.kind)) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'A group and call type are required' }, 400);
@@ -77,19 +77,28 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
       const room = `call:${body.groupId}`;
       const members = await this.server.in(room).fetchSockets();
       if (members.length >= 6) throw new HttpException({ code: 'CALL_FULL', message: 'This call has reached its six-participant limit' }, 409);
-      const participants = members.map((member) => ({ socketId: member.id, userId: String(member.data.caller?.id ?? ''), muted: member.data.callMuteStates?.[body.groupId] === true }));
+      const participants = members.map((member) => ({ socketId: member.id, userId: String(member.data.caller?.id ?? ''), muted: member.data.callMuteStates?.[body.groupId] === true, cameraEnabled: member.data.callCameraStates?.[body.groupId] }));
       socket.data.callMuteStates = { ...socket.data.callMuteStates, [body.groupId]: false };
+      const cameraEnabled = body.kind === 'video' && body.cameraEnabled !== false;
+      socket.data.callCameraStates = { ...socket.data.callCameraStates, [body.groupId]: cameraEnabled };
       await socket.join(room);
       const hostSocketId = this.callHosts.get(body.groupId) ?? socket.id;
       this.callHosts.set(body.groupId, hostSocketId);
       if (!participants.length) this.server.to(`group:${body.groupId}`).emit('call:invite', { groupId: body.groupId, kind: body.kind, initiatorSocketId: socket.id, initiatorUserId: socket.data.caller.id });
-      socket.to(room).emit('call:participant-joined', { groupId: body.groupId, participant: { socketId: socket.id, userId: socket.data.caller.id }, hostSocketId });
+      socket.to(room).emit('call:participant-joined', { groupId: body.groupId, participant: { socketId: socket.id, userId: socket.data.caller.id, cameraEnabled }, hostSocketId });
       return { ok: true, participants, hostSocketId, raisedHandSocketIds: [...(this.raisedHands.get(body.groupId) ?? [])] };
     } catch (error) { return this.ackError(error); }
   }
   @SubscribeMessage('call:leave') callLeave(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string }) { return this.ack(async () => { this.assertAuthenticated(socket); if (!body?.groupId) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Group ID is required' }, 400); await this.removeCallParticipant(body.groupId, socket.id); }); }
   @SubscribeMessage('call:signal') async callSignal(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; targetSocketId: string; signal: CallSignal }) { return this.ack(async () => { this.assertAuthenticated(socket); if (!body?.groupId || !body?.targetSocketId || !body.signal || !['offer', 'answer', 'ice-candidate'].includes(body.signal.type)) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Invalid call signal' }, 400); const room = `call:${body.groupId}`; if (!socket.rooms.has(room)) throw new HttpException({ code: 'RBAC_FORBIDDEN', message: 'Join the call before signaling' }, 403); const recipients = await this.server.in(room).fetchSockets(); if (!recipients.some((recipient) => recipient.id === body.targetSocketId)) throw new HttpException({ code: 'RBAC_FORBIDDEN', message: 'Call participant is unavailable' }, 403); this.server.to(body.targetSocketId).emit('call:signal', { groupId: body.groupId, fromSocketId: socket.id, signal: body.signal }); }); }
   @SubscribeMessage('call:screen-share') callScreenShare(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; sharing: boolean }) { return this.ack(async () => { this.assertAuthenticated(socket); if (!body?.groupId || typeof body.sharing !== 'boolean' || !socket.rooms.has(`call:${body.groupId}`)) throw new HttpException({ code: 'RBAC_FORBIDDEN', message: 'Join the call before changing presentation state' }, 403); socket.to(`call:${body.groupId}`).emit('call:screen-share', { groupId: body.groupId, socketId: socket.id, sharing: body.sharing }); }); }
+  @SubscribeMessage('call:camera-state') callCameraState(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; enabled: boolean }) { return this.ack(async () => {
+    this.assertAuthenticated(socket);
+    const room = `call:${body?.groupId}`;
+    if (!body?.groupId || typeof body.enabled !== 'boolean' || !socket.rooms.has(room)) throw new HttpException({ code: 'RBAC_FORBIDDEN', message: 'Join the call before changing camera state' }, 403);
+    socket.data.callCameraStates = { ...socket.data.callCameraStates, [body.groupId]: body.enabled };
+    socket.to(room).emit('call:camera-state', { groupId: body.groupId, socketId: socket.id, enabled: body.enabled });
+  }); }
   @SubscribeMessage('call:mute-state') callMuteState(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; muted: boolean }) { return this.ack(async () => {
     this.assertAuthenticated(socket);
     const room = `call:${body?.groupId}`;
