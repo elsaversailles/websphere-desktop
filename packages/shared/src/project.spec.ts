@@ -43,3 +43,8 @@ describe('project creation task contract', () => {
     expect(projectSchema.safeParse({ ...project, initialTasks: [{ assigneeId: 'invalid', title: 'Write chapter 1' }] }).success).toBe(false);
   });
 });
+
+it('rejects idea links and unknown fields in project creation requests', () => {
+  expect(projectSchema.safeParse({ title: 'Research', ideaId: 'idea-1' }).success).toBe(false);
+  expect(projectSchema.safeParse({ title: 'Research', idea: { connect: { id: 'idea-1' } } }).success).toBe(false);
+});

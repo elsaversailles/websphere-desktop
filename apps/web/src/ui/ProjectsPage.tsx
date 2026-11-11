@@ -75,6 +75,8 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
     return () => { socket.disconnect(); };
   }, [refreshProjects, refreshTasks, notify]);
 
+  useEffect(() => { void refreshTasks(); }, [today, refreshTasks]);
+
   async function createTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!detail) return;
@@ -103,7 +105,7 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
     event.preventDefault();
     if (!editingTask) return;
     const values = new FormData(event.currentTarget);
-    const assigneeId = String(values.get('assigneeId') ?? '');
+    const assigneeId = String(values.get('assigneeId') ?? editingTask.task.assignments[0]?.assigneeId ?? '');
     const payload = editingTask.mode === 'reassign'
       ? { assigneeId }
       : { title: values.get('title'), startDate: values.get('startDate') || null, deadline: values.get('deadline') || null, assigneeId: assigneeId || null };
@@ -193,7 +195,7 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
             const due = deadlineHealth(task.deadline, today);
             const priority = taskPriorityHealth(task, today);
             const status = taskStatusHealth(task.status);
-            const needsReassignment = task.status !== 'completed' && (task.risk?.level === 'high' || (due?.days ?? 0) < 0);
+            const needsReassignment = task.status !== 'completed' && task.risk?.level === 'high';
             const currentAssignee = task.assignments[0]?.assigneeId;
             const replacementAvailable = detail.members.some((member) => member.userId !== currentAssignee);
             return <tr key={task.id} id={`project-task-${task.id}`} className={focusedTask?.projectId === detail.id && focusedTask.taskId === task.id ? 'notification-target' : undefined}>
@@ -219,7 +221,7 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
           <ScheduleDateFields idPrefix="task-edit" initialStart={editingTask.task.startDate ? dateOnlyKey(editingTask.task.startDate) : ''} initialEnd={editingTask.task.deadline ? dateOnlyKey(editingTask.task.deadline) : ''} editing />
         </> : <p className="muted">Choose a replacement project member. They will receive a task notification.</p>}
         <label className="lbl" htmlFor="task-edit-assignee">{editingTask.mode === 'reassign' ? 'New Assignee' : 'Assigned Member'}</label>
-        <select id="task-edit-assignee" className="ifield" name="assigneeId" required={editingTask.mode === 'reassign'} defaultValue={editingTask.mode === 'reassign' ? '' : editingTask.task.assignments[0]?.assigneeId ?? ''}>
+        <select id="task-edit-assignee" className="ifield" name="assigneeId" disabled={editingTask.mode === 'edit' && !!editingTask.task.assignments[0] && editingTask.task.risk?.level !== 'high'} required={editingTask.mode === 'reassign'} defaultValue={editingTask.mode === 'reassign' ? '' : editingTask.task.assignments[0]?.assigneeId ?? ''}>
           <option value="" disabled={editingTask.mode === 'reassign'}>{editingTask.mode === 'reassign' ? 'Choose replacement' : 'Unassigned'}</option>
           {(detail?.members ?? []).filter((member) => editingTask.mode !== 'reassign' || member.userId !== editingTask.task.assignments[0]?.assigneeId).map((member) => <option key={member.userId} value={member.userId}>{member.user.fullName}</option>)}
         </select>

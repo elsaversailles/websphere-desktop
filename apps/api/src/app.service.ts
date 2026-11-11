@@ -555,7 +555,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return { ok: true };
   }
   async createProject(caller: Caller, input: any) {
-    const { memberIds: requested, initialTasks = [], groupId, ...data } = input;
+    const { memberIds: requested, initialTasks = [], groupId, title, description, startDate, deadline, externalTools } = input;
+    if (input.ideaId !== undefined || input.idea !== undefined) fail('VOTING_REQUIRED', 'Create projects from ideas through the completed group vote.', 403);
+    const data = { title, description, startDate, deadline, externalTools };
     if (groupId) await this.member(groupId, caller.id);
     const memberIds = [...new Set<string>([caller.id, ...(requested ?? [])])];
     if (groupId) for (const userId of memberIds) await this.member(groupId, userId);

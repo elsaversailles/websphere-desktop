@@ -273,6 +273,11 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     } catch { notify('Could not establish a secure media connection.'); }
   }
 
+  function microphoneMuted(stream: MediaStream) {
+    const track = stream.getAudioTracks()[0];
+    return !track || !track.enabled || track.muted || track.readyState === 'ended';
+  }
+
   async function joinCall(kind: CallKind) {
     if (!selectedGroupId || !socketRef.current || callRef.current) return;
     try {
@@ -285,7 +290,17 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       callRef.current = active;
       const generation = ++reconnectGenerationRef.current;
       setCall(active);
-      const initialMuted = !stream.getAudioTracks()[0]?.enabled;
+      const syncMicrophone = () => {
+        if (localStreamRef.current !== stream) return;
+        const actualMuted = microphoneMuted(stream);
+        setMuted(actualMuted);
+        if (callRef.current) publishMuteState(callRef.current.groupId, actualMuted);
+      };
+      const audioTrack = stream.getAudioTracks()[0];
+      audioTrack?.addEventListener('mute', syncMicrophone);
+      audioTrack?.addEventListener('unmute', syncMicrophone);
+      audioTrack?.addEventListener('ended', syncMicrophone);
+      const initialMuted = microphoneMuted(stream);
       setMuted(initialMuted);
       setCameraEnabled(stream.getVideoTracks().some((track) => track.enabled));
       const result = await new Promise<{ ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }>((resolve) => {
@@ -296,7 +311,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       if (generation !== reconnectGenerationRef.current) { if (result.ok && callRef.current?.groupId !== active.groupId) socketRef.current?.emit('call:leave', { groupId: active.groupId }, () => undefined); return; }
       if (!result?.ok) throw new Error(result?.error?.message ?? 'Could not join the call.');
       // A mute change may have occurred while the join acknowledgement was pending.
-      publishMuteState(active.groupId, !stream.getAudioTracks()[0]?.enabled);
+      publishMuteState(active.groupId, microphoneMuted(stream));
       setRemoteCameraStates((current) => ({ ...Object.fromEntries((result.participants ?? []).filter((participant) => participant.cameraEnabled !== undefined).map((participant) => [participant.socketId, participant.cameraEnabled!])), ...current }));
       setRemoteMuteStates((current) => ({ ...Object.fromEntries((result.participants ?? []).map((participant) => [participant.socketId, !!participant.muted])), ...current }));
       setHostSocketId(result.hostSocketId ?? null);
@@ -320,7 +335,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     const socket = socketRef.current;
     if (!socket?.connected || reconnectingRef.current) return;
     socket.timeout(5000).emit('call:mute-state', { groupId, muted: next }, (error: Error | null, result?: { ok: boolean }) => {
-      const actualMuted = !localStreamRef.current?.getAudioTracks()[0]?.enabled;
+      const actualMuted = localStreamRef.current ? microphoneMuted(localStreamRef.current) : true;
       if ((error || !result?.ok) && callRef.current?.groupId === groupId && !reconnectingRef.current && actualMuted === next) notify('Your microphone changed, but others may not see its status. Please rejoin the call.');
     });
   }
@@ -330,8 +345,9 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     if (!track) return;
     const next = track.enabled;
     track.enabled = !next;
-    setMuted(next);
-    if (callRef.current) publishMuteState(callRef.current.groupId, next);
+    const actualMuted = microphoneMuted(localStreamRef.current!);
+    setMuted(actualMuted);
+    if (callRef.current) publishMuteState(callRef.current.groupId, actualMuted);
   }
 
   function toggleCamera() {
@@ -417,7 +433,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       const stream = localStreamRef.current;
       if (!reconnectingRef.current || !active || !stream) return;
       const generation = ++reconnectGenerationRef.current;
-      socket.timeout(10000).emit('call:join', { ...active, muted: !stream.getAudioTracks()[0]?.enabled, cameraEnabled: !!stream.getVideoTracks()[0]?.enabled }, (error: Error | null, result?: { ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }) => {
+      socket.timeout(10000).emit('call:join', { ...active, muted: microphoneMuted(stream), cameraEnabled: !!stream.getVideoTracks()[0]?.enabled }, (error: Error | null, result?: { ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }) => {
         if (generation !== reconnectGenerationRef.current || callRef.current !== active) { if (result?.ok && callRef.current?.groupId !== active.groupId) socket.emit('call:leave', { groupId: active.groupId }, () => undefined); return; }
         if (error || !result?.ok) { socket.emit('call:leave', { groupId: active.groupId }, () => undefined); clearCall(); notify(result?.error?.message ?? 'Could not reconnect the call. Please rejoin.'); return; }
         reconnectingRef.current = false;
@@ -426,7 +442,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
         setRemoteMuteStates((current) => ({ ...Object.fromEntries((result.participants ?? []).map((participant) => [participant.socketId, !!participant.muted])), ...current }));
         setHostSocketId(result.hostSocketId ?? null);
         setRaisedHandSocketIds(result.raisedHandSocketIds ?? []);
-        publishMuteState(active.groupId, !stream.getAudioTracks()[0]?.enabled);
+        publishMuteState(active.groupId, microphoneMuted(stream));
         for (const participant of result.participants ?? []) void createPeer(participant, false);
       });
     });

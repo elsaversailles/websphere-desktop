@@ -134,7 +134,7 @@ export const projectSchema = z.object({
   startDate: z.coerce.date().optional(), deadline: z.coerce.date().optional(), memberIds: z.array(z.string().cuid()).default([]),
   initialTasks: z.array(z.object({ assigneeId: z.string().cuid(), title: taskTitleSchema })).default([]),
   externalTools: projectExternalToolsSchema.default([]),
-});
+}).strict();
 export const projectUpdateSchema = z.object({
   title: z.string().trim().min(2).max(180).optional(), description: z.string().trim().min(1).optional(),
   startDate: z.coerce.date().nullable().optional(), deadline: z.coerce.date().nullable().optional(),
