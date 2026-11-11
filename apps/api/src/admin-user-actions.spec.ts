@@ -24,17 +24,30 @@ describe('adminUpdateUser', () => {
     const { service, update } = serviceWith();
 
     await service.adminUpdateUser(admin, 'user-9', {
-      fullName: '  New Name  ', role: 'Project_Leader',
+      role: 'Project_Leader',
       passwordHash: 'pwned', tokenVersion: 999, email: 'evil@websphere.fun',
     } as any);
 
     const data = update.mock.calls[0][0].data;
-    expect(data.fullName).toBe('New Name');
+    expect(data).not.toHaveProperty('fullName');
     expect(data.role).toBe('Project_Leader');
     expect(data).not.toHaveProperty('passwordHash');
     expect(data).not.toHaveProperty('email');
     // No status change, so sessions are left intact.
     expect(data).not.toHaveProperty('tokenVersion');
+  });
+
+  it('rejects attempts to change a name', async () => {
+    const { service, update } = serviceWith();
+    await expect(service.adminUpdateUser(admin, 'user-9', { fullName: 'New Name', status: 'active' })).rejects.toThrow();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('rejects changes to deleted accounts', async () => {
+    const { service, update, findUnique } = serviceWith();
+    findUnique.mockResolvedValue({ status: 'removed' });
+    await expect(service.adminUpdateUser(admin, 'user-9', { status: 'active' })).rejects.toThrow();
+    expect(update).not.toHaveBeenCalled();
   });
 
   it('invalidates sessions when a status change makes the account inactive', async () => {
@@ -128,5 +141,18 @@ describe('adminRestoreUser', () => {
   it('rejects restoring an account that is not archived', async () => {
     const { service } = serviceWith();
     await expect(service.adminRestoreUser(admin, 'user-9')).rejects.toThrow();
+  });
+});
+
+describe('adminUsers', () => {
+  it('excludes deleted and archived accounts from both the page and count', async () => {
+    const findMany = vi.fn().mockReturnValue('users-query');
+    const count = vi.fn().mockReturnValue('count-query');
+    const transaction = vi.fn().mockResolvedValue([[], 0]);
+    const { service } = serviceWith({ prisma: { user: { findMany, count }, $transaction: transaction } });
+    await service.adminUsers(admin, 1, 10, 'test');
+    const where = findMany.mock.calls[0][0].where;
+    expect(where.AND).toContainEqual({ status: { notIn: ['archived', 'removed'] } });
+    expect(count.mock.calls[0][0].where).toEqual(where);
   });
 });

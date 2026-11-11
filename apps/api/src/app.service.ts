@@ -1691,7 +1691,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     // Case-insensitive match on name or email (MySQL's default collation makes `contains` case-insensitive).
     // Archived accounts live in their own section, so the active Account Management list excludes them.
     const search = term ? [{ OR: [{ fullName: { contains: term } }, { email: { contains: term } }] }] : [];
-    const where = { AND: [{ status: { not: 'archived' as const } }, ...search] };
+    const where = { AND: [{ status: { notIn: ['archived', 'removed'] } }, ...search] };
     const [users, total] = await this.prisma.$transaction([
       this.prisma.user.findMany({ where, select: { id: true, email: true, fullName: true, role: true, status: true, createdAt: true }, orderBy: { createdAt: 'asc' }, skip, take }),
       this.prisma.user.count({ where }),
@@ -1719,12 +1719,8 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     // Only a known-safe subset of fields can be set from the admin console — never passwordHash,
     // tokenVersion, email, etc. — so a crafted request body can't mass-assign sensitive columns.
     const body = (data ?? {}) as Record<string, unknown>;
-    const patch: { fullName?: string; role?: Role; status?: AdminAccountStatus } = {};
-    if (typeof body.fullName === 'string') {
-      const trimmed = body.fullName.trim();
-      if (!trimmed) fail('VALIDATION_FAILED', 'Full name cannot be empty', 400, { fullName: 'Full name is required' });
-      patch.fullName = trimmed;
-    }
+    const patch: { role?: Role; status?: AdminAccountStatus } = {};
+    if (body.fullName !== undefined) fail('VALIDATION_FAILED', 'Administrators cannot change account names', 400);
     if (body.role !== undefined) {
       if (!ADMIN_EDITABLE_ROLES.includes(body.role as Role)) fail('VALIDATION_FAILED', 'Invalid role', 400, { role: 'Unknown role' });
       patch.role = body.role as Role;
@@ -1736,8 +1732,10 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (Object.keys(patch).length === 0) fail('VALIDATION_FAILED', 'No valid fields to update', 400);
     // A status change can lock someone out, so invalidate their sessions when they're no longer active.
     const bumpTokens = patch.status !== undefined && patch.status !== 'active';
-    const current = patch.status ? await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, fullName: true, status: true } }) : null;
-    const updated = await this.prisma.user.update({ where: { id: targetId }, data: bumpTokens ? { ...patch, tokenVersion: { increment: 1 } } : patch });
+    const current = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, fullName: true, status: true } });
+    if (!current) fail('NOT_FOUND', 'Account not found', 404);
+    if (current.status === 'removed') fail('INVALID_OPERATION', 'Deleted accounts cannot be modified', 409);
+    const updated = await this.prisma.user.update({ where: { id: targetId, status: { not: 'removed' } }, data: bumpTokens ? { ...patch, tokenVersion: { increment: 1 } } : patch });
     if (patch.status) await this.audit.log('AdminModule', 'account_lifecycle_change', 'info', `Administrator set account ${updated.email} status to ${patch.status}`, caller.id);
     if (patch.role) await this.audit.log('AdminModule', 'account_role_change', 'info', `Administrator set account ${updated.email} role to ${patch.role}`, caller.id);
     if (patch.status && patch.status !== current?.status) await Promise.resolve(this.email?.sendAccountStatusChange?.(updated.email, updated.fullName ?? current?.fullName ?? 'there', patch.status)).catch(async () => this.audit.log('AdminModule', 'account_status_email_failed', 'warning', `Account-status email could not be delivered to ${updated.email}`, caller.id));
@@ -1756,7 +1754,8 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const target = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, fullName: true, status: true } });
     if (!target) fail('NOT_FOUND', 'Account not found', 404);
     if (target!.status === 'archived') fail('INVALID_OPERATION', 'That account is already archived', 409);
-    await this.prisma.user.update({ where: { id: targetId }, data: { status: 'archived', archivedAt: new Date(), tokenVersion: { increment: 1 } } });
+    if (target!.status === 'removed') fail('INVALID_OPERATION', 'Deleted accounts cannot be archived', 409);
+    await this.prisma.user.update({ where: { id: targetId, status: { not: 'removed' } }, data: { status: 'archived', archivedAt: new Date(), tokenVersion: { increment: 1 } } });
     await this.audit.log('AdminModule', 'account_archived', 'warning', `Administrator archived account ${target!.email}`, caller.id);
     await Promise.resolve(this.email?.sendAccountStatusChange?.(target!.email, target!.fullName, 'archived')).catch(async () => this.audit.log('AdminModule', 'account_status_email_failed', 'warning', `Account-status email could not be delivered to ${target!.email}`, caller.id));
     return { ok: true };
