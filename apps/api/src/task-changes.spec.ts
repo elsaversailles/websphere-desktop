@@ -78,7 +78,9 @@ describe('task authorization and persistence', () => {
   });
 
   it('saves task details, status, and reassignment together, then informs the new assignee', async () => {
-    const { service, projectMember, update, workflowCreate, assignmentCreate, assignmentUpdateMany, notify } = taskService();
+    const { service, prisma, projectMember, update, workflowCreate, assignmentCreate, assignmentUpdateMany, notify } = taskService();
+    const existing = await prisma.task.findUniqueOrThrow();
+    prisma.task.findUniqueOrThrow.mockResolvedValue({ ...existing, deadline: new Date('2026-10-27T00:00:00Z') } as any);
     const result = await service.updateTask(leader, 'task-1', { title: 'Final report', description: 'Revised', status: 'ongoing', assigneeId: 'member-2' });
     expect(projectMember).toHaveBeenCalledWith('project-1', leader.id, true);
     expect(projectMember).toHaveBeenCalledWith('project-1', 'member-2');

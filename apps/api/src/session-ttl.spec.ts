@@ -12,6 +12,7 @@ function sessionService() {
     set: vi.fn(async (key: string, value: string, _expiresInSeconds?: number) => { records.set(key, value); }),
     take: vi.fn(async (key: string) => { const value = records.get(key) ?? null; records.delete(key); return value; }),
     get: vi.fn(async (key: string) => records.get(key) ?? null),
+    delete: vi.fn(async (...keys: string[]) => { keys.forEach((key) => records.delete(key)); }),
     addToSet: vi.fn(async () => {}),
     removeFromSet: vi.fn(async () => {}),
   };
@@ -20,6 +21,7 @@ function sessionService() {
     refreshSecret: secret,
     accessSecret: secret,
     redis,
+    audit: { log: vi.fn(async () => {}) },
     config: { get: (key: string) => key === 'JWT_REFRESH_TTL' ? '180d' : '15m' },
     prisma: { user: { findUnique: vi.fn().mockResolvedValue(user) }, systemSetting: { findUnique: vi.fn().mockResolvedValue(null) } },
   });
@@ -72,5 +74,31 @@ describe('login session lifetime', () => {
 
     vi.setSystemTime(new Date('2026-01-01T00:06:00Z'));
     await expect(service.refreshToken(session.refresh)).rejects.toMatchObject({ status: 401 });
+  });
+});
+
+
+describe('separate mobile and web sessions', () => {
+  it('keeps mobile active when a second web session replaces the first', async () => {
+    const { service } = sessionService();
+    const web = await service.issue(user);
+    const mobile = await service.issue(user, undefined, undefined, 'mobile');
+    const newerWeb = await service.issue(user);
+    await expect(service.caller(`Bearer ${web.access}`)).rejects.toMatchObject({ status: 401 });
+    await expect(service.refreshToken(web.refresh)).rejects.toMatchObject({ status: 401 });
+    await expect(service.caller(`Bearer ${mobile.access}`)).resolves.toMatchObject({ id: user.id });
+    await expect(service.caller(`Bearer ${newerWeb.access}`)).resolves.toMatchObject({ id: user.id });
+    const rotated = await service.refreshToken(mobile.refresh);
+    await expect(service.caller(`Bearer ${rotated.access}`)).resolves.toMatchObject({ id: user.id });
+  });
+
+  it('signs out only the current session', async () => {
+    const { service } = sessionService();
+    const web = await service.issue(user);
+    const mobile = await service.issue(user, undefined, undefined, 'mobile');
+    await service.logout(await service.caller(`Bearer ${mobile.access}`));
+    await expect(service.caller(`Bearer ${mobile.access}`)).rejects.toMatchObject({ status: 401 });
+    await expect(service.refreshToken(mobile.refresh)).rejects.toMatchObject({ status: 401 });
+    await expect(service.caller(`Bearer ${web.access}`)).resolves.toMatchObject({ id: user.id });
   });
 });

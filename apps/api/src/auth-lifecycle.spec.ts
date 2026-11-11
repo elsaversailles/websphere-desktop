@@ -28,9 +28,9 @@ describe('guided and locked password reset lifecycle', () => {
 
     await expect(service.login('member@example.edu', 'Valid!Pass9')).resolves.toMatchObject({ access: 'new-access', user: { id: 'user-1' } });
 
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ tokenVersion: { increment: 1 } }) }));
+    expect(update.mock.calls[0][0].data).not.toHaveProperty('tokenVersion');
     expect(service.redis.delete).toHaveBeenCalledWith('auth:login-failures:user-1');
-    expect(service.issue).toHaveBeenCalledWith(expect.objectContaining({ id: 'user-1', tokenVersion: 4 }));
+    expect(service.issue).toHaveBeenCalledWith(expect.objectContaining({ id: 'user-1', tokenVersion: 4 }), undefined, undefined, 'web');
   });
 
   it('denies guided password changes for locked accounts before checking the old password', async () => {

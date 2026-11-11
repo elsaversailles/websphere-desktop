@@ -32,8 +32,8 @@ export class AppController {
   @Public() @Get('settings/general') generalSettings() { return this.app.generalSettings(); }
   @Public() @Post('auth/registration/otp') registrationOtp(@Body() body: unknown) { return this.app.sendRegistrationOtp(parse(registrationOtpRequestSchema, body).email); }
   @Public() @Post(['users', 'auth/register']) register(@Body() body: unknown) { return this.app.register(parse(verifiedRegisterSchema, body)); }
-  @Public() @Post('auth/login') login(@Body() body: unknown) { const input = parse(loginSchema, body); return this.app.login(input.email, input.password); }
-  @Public() @Post('auth/admin/login') adminLogin(@Body() body: unknown) { const input = parse(loginSchema, body); return this.app.login(input.email, input.password, true); }
+  @Public() @Post('auth/login') login(@Body() body: unknown) { const input = parse(loginSchema, body); return this.app.login(input.email, input.password, false, input.clientType); }
+  @Public() @Post('auth/admin/login') adminLogin(@Body() body: unknown) { const input = parse(loginSchema, body); return this.app.login(input.email, input.password, true, input.clientType); }
   @Public() @Post('auth/refresh') refresh(@Body('refresh') refresh: string) { return this.app.refreshToken(refresh); }
   @Public() @Get('auth/session-valid') async sessionValid(@Headers('authorization') auth?: string) { await this.app.caller(auth, { touchSession: false }); return { ok: true }; }
   @Post('auth/logout') async logout(@Headers('authorization') auth?: string) { return this.app.logout(await this.caller(auth)); }

@@ -583,3 +583,12 @@ fieldset.tracker-platform-options{border:0;padding:0;min-width:0}fieldset.tracke
 .call-mic-indicator{position:absolute;top:10px;right:10px;display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:rgba(32,33,36,.8);color:#fff}.call-mic-indicator.is-muted{background:#c7352b}.call-mic-indicator svg{width:17px;height:17px}
 
 .call-resume-playback{position:absolute;z-index:1;top:50%;left:50%;transform:translate(-50%,-50%);max-width:calc(100% - 24px);padding:9px 12px;border:1px solid #fff;border-radius:6px;background:#202124;color:#fff;font-size:12px;font-weight:700;cursor:pointer}
+
+/* Keep the complete shared screen above the participant strip. */
+.call-media-grid.has-presentation, .gc-main-chat .call-media-grid.has-presentation { display:flex; flex-direction:column; gap:10px; }
+.call-presentation { flex:1 1 0; min-height:0; display:flex; justify-content:center; }
+.call-presentation .call-media-tile { width:100%; height:100%; background:#000; }
+.call-presentation .call-media-tile video { object-fit:contain; background:#000; }
+.call-thumbnails { flex:0 0 auto; display:flex; justify-content:safe center; gap:8px; overflow-x:auto; }
+.call-thumbnails .call-media-tile { flex:0 0 140px; height:90px; }
+@media(max-width:780px) { .call-thumbnails .call-media-tile { flex-basis:105px; height:70px; } }

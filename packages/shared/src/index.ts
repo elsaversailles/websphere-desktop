@@ -101,7 +101,7 @@ export const pushSubscriptionSchema = z.object({
 });
 export const pushUnsubscribeSchema = z.object({ endpoint: z.string().url().max(4000) });
 export const mobilePushTokenSchema = z.object({ token: z.string().regex(/^(Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$/).max(255) });
-export const loginSchema = z.object({ email: requiredEmail, password: z.string().min(1, 'Password is required') });
+export const loginSchema = z.object({ email: requiredEmail, password: z.string().min(1, 'Password is required'), clientType: z.enum(['web', 'mobile']).optional() });
 export const passwordChangeSchema = z.object({
   oldPassword: z.string().min(1),
   password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
@@ -152,6 +152,7 @@ export const taskEditSchema = taskSchema.partial().extend({
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one task change' });
 export const resourceLinkSchema = z.object({
   connectionId: z.string().cuid().optional(),
+  toolKind: z.enum(['google-docs', 'microsoft-word', 'microsoft-excel']).nullable().optional(),
   provider: z.enum(['google', 'microsoft', 'trello', 'asana', 'notion', 'canva']).optional(),
   title: z.string().trim().min(2).max(180),
   externalUrl: z.string().url().max(4000).refine((value) => /^https?:\/\//i.test(value), 'Use an HTTP or HTTPS link'),

@@ -97,6 +97,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const [matchingMessages, setMatchingMessages] = useState<GroupHub['messages'] | null>(null);
   const [nextEvent, setNextEvent] = useState<UpcomingEvent | null>(null);
   const [call, setCall] = useState<ActiveCall | null>(null);
+  const [callReconnecting, setCallReconnecting] = useState(false);
   const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
   const [muted, setMuted] = useState(false);
   const [remoteCameraStates, setRemoteCameraStates] = useState<Record<string, boolean>>({});
@@ -117,10 +118,14 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     try { setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); } catch { /* the next tally or refresh will retry */ }
   }, [selectedGroupId]);
   const poll = hub?.poll ?? null;
+  const rankedIdeas = [...(poll?.options ?? [])].sort((a, b) => b.votes - a.votes);
+  const winningIdea = rankedIdeas.length >= 2 && rankedIdeas[0].votes > 0 && rankedIdeas[0].votes > rankedIdeas[1].votes ? rankedIdeas[0] : null;
   const viewerIsLeader = hub?.group.members.some((member) => member.userId === userId && member.role === 'Project_Leader') ?? false;
   const [raisedHandSocketIds, setRaisedHandSocketIds] = useState<string[]>([]);
   const socketRef = useRef<Socket | null>(null);
   const callRef = useRef<ActiveCall | null>(null);
+  const reconnectingRef = useRef(false);
+  const reconnectGenerationRef = useRef(0);
   const localStreamRef = useRef<MediaStream | null>(null);
   const presentationStreamRef = useRef<MediaStream | null>(null);
   const peersRef = useRef(new Map<string, RTCPeerConnection>());
@@ -176,6 +181,8 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   }
 
   function clearCall() {
+    reconnectingRef.current = false;
+    reconnectGenerationRef.current += 1;
     for (const socketId of [...peersRef.current.keys()]) removePeer(socketId);
     peersRef.current.clear();
     peerUserIdsRef.current.clear();
@@ -187,6 +194,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     callRef.current = null;
     iceServersRef.current = [];
     setCall(null);
+    setCallReconnecting(false);
     setRemoteStreams([]);
     setMuted(false);
     setRemoteMuteStates({});
@@ -275,10 +283,20 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       localStreamRef.current = stream;
       const active = { groupId: selectedGroupId, kind };
       callRef.current = active;
+      const generation = ++reconnectGenerationRef.current;
       setCall(active);
+      const initialMuted = !stream.getAudioTracks()[0]?.enabled;
+      setMuted(initialMuted);
       setCameraEnabled(stream.getVideoTracks().some((track) => track.enabled));
-      const result = await new Promise<{ ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }>((resolve) => socketRef.current?.emit('call:join', { ...active, cameraEnabled: stream.getVideoTracks().some((track) => track.enabled) }, resolve));
+      const result = await new Promise<{ ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }>((resolve) => {
+        const socket = socketRef.current;
+        if (!socket?.connected) { resolve({ ok: false }); return; }
+        socket.timeout(10000).emit('call:join', { ...active, muted: initialMuted, cameraEnabled: stream.getVideoTracks().some((track) => track.enabled) }, (error: Error | null, ack?: { ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }) => resolve(error ? { ok: false } : ack ?? { ok: false }));
+      });
+      if (generation !== reconnectGenerationRef.current) { if (result.ok && callRef.current?.groupId !== active.groupId) socketRef.current?.emit('call:leave', { groupId: active.groupId }, () => undefined); return; }
       if (!result?.ok) throw new Error(result?.error?.message ?? 'Could not join the call.');
+      // A mute change may have occurred while the join acknowledgement was pending.
+      publishMuteState(active.groupId, !stream.getAudioTracks()[0]?.enabled);
       setRemoteCameraStates((current) => ({ ...Object.fromEntries((result.participants ?? []).filter((participant) => participant.cameraEnabled !== undefined).map((participant) => [participant.socketId, participant.cameraEnabled!])), ...current }));
       setRemoteMuteStates((current) => ({ ...Object.fromEntries((result.participants ?? []).map((participant) => [participant.socketId, !!participant.muted])), ...current }));
       setHostSocketId(result.hostSocketId ?? null);
@@ -298,11 +316,22 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     clearCall();
   }
 
+  function publishMuteState(groupId: string, next: boolean) {
+    const socket = socketRef.current;
+    if (!socket?.connected || reconnectingRef.current) return;
+    socket.timeout(5000).emit('call:mute-state', { groupId, muted: next }, (error: Error | null, result?: { ok: boolean }) => {
+      const actualMuted = !localStreamRef.current?.getAudioTracks()[0]?.enabled;
+      if ((error || !result?.ok) && callRef.current?.groupId === groupId && !reconnectingRef.current && actualMuted === next) notify('Your microphone changed, but others may not see its status. Please rejoin the call.');
+    });
+  }
+
   function toggleMute() {
-    const next = !muted;
-    localStreamRef.current?.getAudioTracks().forEach((track) => { track.enabled = !next; });
+    const track = localStreamRef.current?.getAudioTracks()[0];
+    if (!track) return;
+    const next = track.enabled;
+    track.enabled = !next;
     setMuted(next);
-    if (callRef.current) socketRef.current?.emit('call:mute-state', { groupId: callRef.current.groupId, muted: next }, () => undefined);
+    if (callRef.current) publishMuteState(callRef.current.groupId, next);
   }
 
   function toggleCamera() {
@@ -382,19 +411,47 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     if (!selectedGroupId) return;
     const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
     socketRef.current = socket;
-    socket.on('connect', () => socket.emit('group:join', selectedGroupId, () => undefined));
+    socket.on('connect', () => {
+      socket.emit('group:join', selectedGroupId, () => undefined);
+      const active = callRef.current;
+      const stream = localStreamRef.current;
+      if (!reconnectingRef.current || !active || !stream) return;
+      const generation = ++reconnectGenerationRef.current;
+      socket.timeout(10000).emit('call:join', { ...active, muted: !stream.getAudioTracks()[0]?.enabled, cameraEnabled: !!stream.getVideoTracks()[0]?.enabled }, (error: Error | null, result?: { ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }) => {
+        if (generation !== reconnectGenerationRef.current || callRef.current !== active) { if (result?.ok && callRef.current?.groupId !== active.groupId) socket.emit('call:leave', { groupId: active.groupId }, () => undefined); return; }
+        if (error || !result?.ok) { socket.emit('call:leave', { groupId: active.groupId }, () => undefined); clearCall(); notify(result?.error?.message ?? 'Could not reconnect the call. Please rejoin.'); return; }
+        reconnectingRef.current = false;
+        setCallReconnecting(false);
+        setRemoteCameraStates((current) => ({ ...Object.fromEntries((result.participants ?? []).filter((participant) => participant.cameraEnabled !== undefined).map((participant) => [participant.socketId, participant.cameraEnabled!])), ...current }));
+        setRemoteMuteStates((current) => ({ ...Object.fromEntries((result.participants ?? []).map((participant) => [participant.socketId, !!participant.muted])), ...current }));
+        setHostSocketId(result.hostSocketId ?? null);
+        setRaisedHandSocketIds(result.raisedHandSocketIds ?? []);
+        publishMuteState(active.groupId, !stream.getAudioTracks()[0]?.enabled);
+        for (const participant of result.participants ?? []) void createPeer(participant, false);
+      });
+    });
+    socket.on('disconnect', () => {
+      if (!callRef.current || !localStreamRef.current) return;
+      reconnectingRef.current = true;
+      reconnectGenerationRef.current += 1;
+      setCallReconnecting(true);
+      for (const socketId of [...peersRef.current.keys()]) removePeer(socketId);
+      setRemoteStreams([]); setRemoteMuteStates({}); setRemoteCameraStates({});
+      presentationStreamRef.current?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
+      presentationStreamRef.current = null; setPresentationStream(null); setPresenterSocketId(null);
+    });
     socket.on('poll:tally', (tally: { groupId?: string }) => { if (tally.groupId === selectedGroupId) void refreshHub(); });
     socket.on('chat:message', (message: GroupHub['messages'][number]) => setHub((current) => current ? { ...current, messages: [message, ...current.messages.filter((item) => item.id !== message.id)] } : current));
     socket.on('group:removed', (event: { groupId: string }) => { if (event.groupId === selectedGroupId) { if (callRef.current?.groupId === selectedGroupId) clearCall(); setManageOpen(false); setHub(null); onSelectGroup(''); notify('You were removed from this group.'); } });
-    socket.on('call:participant-joined', (event: { groupId: string; participant: CallParticipant; hostSocketId: string }) => { if (event.groupId === callRef.current?.groupId) { setHostSocketId(event.hostSocketId); if (event.participant.cameraEnabled !== undefined) setRemoteCameraStates((current) => ({ ...current, [event.participant.socketId]: event.participant.cameraEnabled! })); void createPeer(event.participant, true); } });
-    socket.on('call:participant-left', (event: { groupId: string; socketId: string }) => { if (event.groupId === callRef.current?.groupId) { removePeer(event.socketId); setRemoteCameraStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); setRemoteMuteStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); } });
+    socket.on('call:participant-joined', (event: { groupId: string; participant: CallParticipant; hostSocketId: string }) => { if (event.groupId === callRef.current?.groupId) { if (presentationStreamRef.current) socket.emit('call:screen-share', { groupId: event.groupId, sharing: true }, () => undefined); setHostSocketId(event.hostSocketId); if (event.participant.muted !== undefined) setRemoteMuteStates((current) => ({ ...current, [event.participant.socketId]: current[event.participant.socketId] ?? event.participant.muted! })); if (event.participant.cameraEnabled !== undefined) setRemoteCameraStates((current) => ({ ...current, [event.participant.socketId]: event.participant.cameraEnabled! })); void createPeer(event.participant, true); } });
+    socket.on('call:participant-left', (event: { groupId: string; socketId: string }) => { if (event.groupId === callRef.current?.groupId) { removePeer(event.socketId); setPresenterSocketId((current) => current === event.socketId ? null : current); setRemoteCameraStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); setRemoteMuteStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); } });
     socket.on('call:camera-state', (event: { groupId: string; socketId: string; enabled: boolean }) => { if (event.groupId === callRef.current?.groupId) setRemoteCameraStates((current) => ({ ...current, [event.socketId]: event.enabled })); });
     socket.on('call:mute-state', (event: { groupId: string; socketId: string; muted: boolean }) => { if (event.groupId === callRef.current?.groupId) setRemoteMuteStates((current) => ({ ...current, [event.socketId]: event.muted })); });
     socket.on('call:signal', (event: { groupId: string; fromSocketId: string; signal: CallSignal }) => { if (event.groupId === callRef.current?.groupId) void acceptSignal(event.fromSocketId, event.signal); });
     socket.on('call:host-changed', (event: { groupId: string; hostSocketId: string | null }) => { if (event.groupId === callRef.current?.groupId) setHostSocketId(event.hostSocketId); });
     socket.on('call:screen-share', (event: { groupId: string; socketId: string; sharing: boolean }) => { if (event.groupId === callRef.current?.groupId) setPresenterSocketId(event.sharing ? event.socketId : (current) => current === event.socketId ? null : current); });
     socket.on('call:raise-hand', (event: { groupId: string; socketId: string; raised: boolean }) => { if (event.groupId === callRef.current?.groupId) setRaisedHandSocketIds((current) => event.raised ? [...new Set([...current, event.socketId])] : current.filter((id) => id !== event.socketId)); });
-    socket.on('call:mute-request', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { localStreamRef.current?.getAudioTracks().forEach((track) => { track.enabled = false; }); setMuted(true); socket.emit('call:mute-state', { groupId: event.groupId, muted: true }, () => undefined); notify('The host asked everyone to mute.'); } });
+    socket.on('call:mute-request', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { localStreamRef.current?.getAudioTracks().forEach((track) => { track.enabled = false; }); setMuted(true); publishMuteState(event.groupId, true); notify('The host asked everyone to mute.'); } });
     socket.on('call:removed', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { clearCall(); notify('The host removed you from this meeting.'); } });
     socket.on('call:ended', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { clearCall(); notify('The host ended the meeting.'); } });
     return () => { if (callRef.current?.groupId === selectedGroupId) clearCall(); socketRef.current = null; socket.disconnect(); };
@@ -486,9 +543,9 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   }
 
   async function startProject() {
-    const winner = hub?.poll?.options.slice().sort((a, b) => b.votes - a.votes)[0];
-    if (!winner) return notify('Open a vote in Idea Management first.');
-    try { await request(`/groups/${selectedGroupId}/ideas/${winner.ideaId}/begin`, { method: 'POST' }); setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); notify('Project created from the winning idea.'); } catch (error: any) { notify(error.message); }
+    if (!viewerIsLeader || !hub?.poll || hub.poll.open) return;
+    if (!winningIdea) return notify('A project needs at least one vote and a clear winner. Start another vote if the result is tied.');
+    try { await request(`/groups/${selectedGroupId}/ideas/${winningIdea.ideaId}/begin`, { method: 'POST' }); setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); notify('The idea selection process is complete. You can now start your project.'); } catch (error: any) { notify(error.message); }
   }
 
   const participantName = (participantUserId: string) => hub?.group.members.find((member) => member.userId === participantUserId)?.user.fullName ?? 'Group member';
@@ -498,11 +555,20 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const ownSocketId = socketRef.current?.id ?? null;
   const isHost = !!ownSocketId && ownSocketId === hostSocketId;
   const callStage = call ? <div className="call-stage" role="region" aria-label={`${call.kind === 'video' ? 'Video' : 'Voice'} call`}>
-      <header className="call-stage-head"><div><strong>{hub?.group.name ?? 'Group meeting'}</strong><span>{call.kind === 'video' ? 'Video meeting' : 'Voice meeting'} · {remoteStreams.length + 1} participant{remoteStreams.length ? 's' : ''}</span></div><div className="call-stage-status"><span className="call-live-dot" />{isHost ? 'You are host' : 'In meeting'}</div></header>
+      <header className="call-stage-head"><div><strong>{hub?.group.name ?? 'Group meeting'}</strong><span>{call.kind === 'video' ? 'Video meeting' : 'Voice meeting'} · {remoteStreams.length + 1} participant{remoteStreams.length ? 's' : ''}</span></div><div className="call-stage-status"><span className="call-live-dot" />{callReconnecting ? 'Reconnecting…' : isHost ? 'You are host' : 'In meeting'}</div></header>
       <main className={`call-media-grid ${presenterSocketId ? 'has-presentation' : ''}`}>
-        {presentationStream ? <MediaTile label="You" stream={presentationStream} muted micMuted={muted} local presenting handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} /> : null}
-        {remoteStreams.map((item) => <MediaTile key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} cameraOn={item.socketId === presenterSocketId || remoteCameraStates[item.socketId] !== false} presenting={item.socketId === presenterSocketId} handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
-        <MediaTile label="You" stream={localStreamRef.current!} muted micMuted={muted} cameraOn={cameraEnabled} local handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} />
+        {presenterSocketId ? <>
+          <div className="call-presentation">
+            {presentationStream ? <MediaTile label="You" stream={presentationStream} muted micMuted={muted} local presenting /> : remoteStreams.filter((item) => item.socketId === presenterSocketId).map((item) => <MediaTile key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} presenting handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
+          </div>
+          <div className="call-thumbnails">
+            {remoteStreams.map((item) => item.socketId === presenterSocketId ? <div className="call-media-tile call-presenter-placeholder" key={item.socketId}><span className="call-avatar">{participantName(item.userId).slice(0, 1).toUpperCase()}</span><small>{participantName(item.userId)} · presenting</small></div> : <MediaTile key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} cameraOn={remoteCameraStates[item.socketId] !== false} handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
+            <MediaTile label="You" stream={localStreamRef.current!} muted micMuted={muted} cameraOn={cameraEnabled} local handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} />
+          </div>
+        </> : <>
+          {remoteStreams.map((item) => <MediaTile key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} cameraOn={remoteCameraStates[item.socketId] !== false} handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
+          <MediaTile label="You" stream={localStreamRef.current!} muted micMuted={muted} cameraOn={cameraEnabled} local handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} />
+        </>}
       </main>
       {peopleOpen ? <aside className="call-people-panel"><div className="call-people-head"><strong>People</strong><button type="button" onClick={() => setPeopleOpen(false)} aria-label="Close people panel" title="Close people panel">×</button></div><div className="call-person-row"><span>You {isHost ? '(Host)' : ''}</span><small>{muted ? 'Muted' : 'Unmuted'}</small>{ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? <small className="call-hand-state">Hand raised</small> : <small>In meeting</small>}</div>{remoteStreams.map((item) => <div className="call-person-row" key={item.socketId}><span>{participantName(item.userId)}{item.socketId === hostSocketId ? ' (Host)' : ''}</span><small>{remoteMuteStates[item.socketId] ? 'Muted' : 'Unmuted'}</small>{isHost ? <button type="button" className="call-remove" onClick={() => requestHostAction('remove-participant', item.socketId)}>Remove</button> : raisedHandSocketIds.includes(item.socketId) ? <small className="call-hand-state">Hand raised</small> : <small>In meeting</small>}</div>)}{isHost ? <div className="call-host-actions"><strong>Host controls</strong><button type="button" onClick={() => requestHostAction('mute-all')}>Mute all</button><button type="button" className="call-end-all" onClick={() => requestHostAction('end-call')}>End call for everyone</button></div> : null}</aside> : null}
       <footer className="call-controls"><button type="button" className={`call-control ${muted ? 'is-off' : ''}`} onClick={toggleMute} aria-label={muted ? 'Turn microphone on' : 'Turn microphone off'} title={muted ? 'Turn microphone on' : 'Turn microphone off'}><CallIcon name={muted ? 'microphoneOff' : 'microphone'} /></button>{call.kind === 'video' ? <button type="button" className={`call-control ${cameraEnabled ? '' : 'is-off'}`} onClick={toggleCamera} aria-label={cameraEnabled ? 'Turn camera off' : 'Turn camera on'} title={cameraEnabled ? 'Turn camera off' : 'Turn camera on'}><CallIcon name={cameraEnabled ? 'camera' : 'cameraOff'} /></button> : null}<button type="button" className={`call-control ${presentationStream ? 'is-sharing' : ''}`} onClick={() => void togglePresenting()} aria-label={presentationStream ? 'Stop presenting' : 'Present screen'} title={presentationStream ? 'Stop presenting' : 'Present screen'}><CallIcon name="screen" /></button><button type="button" className={`call-control ${ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'is-active' : ''}`} onClick={toggleRaiseHand} aria-label={ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'Lower hand' : 'Raise hand'} title={ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'Lower hand' : 'Raise hand'}><CallIcon name="hand" /></button><button type="button" className={`call-control ${peopleOpen ? 'is-active' : ''}`} onClick={() => setPeopleOpen((open) => !open)} aria-label="Show people and host controls" title="Show people and host controls"><CallIcon name="people" /></button><button type="button" className="call-control call-hangup" onClick={leaveCall} aria-label="Leave call" title="Leave call"><CallIcon name="phone" /></button></footer>
@@ -520,7 +586,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
         <aside className="gc-right-panel">
           <section><div className="gc-side-title"><h3>Members</h3><span>{hub.group.members.length}</span></div>{hub.group.members.map((member) => <div className="gc-member-row" key={member.userId}><MemberAvatar id={member.userId} name={member.user.fullName} avatarUrl={member.user.avatarUrl} /><span><strong>{member.user.fullName}</strong><small>{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</small></span>{viewerIsLeader && member.userId !== userId ? <button type="button" className="gc-member-remove" aria-label={`Remove ${member.user.fullName} from the group`} title={`Remove ${member.user.fullName}`} onClick={() => setConfirmation({ title: 'Remove member?', description: `${member.user.fullName} will immediately lose access to this group’s chat, projects, and tasks.`, confirmLabel: 'Remove member', destructive: true, action: () => void removeMember(member.userId) })}>Remove</button> : <i />}</div>)}<button type="button" className="gc-manage-members" onClick={() => setManageOpen(true)}>{viewerIsLeader ? 'Manage members' : 'Add members'}</button></section>
           <section className="gc-voting"><div className="gc-side-title"><h3>Idea Voting</h3></div>{poll ? <><div className="gc-poll-status"><PollStatus poll={poll} onExpired={refreshHub} />{poll.open && viewerIsLeader ? <><label className="gc-vote-extend"><span className="sr-only">Hours to extend voting</span><input type="number" min="1" max="720" value={extensionHours} onChange={(event) => setExtensionHours(event.target.value)} aria-label="Hours to extend voting" /><button type="button" onClick={() => void extendVoting()}>Extend</button></label><button type="button" className="gc-close-vote" disabled={closingPoll} onClick={() => setConfirmation({ title: 'Close voting?', description: 'Members will no longer be able to vote in this poll.', confirmLabel: 'Close voting', action: () => void closeVoting() })}>{closingPoll ? 'Closing…' : 'Close voting'}</button></> : null}</div><div className="gc-poll-options">{poll.options.map((option) => <IdeaVoteCard key={option.optionId} option={option} totalVotes={poll.options.reduce((total, value) => total + value.votes, 0)} viewerOptionId={poll.viewerOptionId} viewerId={userId} votingOpen={poll.open} onVote={(optionId) => void vote(optionId)} />)}</div></> : <div className="gc-panel-empty">Your group vote starts in Idea Management.</div>}</section>
-          <button className="gc-start-project" disabled={!hub.poll} onClick={() => void startProject()}>Start Project</button>
+          <button className="gc-start-project" disabled={!viewerIsLeader || !hub.poll || hub.poll.open || !winningIdea} onClick={() => void startProject()}>Start Project</button>{viewerIsLeader && hub.poll && !hub.poll.open && !winningIdea ? <p>A project needs at least one vote and a clear winner. Start another vote if the result is tied.</p> : null}
           {hub?.poll && !hub.poll.open && viewerIsLeader ? <button type="button" className="btn-o btn-sm btn-red" onClick={() => setConfirmation({ title: 'Delete finished voting?', description: 'This removes the completed vote and its unused ideas. Ideas already turned into projects will be kept.', confirmLabel: 'Delete finished voting', destructive: true, action: () => void deleteFinishedVoting() })}>Delete finished voting</button> : null}
         </aside>
       </> : <div className="gc-no-selection"><strong>Your workspace is ready</strong><span>Choose or create a group to begin a conversation.</span></div>}

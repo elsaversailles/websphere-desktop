@@ -15,11 +15,12 @@ function serviceWith(poll: Record<string, unknown> = {}, { closeCount = 1, runni
       updateMany: vi.fn().mockResolvedValue({ count: closeCount }),
       create: vi.fn().mockImplementation(async ({ data }) => ({ id: 'poll-new', ...data, options: [] })),
     },
-    idea: { findMany: vi.fn().mockResolvedValue([{ id: 'idea-1', title: 'One' }, { id: 'idea-2', title: 'Two' }]) },
+    idea: { findMany: vi.fn().mockResolvedValue([{ id: 'idea-1', title: 'One', status: 'submitted' }, { id: 'idea-2', title: 'Two', status: 'refined' }]) },
     group: { findUnique: vi.fn().mockResolvedValue({ name: 'Capstone' }) },
     groupMember: { findMany: vi.fn().mockResolvedValue([{ userId: 'leader-1' }, { userId: 'member-1' }]) },
     vote: { upsert: vi.fn().mockResolvedValue({}), findUnique: vi.fn().mockResolvedValue(null) },
   };
+  (prisma as any).$transaction = vi.fn(async (operation: any) => operation(prisma));
   const service = Object.create(AppService.prototype) as any;
   const notify = vi.fn().mockResolvedValue({ ok: true });
   const emitPollTally = vi.fn();
@@ -109,6 +110,21 @@ describe('timed group voting', () => {
 });
 
 describe('starting a timed vote', () => {
+  it('requires a group leader to start a vote', async () => {
+    const { service, prisma } = serviceWith();
+    (service as any).member.mockRejectedValueOnce(Object.assign(new Error('forbidden'), { status: 403 }));
+    await expect(service.openPoll(member, 'group-1', { ideaIds: ['idea-1', 'idea-2'] })).rejects.toMatchObject({ status: 403 });
+    expect((service as any).member).toHaveBeenCalledWith('group-1', 'member-1', true);
+    expect(prisma.ideaPoll.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects ineligible ideas before opening a vote', async () => {
+    const { service, prisma } = serviceWith();
+    prisma.idea.findMany.mockResolvedValueOnce([{ id: 'idea-1', title: 'One', status: 'rejected' }, { id: 'idea-2', title: 'Two', status: 'submitted' }]);
+    await expect(service.openPoll(leader, 'group-1', { ideaIds: ['idea-1', 'idea-2'] })).rejects.toMatchObject({ status: 400 });
+    expect(prisma.ideaPoll.create).not.toHaveBeenCalled();
+  });
+
   it('sets the deadline from the chosen duration and tells the other members when it closes', async () => {
     const { service, prisma, notify } = serviceWith();
     const before = Date.now();
