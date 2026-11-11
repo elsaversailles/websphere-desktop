@@ -5,12 +5,13 @@ import { AppService } from './app.service.js';
 function fixture(body = 'Existing project details') {
   const caller = { id: 'author-1', role: 'Project_Leader', tv: 0 } as const;
   const idea = { id: 'idea-1', authorId: caller.id, title: 'Research project', body, category: 'Academic Project', status: 'submitted' };
-  const prisma = { idea: {
+  const prisma: any = { idea: {
     create: vi.fn(async ({ data }) => ({ id: idea.id, ...data })),
     findUniqueOrThrow: vi.fn(async () => idea),
     update: vi.fn(async ({ data }) => ({ ...idea, ...data })),
     delete: vi.fn(async () => idea),
-  } };
+  }, pollOption: { findFirst: vi.fn(async () => null) } };
+  prisma.$transaction = vi.fn(async (operation: any) => operation(prisma));
   const service = Object.assign(Object.create(AppService.prototype), {
     prisma, caller: vi.fn(async () => caller), member: vi.fn(async () => ({})),
   }) as AppService;
