@@ -1,0 +1,1 @@
+ALTER TABLE `LinkedResource` ADD COLUMN `toolKind` VARCHAR(191) NULL;

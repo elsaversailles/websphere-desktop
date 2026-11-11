@@ -387,7 +387,7 @@ export function ProfilePage({ user, onUserUpdated, onSessionInvalidated, notify 
 const trackerFilters = ['all', 'pending', 'ongoing', 'for_review', 'completed'] as const;
 type TrackerFilter = (typeof trackerFilters)[number];
 const trackerFilterLabel: Record<TrackerFilter, string> = { all: 'All Files', pending: 'Not Started', ongoing: 'In Progress', for_review: 'For Review', completed: 'Completed' };
-type TrackerResource = { id: string; connectionId: string; title: string; externalUrl: string; provider: string; platform: string; category: string; createdAt: string };
+type TrackerResource = { toolKind?: string | null; id: string; connectionId: string; title: string; externalUrl: string; provider: string; platform: string; category: string; createdAt: string };
 type TrackerMember = { id: string; fullName: string; avatarUrl?: string | null };
 type TrackerTask = { id: string; title: string; description: string; deadline?: string | null; priority: string; status: 'pending' | 'ongoing' | 'for_review' | 'completed'; progress: number; createdAt: string; latestActivityAt: string; project: { id: string; title: string }; resources: TrackerResource[]; assignees: TrackerMember[]; canUpdateStatus: boolean; canAssign: boolean; canEditResource: boolean; collaborators: TrackerMember[] };
 type TrackerConnection = { id: string; provider: string; platform: string; category: string; status: string; syncState?: string | null; lastSyncedAt?: string | null };
@@ -400,6 +400,20 @@ const trackerPlatforms = [
   { provider: 'trello', name: 'Trello' },
   { provider: 'asana', name: 'Asana' },
 ];
+
+const trackerLinkTools = [
+  { id: 'google-docs', provider: 'google', name: 'Google Docs' },
+  { id: 'microsoft-word', provider: 'microsoft', name: 'Microsoft Word' },
+  { id: 'microsoft-excel', provider: 'microsoft', name: 'Microsoft Excel' },
+  { id: 'trello', provider: 'trello', name: 'Trello' },
+  { id: 'asana', provider: 'asana', name: 'Asana' },
+  { id: 'microsoft-legacy', provider: 'microsoft', name: 'Microsoft 365 (existing link)' },
+];
+function selectedLinkTool(value: FormDataEntryValue | null) {
+  const selected = trackerLinkTools.find((tool) => tool.id === value);
+  if (!selected) throw new Error('Choose a tool for this file link.');
+  return { provider: selected.provider, toolKind: selected.id === 'trello' || selected.id === 'asana' || selected.id === 'microsoft-legacy' ? null : selected.id };
+}
 
 export function TrackerPage({ notify }: { notify: Notice }) {
   const [data, setData] = useState<TrackerData | null>(null);
@@ -452,7 +466,7 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     const form = new FormData(event.currentTarget);
     setSaving(true);
     try {
-      await request(`/resources/${editingResource.id}`, { method: 'PATCH', body: JSON.stringify({ provider: form.get('provider'), title: form.get('title'), externalUrl: form.get('externalUrl'), ...(editingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
+      await request(`/resources/${editingResource.id}`, { method: 'PATCH', body: JSON.stringify({ ...selectedLinkTool(form.get('tool')), title: form.get('title'), externalUrl: form.get('externalUrl'), ...(editingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
       await refresh();
       setEditingTaskId(null); setEditingResourceId(null);
       notify('External file link updated.');
@@ -465,7 +479,7 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     const form = new FormData(event.currentTarget);
     setSaving(true);
     try {
-      await request(`/tasks/${linkingTask.id}/resources`, { method: 'POST', body: JSON.stringify({ provider: form.get('provider'), title: form.get('title'), externalUrl: form.get('externalUrl'), ...(linkingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
+      await request(`/tasks/${linkingTask.id}/resources`, { method: 'POST', body: JSON.stringify({ ...selectedLinkTool(form.get('tool')), title: form.get('title'), externalUrl: form.get('externalUrl'), ...(linkingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
       setLinkingTaskId(null);
       await refresh();
       notify('File link attached to the task.');
@@ -501,11 +515,11 @@ export function TrackerPage({ notify }: { notify: Notice }) {
       <label className="lbl" htmlFor="tracker-link-task">Task</label><select className="ifield" id="tracker-link-task" value={linkingTask.id} onChange={(event) => beginLink(event.target.value)}>{ownTasks.map((task) => <option key={task.id} value={task.id}>{task.project.title} — {task.title}</option>)}</select>
       <label className="lbl" htmlFor="tracker-file-name">File name</label><input className="ifield" id="tracker-file-name" name="title" required minLength={2} maxLength={180} placeholder="e.g. Research presentation slides" />
       <label className="lbl" htmlFor="tracker-file-url">External file URL</label><input className="ifield" id="tracker-file-url" name="externalUrl" type="url" required placeholder="https://…" />
-      <fieldset className="tracker-platform-options"><legend className="lbl">Platform</legend>{trackerPlatforms.map((item) => <label className="tracker-platform-option" key={item.provider}><input type="radio" name="provider" value={item.provider} required /><ToolLogo provider={item.provider} name={item.name} size="xs" /><span>{item.name}</span></label>)}</fieldset>
+      <fieldset className="tracker-platform-options"><legend className="lbl">Platform</legend>{trackerLinkTools.filter((item) => item.id !== 'microsoft-legacy').map((item) => <label className="tracker-platform-option" key={item.id}><input type="radio" name="tool" value={item.id} required /><ToolLogo provider={item.provider} name={item.name} size="xs" /><span>{item.name}</span></label>)}</fieldset>
       <label className="lbl">Assigned member</label><div className="tracker-auto-progress-note">{linkingTask.assignees.map((member) => member.fullName).join(', ') || 'Unassigned'}</div>
       <label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!linkingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div>
       <div className="modal-acts"><button type="button" className="btn-o" onClick={() => setLinkingTaskId(null)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Attaching…' : 'Attach Link'}</button></div></form></div></div> : null}
-    {editingTask && editingResource ? <div className="modal-ov open tracker-edit-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) { setEditingTaskId(null); setEditingResourceId(null); } }}><div className="modal-box tracker-edit-modal" role="dialog" aria-modal="true" aria-label="Edit external file link"><div className="modal-ttl"><span>Edit External File Link</span><button type="button" className="modal-close" aria-label="Close" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>×</button></div><form onSubmit={(event) => void saveExternalFile(event)}><label className="lbl" htmlFor="tracker-edit-name">File name</label><input className="ifield" id="tracker-edit-name" name="title" required minLength={2} maxLength={180} defaultValue={editingResource.title} /><label className="lbl" htmlFor="tracker-edit-url">External file URL</label><input className="ifield" id="tracker-edit-url" name="externalUrl" type="url" required defaultValue={editingResource.externalUrl} /><fieldset className="tracker-platform-options"><legend className="lbl">Platform</legend>{[...trackerPlatforms, ...(!trackerPlatforms.some((item) => item.provider === editingResource.provider) ? [{ provider: editingResource.provider, name: editingResource.platform }] : [])].map((item) => <label className="tracker-platform-option" key={item.provider}><input type="radio" name="provider" value={item.provider} defaultChecked={item.provider === editingResource.provider} required /><ToolLogo provider={item.provider} name={item.name} size="xs" /><span>{item.name}</span></label>)}</fieldset><label className="lbl">Assigned member</label><div className="tracker-auto-progress-note">{editingTask.assignees.map((member) => member.fullName).join(', ') || 'Unassigned'}</div><label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!editingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div><div className="modal-acts"><button type="button" className="btn-o" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save Changes'}</button></div></form></div></div> : null}
+    {editingTask && editingResource ? <div className="modal-ov open tracker-edit-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) { setEditingTaskId(null); setEditingResourceId(null); } }}><div className="modal-box tracker-edit-modal" role="dialog" aria-modal="true" aria-label="Edit external file link"><div className="modal-ttl"><span>Edit External File Link</span><button type="button" className="modal-close" aria-label="Close" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>×</button></div><form onSubmit={(event) => void saveExternalFile(event)}><label className="lbl" htmlFor="tracker-edit-name">File name</label><input className="ifield" id="tracker-edit-name" name="title" required minLength={2} maxLength={180} defaultValue={editingResource.title} /><label className="lbl" htmlFor="tracker-edit-url">External file URL</label><input className="ifield" id="tracker-edit-url" name="externalUrl" type="url" required defaultValue={editingResource.externalUrl} /><fieldset className="tracker-platform-options"><legend className="lbl">Platform</legend>{trackerLinkTools.filter((item) => item.id !== 'microsoft-legacy' || (!editingResource.toolKind && editingResource.provider === 'microsoft')).map((item) => <label className="tracker-platform-option" key={item.id}><input type="radio" name="tool" value={item.id} defaultChecked={item.id === (editingResource.toolKind ?? (editingResource.provider === 'google' ? 'google-docs' : editingResource.provider === 'microsoft' ? 'microsoft-legacy' : editingResource.provider))} required /><ToolLogo provider={item.provider} name={item.name} size="xs" /><span>{item.name}</span></label>)}</fieldset><label className="lbl">Assigned member</label><div className="tracker-auto-progress-note">{editingTask.assignees.map((member) => member.fullName).join(', ') || 'Unassigned'}</div><label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!editingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div><div className="modal-acts"><button type="button" className="btn-o" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save Changes'}</button></div></form></div></div> : null}
   </section>;
 }
 

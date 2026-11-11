@@ -37,8 +37,11 @@ const OUTLOOK_EVENT_TYPE = 'meeting' as const;
 const fail = (code: string, message: string, status: number = HttpStatus.BAD_REQUEST, fields?: Record<string, string>): never => { throw new HttpException({ code, message, ...(fields ? { fields } : {}) }, status); };
 const PASSWORD_REASON_LABEL = Object.fromEntries(passwordRequirements('').map((requirement) => [requirement.id, requirement.label]));
 const passwordPolicyFailed = (reason: PasswordRequirementId) => fail('VALIDATION_FAILED', `Password does not meet the required policy: ${PASSWORD_REASON_LABEL[reason]}`, 400, { password: reason });
-type Caller = { id: string; role: Role; tv: number };
+type Caller = { id: string; role: Role; tv: number; sessionId?: string };
+type SessionClient = 'web' | 'mobile';
 const taskProgress = (status: string) => status === 'completed' ? 100 : status === 'for_review' ? 75 : status === 'ongoing' ? 50 : 0;
+const ideaContentHash = (idea: { title: string; body?: string | null; category?: string | null }) =>
+  createHash('sha256').update(JSON.stringify([idea.title, idea.body ?? '', idea.category ?? 'Academic Project'])).digest('hex');
 const taskPrediction = (task: any, now: Date) => {
   const progress = taskProgress(task.status) / 100;
   const expectedHours = Number(task.expectedDurationHrs ?? 0);
@@ -107,6 +110,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   private refreshKey(jti: string) { return `auth:refresh:${jti}`; }
   private usedRefreshKey(jti: string) { return `auth:refresh:used:${jti}`; }
   private userRefreshKey(userId: string) { return `auth:refresh:user:${userId}`; }
+  private webSessionKey(userId: string) { return `auth:web-session:${userId}`; }
   private sessionKey(sessionId: string) { return `auth:session:${sessionId}`; }
   private failedLoginKey(userId: string) { return `auth:login-failures:${userId}`; }
   private resetKey(token: string) { return `auth:password-reset:${token}`; }
@@ -124,16 +128,16 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const unit = { s: 1, m: 60, h: 3600, d: 86400 }[match[2] as 's' | 'm' | 'h' | 'd'];
     return Number(match[1]) * unit;
   }
-  private async sign(user: { id: string; role: Role; tokenVersion: number }, refresh = false, jti = randomBytes(16).toString('hex'), sessionStartedAt?: number, sessionId?: string) {
-    const token = new SignJWT({ role: user.role, tv: user.tokenVersion, ...(sessionId ? { sid: sessionId } : {}), ...(refresh ? { jti, sessionStartedAt } : {}) }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt();
+  private async sign(user: { id: string; role: Role; tokenVersion: number }, refresh = false, jti = randomBytes(16).toString('hex'), sessionStartedAt?: number, sessionId?: string, clientType: SessionClient = 'web') {
+    const token = new SignJWT({ role: user.role, tv: user.tokenVersion, clientType, ...(sessionId ? { sid: sessionId } : {}), ...(refresh ? { jti, sessionStartedAt } : {}) }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt();
     return token.setExpirationTime(refresh ? sessionStartedAt! + this.refreshTtlSeconds() : this.config.get('JWT_ACCESS_TTL')).sign(refresh ? this.refreshSecret : this.accessSecret);
   }
-  async issue(user: { id: string; role: Role; tokenVersion: number }, sessionStartedAt = Math.floor(Date.now() / 1000), sessionId = randomBytes(16).toString('hex')) {
+  async issue(user: { id: string; role: Role; tokenVersion: number }, sessionStartedAt = Math.floor(Date.now() / 1000), sessionId = randomBytes(16).toString('hex'), clientType: SessionClient = 'web', newSession = true) {
     const ttl = sessionStartedAt + this.refreshTtlSeconds() - Math.floor(Date.now() / 1000);
     if (ttl <= 0) fail('AUTH_UNAUTHENTICATED', 'Session has expired', 401);
     const jti = randomBytes(16).toString('hex');
-    const [access, refresh] = await Promise.all([this.sign(user, false, undefined, undefined, sessionId), this.sign(user, true, jti, sessionStartedAt, sessionId)]);
-    await Promise.all([this.redis.set(this.refreshKey(jti), JSON.stringify({ userId: user.id, sessionId }), ttl), this.redis.set(this.sessionKey(sessionId), String(Date.now()), ttl), this.redis.addToSet(this.userRefreshKey(user.id), jti, ttl)]);
+    const [access, refresh] = await Promise.all([this.sign(user, false, undefined, undefined, sessionId, clientType), this.sign(user, true, jti, sessionStartedAt, sessionId, clientType)]);
+    await Promise.all([this.redis.set(this.refreshKey(jti), JSON.stringify({ userId: user.id, sessionId }), ttl), ...(newSession ? [this.redis.set(this.sessionKey(sessionId), String(Date.now()), ttl), ...(clientType === 'web' ? [this.redis.set(this.webSessionKey(user.id), sessionId, ttl)] : [])] : []), this.redis.addToSet(this.userRefreshKey(user.id), jti, ttl)]);
     return { access, refresh, role: user.role };
   }
   private sessionTimeoutMinutes(value: unknown) { return typeof value === 'number' && Number.isInteger(value) && value >= 5 && value <= 480 ? value : DEFAULT_SESSION_TIMEOUT_MINUTES; }
@@ -253,16 +257,20 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const setting = await this.prisma.systemSetting.findUnique({ where: { key: 'sessionTimeoutMinutes' } });
     return { idleTimeoutMinutes: this.sessionTimeoutMinutes(setting?.value) };
   }
-  private async enforceSessionTimeout(sessionId: string) {
+  private async enforceSessionTimeout(sessionId: string, touch = true) {
     const timeoutMinutes = (await this.sessionPolicy()).idleTimeoutMinutes;
     const lastActive = Number(await this.redis.get(this.sessionKey(sessionId)));
     if (!Number.isFinite(lastActive) || Date.now() - lastActive >= timeoutMinutes * 60_000) {
       await this.redis.delete(this.sessionKey(sessionId));
       fail('AUTH_UNAUTHENTICATED', 'Your session timed out due to inactivity. Please sign in again.', 401);
     }
-    await this.redis.set(this.sessionKey(sessionId), String(Date.now()), this.refreshTtlSeconds());
+    if (touch) await this.redis.set(this.sessionKey(sessionId), String(Date.now()), this.refreshTtlSeconds());
   }
-  async caller(header?: string, options: { allowLocked?: boolean; touchSession?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); if (typeof verified.payload.sid === 'string' && options.touchSession !== false) await this.enforceSessionTimeout(verified.payload.sid); return { id: user.id, role: user.role, tv: user.tokenVersion }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
+  private async enforceWebSession(userId: string, sessionId: string, clientType: unknown) {
+    if (clientType !== 'web' && clientType !== 'mobile') fail('AUTH_UNAUTHENTICATED', 'Please sign in again.', 401);
+    if (clientType === 'web' && await this.redis.get(this.webSessionKey(userId)) !== sessionId) fail('AUTH_UNAUTHENTICATED', 'A newer web session has signed in.', 401);
+  }
+  async caller(header?: string, options: { allowLocked?: boolean; touchSession?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); if (typeof verified.payload.sid !== 'string') fail('AUTH_UNAUTHENTICATED', 'Please sign in again.', 401); if (typeof verified.payload.sid === 'string') { await this.enforceWebSession(user.id, verified.payload.sid, verified.payload.clientType); await this.enforceSessionTimeout(verified.payload.sid, options.touchSession !== false); } return { id: user.id, role: user.role, tv: user.tokenVersion, sessionId: typeof verified.payload.sid === 'string' ? verified.payload.sid : undefined }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
   async sendRegistrationOtp(rawEmail: string) {
     const email = rawEmail.trim().toLowerCase();
     const exists = await this.prisma.user.findUnique({ where: { email } });
@@ -323,7 +331,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.audit.log('AuthModule', 'account_registered', 'info', `New account registered for ${user.email}`, user.id);
     return { user: this.publicUser(user), ...(await this.issue(user)) };
   }
-  async login(email: string, password: string, admin = false) { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } const updated = await this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0, lastLoginAt: new Date(), tokenVersion: { increment: 1 } } }); await Promise.all([this.redis.delete(this.failedLoginKey(user.id)), this.removeRefreshSessions(user.id)]); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in; previous web session revoked`, user.id); return { user: this.publicUser(updated), ...(await this.issue(updated)) }; }
+  async login(email: string, password: string, admin = false, clientType: SessionClient = 'web') { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } const updated = await this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0, lastLoginAt: new Date() } }); await this.redis.delete(this.failedLoginKey(user.id)); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in on ${clientType}`, user.id); return { user: this.publicUser(updated), ...(await this.issue(updated, undefined, undefined, clientType)) }; }
   async refreshToken(token: string) {
     try {
       const verified = await jwtVerify(token, this.refreshSecret);
@@ -337,7 +345,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       }
       const record = JSON.parse(stored!) as { userId: string; sessionId?: string };
       if (record.userId !== subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
-      if (record.sessionId) await this.enforceSessionTimeout(record.sessionId);
+      if (!record.sessionId) fail('AUTH_UNAUTHENTICATED', 'Please sign in again.', 401); if (record.sessionId) { await this.enforceWebSession(record.userId, record.sessionId, verified.payload.clientType); await this.enforceSessionTimeout(record.sessionId); }
       const user = await this.prisma.user.findUnique({ where: { id: record.userId } });
       if (!user || user.status !== 'active' || user.tokenVersion !== Number(verified.payload.tv)) {
         await this.redis.removeFromSet(this.userRefreshKey(record.userId), jti);
@@ -348,14 +356,14 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       const ttl = sessionStartedAt + this.refreshTtlSeconds() - Math.floor(Date.now() / 1000);
       if (!Number.isSafeInteger(sessionStartedAt) || ttl <= 0) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
       await Promise.all([this.redis.set(this.usedRefreshKey(jti), '1', ttl), this.redis.removeFromSet(this.userRefreshKey(record.userId), jti)]);
-      return this.issue(user, sessionStartedAt, record.sessionId);
+      return this.issue(user, sessionStartedAt, record.sessionId, verified.payload.clientType === 'mobile' ? 'mobile' : 'web', false);
     } catch (error) {
       if (error instanceof HttpException) throw error;
       return fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
     }
   }
   private async removeRefreshSessions(userId: string) { const key = this.userRefreshKey(userId); const jtis = await this.redis.setMembers(key); await this.redis.delete(...jtis.map((jti) => this.refreshKey(jti)), key); }
-  async logout(user: Caller) { await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'logout', 'info', 'User signed out and invalidated all sessions', user.id); return { ok: true }; }
+  async logout(user: Caller) { if (user.sessionId) await this.redis.delete(this.sessionKey(user.sessionId)); else { await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } }); } await this.audit.log('AuthModule', 'logout', 'info', 'User signed out', user.id); return { ok: true }; }
   async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) passwordPolicyFailed(policy.reason); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'password_changed', 'info', 'User changed their password', user.id); return { ok: true }; }
   async forgot(email: string) {
     const user = await this.prisma.user.findUnique({ where: { email } });
@@ -547,7 +555,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return { ok: true };
   }
   async createProject(caller: Caller, input: any) {
-    const { memberIds: requested, initialTasks = [], groupId, ...data } = input;
+    const { memberIds: requested, initialTasks = [], groupId, title, description, startDate, deadline, externalTools } = input;
+    if (input.ideaId !== undefined || input.idea !== undefined) fail('VOTING_REQUIRED', 'Create projects from ideas through the completed group vote.', 403);
+    const data = { title, description, startDate, deadline, externalTools };
     if (groupId) await this.member(groupId, caller.id);
     const memberIds = [...new Set<string>([caller.id, ...(requested ?? [])])];
     if (groupId) for (const userId of memberIds) await this.member(groupId, userId);
@@ -653,6 +663,12 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (statusChanged && status === 'completed') await this.requireTaskResource(id);
     const now = new Date();
     const updated = await this.prisma.$transaction(async (tx: any) => {
+      if (reassigned) {
+        const latest = await tx.task.findUniqueOrThrow({ where: { id }, include: { assignments: { where: { active: true } } } });
+        const latestAssigneeId = latest.assignments[0]?.assigneeId ?? null;
+        if (latestAssigneeId !== previousAssigneeId) fail('CONFLICT', 'The task assignment changed. Refresh and try again.', 409);
+        if (latestAssigneeId && taskPrediction(latest, new Date()).level !== 'high') fail('RISK_REASSIGNMENT_FORBIDDEN', 'Only high-risk tasks can be reassigned.', 403);
+      }
       const saved = await tx.task.update({ where: { id }, data: {
         ...details,
         ...(statusChanged ? { status, ...(status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: status === 'completed' ? now : null } : {}),
@@ -664,7 +680,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       }
       if (statusChanged) await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: status } });
       return saved;
-    });
+    }, { isolationLevel: 'Serializable' });
     if (reassigned && assigneeId) await this.notify([assigneeId], NotificationType.task_assignment, `You were assigned “${updated.title}” in “${task.project.title}”`, id, 'task').catch(() => undefined);
     if (reassigned && previousAssigneeId) await this.notify([previousAssigneeId], NotificationType.task_update, `You were unassigned from “${updated.title}”`, id, 'task').catch(() => undefined);
     if (statusChanged) await this.notifyTaskStatus(id, caller.id, status);
@@ -779,7 +795,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       return {
         id: task.id, title: task.title, description: task.description, deadline: task.deadline, priority: task.priority, status: task.status,
         progress: taskProgress(task.status), createdAt: task.createdAt, latestActivityAt: new Date(latest), project: { id: task.project.id, title: task.project.title },
-        resources: task.linkedResources.map((resource: any) => ({ id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: resource.provider ?? resource.connection?.provider, platform: resource.connection?.tool.name ?? providerNames[resource.provider as ProviderId] ?? resource.provider, category: resource.connection?.tool.category ?? '', createdAt: resource.createdAt })),
+        resources: task.linkedResources.map((resource: any) => ({ id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: resource.provider ?? resource.connection?.provider, toolKind: resource.toolKind, platform: ({ 'google-docs': 'Google Docs', 'microsoft-word': 'Microsoft Word', 'microsoft-excel': 'Microsoft Excel' } as Record<string, string>)[resource.toolKind] ?? resource.connection?.tool.name ?? providerNames[resource.provider as ProviderId] ?? resource.provider, category: resource.connection?.tool.category ?? '', createdAt: resource.createdAt })),
         assignees: task.assignments.map((assignment: any) => task.project.members.find((member: any) => member.userId === assignment.assigneeId)?.user).filter(Boolean),
         canUpdateStatus,
         canAssign,
@@ -801,7 +817,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       activity: [...workflowActivity, ...usageActivity].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 24),
     };
   }
-  async linkTaskResource(caller: Caller, taskId: string, input: { connectionId?: string; provider?: ProviderId; title: string; externalUrl: string; externalId?: string; status?: TaskStatus }) {
+  async linkTaskResource(caller: Caller, taskId: string, input: { connectionId?: string; provider?: ProviderId; toolKind?: string | null; title: string; externalUrl: string; externalId?: string; status?: TaskStatus }) {
     const task = await this.task(caller, taskId);
     if (!task.assignments.some((assignment: any) => assignment.assigneeId === caller.id)) fail('RBAC_FORBIDDEN', 'Only the active assignee can attach a file link', 403);
     const connection = input.connectionId ? await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } }) : null;
@@ -811,7 +827,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const changedStatus = input.status && input.status !== task.status;
     const now = new Date();
     const resource = await this.prisma.$transaction(async (tx: any) => {
-      const created = await tx.linkedResource.create({ data: { connectionId: connection?.id ?? null, provider, projectId: task.projectId, taskId, externalId: input.externalId ?? randomBytes(12).toString('hex'), title: input.title, externalUrl: input.externalUrl } });
+      const created = await tx.linkedResource.create({ data: { connectionId: connection?.id ?? null, provider, toolKind: input.toolKind ?? null, projectId: task.projectId, taskId, externalId: input.externalId ?? randomBytes(12).toString('hex'), title: input.title, externalUrl: input.externalUrl } });
       await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: WorkflowEventType.progress_activity, fromValue: 'resource_linked', toValue: input.title } });
       if (changedStatus) {
         await tx.task.update({ where: { id: taskId }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: input.status === 'completed' ? now : null } });
@@ -826,7 +842,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     }
     return { ...resource, provider, platform: connection?.tool.name ?? provider, category: connection?.tool.category ?? '' };
   }
-  async updateLinkedResource(caller: Caller, resourceId: string, input: { connectionId?: string; provider?: ProviderId; title: string; externalUrl: string; assigneeId?: string; status?: TaskStatus }) {
+  async updateLinkedResource(caller: Caller, resourceId: string, input: { connectionId?: string; provider?: ProviderId; toolKind?: string | null; title: string; externalUrl: string; assigneeId?: string; status?: TaskStatus }) {
     const resource = await this.prisma.linkedResource.findUniqueOrThrow({ where: { id: resourceId }, include: { connection: true, task: { include: { assignments: { where: { active: true } }, project: { include: { members: true } } } } } });
     if (!resource.task) fail('VALIDATION_FAILED', 'Only task-linked resources can be edited here', 400);
     const task = resource.task;
@@ -845,11 +861,19 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const now = new Date();
     const reassigned = input.assigneeId && input.assigneeId !== activeAssignment?.assigneeId;
     const changedStatus = input.status && input.status !== task.status;
-    await this.prisma.$transaction([
-      this.prisma.linkedResource.update({ where: { id: resource.id }, data: { ...(input.provider ? { connectionId: resource.connection?.provider === input.provider ? resource.connectionId : null, provider } : { connectionId: connection?.id ?? null }), title: input.title, externalUrl: input.externalUrl } }),
-      ...(reassigned ? [this.prisma.taskAssignment.updateMany({ where: { taskId: task.id, active: true }, data: { active: false } }), this.prisma.taskAssignment.create({ data: { taskId: task.id, assigneeId: input.assigneeId, assignerId: caller.id } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: WorkflowEventType.assignment_change, fromValue: activeAssignment?.assigneeId, toValue: input.assigneeId } })] : []),
-      ...(changedStatus ? [this.prisma.task.update({ where: { id: task.id }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: input.status === 'completed' ? now : null } }), this.prisma.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: input.status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: input.status } })] : []),
-    ]);
+    const operations = (client: any) => [
+      client.linkedResource.update({ where: { id: resource.id }, data: { ...(input.provider ? { connectionId: resource.connection?.provider === input.provider ? resource.connectionId : null, provider } : { connectionId: connection?.id ?? null }), ...(input.toolKind !== undefined ? { toolKind: input.toolKind } : {}), title: input.title, externalUrl: input.externalUrl } }),
+      ...(reassigned ? [client.taskAssignment.updateMany({ where: { taskId: task.id, active: true }, data: { active: false } }), client.taskAssignment.create({ data: { taskId: task.id, assigneeId: input.assigneeId, assignerId: caller.id } }), client.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: WorkflowEventType.assignment_change, fromValue: activeAssignment?.assigneeId, toValue: input.assigneeId } })] : []),
+      ...(changedStatus ? [client.task.update({ where: { id: task.id }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: input.status === 'completed' ? now : null } }), client.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: input.status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: input.status } })] : []),
+    ];
+    if (reassigned) {
+      await this.prisma.$transaction(async (tx: any) => {
+        const latest = await tx.task.findUniqueOrThrow({ where: { id: task.id }, include: { assignments: { where: { active: true } } } });
+        if ((latest.assignments[0]?.assigneeId ?? null) !== (activeAssignment?.assigneeId ?? null)) fail('CONFLICT', 'The task assignment changed. Refresh and try again.', 409);
+        if (taskPrediction(latest, new Date()).level !== 'high') fail('RISK_REASSIGNMENT_FORBIDDEN', 'Only high-risk tasks can be reassigned.', 403);
+        await Promise.all(operations(tx));
+      }, { isolationLevel: 'Serializable' });
+    } else await this.prisma.$transaction(operations(this.prisma));
     if (connection && !input.provider) await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Updated “${input.title}” linked to “${task.title}”` } });
     if (changedStatus || reassigned) await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
     if (reassigned && input.assigneeId) await this.notify([input.assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}”`, task.id, 'task').catch(() => undefined);
@@ -957,8 +981,22 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return Math.min(100, score);
   }
   async idea(caller: Caller, groupId: string, input: any) { await this.member(groupId, caller.id); const body = input.body ?? ''; return this.prisma.idea.create({ data: { ...input, body, readinessScore: this.ideaReadinessScore(input.title, body), groupId, authorId: caller.id } }); }
-  async ideas(caller: Caller, groupId: string) { await this.member(groupId, caller.id); return this.prisma.idea.findMany({ where: { groupId, status: { not: 'rejected' } }, orderBy: { createdAt: 'desc' } }); }
-  async reviseIdea(caller: Caller, id: string, input: any) { const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } }); if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can revise an unselected idea', 403); const body = input.body ?? idea.body; return this.prisma.idea.update({ where: { id }, data: { ...input, body, readinessScore: this.ideaReadinessScore(input.title, body), status: 'refined' } }); }
+  async ideas(caller: Caller, groupId: string) {
+    await this.member(groupId, caller.id);
+    const ideas = await this.prisma.idea.findMany({ where: { groupId, status: { not: 'rejected' } }, orderBy: { createdAt: 'desc' } });
+    const authors = await this.prisma.user.findMany({ where: { id: { in: [...new Set(ideas.map((idea) => idea.authorId))] } }, select: { id: true, fullName: true } });
+    const names = new Map(authors.map((author) => [author.id, author.fullName]));
+    return ideas.map((idea) => ({ ...idea, authorName: names.get(idea.authorId) ?? null }));
+  }
+  async reviseIdea(caller: Caller, id: string, input: any) {
+    return this.prisma.$transaction(async (tx: any) => {
+      const idea = await tx.idea.findUniqueOrThrow({ where: { id } });
+      if (idea.authorId !== caller.id || idea.status === 'selected') fail('RBAC_FORBIDDEN', 'Only the author can revise an unselected idea', 403);
+      if (await tx.pollOption.findFirst({ where: { ideaId: id }, select: { id: true } })) fail('IDEA_IN_VOTE', 'Ideas already included in a vote cannot be revised. Submit a new idea for a new vote.', 409);
+      const body = input.body ?? idea.body;
+      return tx.idea.update({ where: { id }, data: { ...input, body, readinessScore: this.ideaReadinessScore(input.title, body), status: 'refined' } });
+    }, { isolationLevel: 'Serializable' });
+  }
   async suggestIdea(caller: Caller, id: string) {
     const idea = await this.prisma.idea.findUniqueOrThrow({ where: { id } });
     if (idea.authorId !== caller.id) fail('RBAC_FORBIDDEN', 'Only the author can request suggestions for this idea.', 403);
@@ -1030,15 +1068,20 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     } finally { this.outlookSweepRunning = false; }
   }
   async openPoll(caller: Caller, groupId: string, input: { ideaIds: string[]; durationHours?: number | null }) {
-    await this.member(groupId, caller.id);
+    await this.member(groupId, caller.id, true);
     const { ideaIds, durationHours } = input;
-    const ideas = await this.prisma.idea.findMany({ where: { id: { in: ideaIds }, groupId } });
-    if (ideas.length !== ideaIds.length) fail('VALIDATION_FAILED', 'Every poll option must be a group idea');
     const running = await this.prisma.ideaPoll.findMany({ where: { groupId, open: true }, select: { id: true, open: true, closesAt: true } });
     for (const existing of running) await this.settleExpired(existing);
     if (running.some((existing: any) => this.pollIsOpen(existing))) fail('POLL_ALREADY_OPEN', 'This group already has a vote in progress. Close it before starting another.', 409);
     const closesAt = durationHours ? new Date(Date.now() + durationHours * 3_600_000) : null;
-    const poll = await this.prisma.ideaPoll.create({ data: { groupId, createdBy: caller.id, closesAt, options: { create: ideas.map((idea) => ({ ideaId: idea.id, label: idea.title })) } }, include: { options: true } });
+    const poll = await this.prisma.$transaction(async (tx: any) => {
+      const ideas = await tx.idea.findMany({ where: { id: { in: ideaIds }, groupId } });
+      if (ideaIds.length < 2 || new Set(ideaIds).size !== ideaIds.length || ideas.length !== ideaIds.length) fail('VALIDATION_FAILED', 'Choose at least two distinct group ideas.');
+      if (ideas.some((idea: any) => idea.status !== 'submitted' && idea.status !== 'refined')) fail('VALIDATION_FAILED', 'Only submitted or refined ideas can be included in a vote.', 400);
+      const latest = await tx.ideaPoll.findMany({ where: { groupId, open: true }, select: { id: true, open: true, closesAt: true } });
+      if (latest.some((existing: any) => this.pollIsOpen(existing))) fail('POLL_ALREADY_OPEN', 'This group already has a vote in progress. Close it before starting another.', 409);
+      return tx.ideaPoll.create({ data: { groupId, createdBy: caller.id, closesAt, options: { create: ideas.map((idea: any) => ({ ideaId: idea.id, label: idea.title, contentHash: ideaContentHash(idea) })) } }, include: { options: true } });
+    }, { isolationLevel: 'Serializable' });
     const [group, members, tally] = await Promise.all([this.prisma.group.findUnique({ where: { id: groupId }, select: { name: true } }), this.prisma.groupMember.findMany({ where: { groupId, userId: { not: caller.id } }, select: { userId: true } }), this.tally(poll.id)]);
     if (members.length) await this.notify(members.map((member: any) => member.userId), NotificationType.group_activity, `A vote opened in “${this.noticeText(group?.name ?? 'your group', 60)}”${durationHours ? ` — voting closes in ${this.describeHours(durationHours)}` : ''}`, groupId, 'group');
     this.events.emitPollTally(groupId, tally);
@@ -1079,14 +1122,37 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: true } });
     await this.member(poll.groupId, caller.id);
     await this.settleExpired(poll);
-    if (!this.pollIsOpen(poll)) fail('POLL_CLOSED', 'Voting has closed for this poll', 409);
-    if (!poll.options.some((option) => option.id === optionId)) fail('VALIDATION_FAILED', 'Poll option is invalid');
-    await this.prisma.vote.upsert({ where: { pollId_voterId: { pollId, voterId: caller.id } }, update: { optionId }, create: { pollId, optionId, voterId: caller.id } });
+    await this.prisma.$transaction(async (tx: any) => {
+      const latest = await tx.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: true } });
+      if (!this.pollIsOpen(latest)) fail('POLL_CLOSED', 'Voting has closed for this poll', 409);
+      if (!latest.options.some((option: any) => option.id === optionId)) fail('VALIDATION_FAILED', 'Poll option is invalid');
+      await tx.vote.upsert({ where: { pollId_voterId: { pollId, voterId: caller.id } }, update: { optionId }, create: { pollId, optionId, voterId: caller.id } });
+    }, { isolationLevel: 'Serializable' });
     return this.tally(pollId);
   }
   async tally(pollId: string, viewerId?: string) { const [poll, viewerVote] = await Promise.all([this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, include: { options: { include: { votes: { include: { voter: { select: { id: true, fullName: true } } } } } } } }), viewerId ? this.prisma.vote.findUnique({ where: { pollId_voterId: { pollId, voterId: viewerId } }, select: { optionId: true } }) : Promise.resolve(null)]); const open = this.pollIsOpen(poll); return { pollId, groupId: poll.groupId, open, closesAt: poll.closesAt, closedAt: open ? null : poll.closedAt ?? poll.closesAt, closedReason: open ? null : poll.closedBy ? 'manual' : 'expired', viewerOptionId: viewerVote?.optionId ?? null, options: poll.options.map((option) => ({ optionId: option.id, ideaId: option.ideaId, label: option.label, votes: option.votes.length, voters: option.votes.map((vote: any) => ({ userId: vote.voter.id, fullName: vote.voter.fullName })) })) }; }
   async pollResults(caller: Caller, pollId: string) { const poll = await this.prisma.ideaPoll.findUniqueOrThrow({ where: { id: pollId }, select: { id: true, groupId: true, open: true, closesAt: true } }); await this.member(poll.groupId, caller.id); await this.settleExpired(poll); return this.tally(pollId, caller.id); }
-  async begin(caller: Caller, groupId: string, ideaId: string) { await this.member(groupId, caller.id, true); const idea = await this.prisma.idea.findFirst({ where: { id: ideaId, groupId } }); if (!idea) fail('NOT_FOUND', 'Idea does not belong to group', 404); if (idea.status === 'selected') fail('VALIDATION_FAILED', 'Idea has already been selected'); const members = await this.prisma.groupMember.findMany({ where: { groupId }, select: { userId: true } }); const project = await this.prisma.project.create({ data: { groupId, ideaId, title: idea.title, description: idea.body, createdBy: caller.id, members: { create: members.map((member) => ({ userId: member.userId, role: member.userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } } }); await this.prisma.idea.update({ where: { id: ideaId }, data: { status: 'selected' } }); return project; }
+  async begin(caller: Caller, groupId: string, ideaId: string) {
+    await this.member(groupId, caller.id, true);
+    const currentPoll = await this.prisma.ideaPoll.findFirst({ where: { groupId }, orderBy: { createdAt: 'desc' }, select: { id: true, open: true, closesAt: true } });
+    if (!currentPoll) fail('VOTING_REQUIRED', 'Complete a group vote before starting a project.', 409);
+    await this.settleExpired(currentPoll);
+    return this.prisma.$transaction(async (tx: any) => {
+      const idea = await tx.idea.findFirst({ where: { id: ideaId, groupId } });
+      if (!idea) fail('NOT_FOUND', 'Idea does not belong to group', 404);
+      if (idea.status !== 'submitted' && idea.status !== 'refined') fail('IDEA_NOT_ELIGIBLE', 'Only an unselected, non-rejected idea can become a project.', 409);
+      const poll = await tx.ideaPoll.findFirst({ where: { groupId }, orderBy: { createdAt: 'desc' }, include: { options: { include: { votes: { select: { id: true } } } } } });
+      if (!poll || poll.id !== currentPoll.id || this.pollIsOpen(poll)) fail('VOTING_REQUIRED', 'Close the current group vote before starting a project.', 409);
+      const ranked = [...poll.options].sort((a: any, b: any) => b.votes.length - a.votes.length);
+      if (ranked.length < 2 || ranked[0].votes.length === 0 || ranked[1].votes.length === ranked[0].votes.length) fail('VOTE_NO_WINNER', 'A project requires at least one vote and a clear winner.', 409);
+      if (ranked[0].ideaId !== ideaId) fail('IDEA_NOT_APPROVED', 'Only the winning idea can become a project.', 403);
+      if (!ranked[0].contentHash || ranked[0].contentHash !== ideaContentHash(idea)) fail('IDEA_CHANGED', 'The winning idea cannot be verified against this vote. Start a new vote.', 409);
+      const members = await tx.groupMember.findMany({ where: { groupId }, select: { userId: true } });
+      const project = await tx.project.create({ data: { groupId, ideaId, title: idea.title, description: idea.body, createdBy: caller.id, members: { create: members.map((member: any) => ({ userId: member.userId, role: member.userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } } });
+      await tx.idea.update({ where: { id: ideaId }, data: { status: 'selected' } });
+      return project;
+    }, { isolationLevel: 'Serializable' });
+  }
   async maintenanceStatus() {
     const [mode, scheduled] = await Promise.all([
       this.prisma.systemSetting.findUnique({ where: { key: 'maintenanceMode' } }),

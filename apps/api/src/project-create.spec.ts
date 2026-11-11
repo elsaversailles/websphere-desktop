@@ -25,6 +25,14 @@ function serviceWithPrismaSpy() {
 }
 
 describe('createProject payload', () => {
+  it('rejects attempts to link an idea outside the voting workflow', async () => {
+    const { service, create } = serviceWithPrismaSpy();
+    for (const link of [{ ideaId: 'idea-1' }, { idea: { connect: { id: 'idea-1' } } }]) {
+      await expect(service.createProject({ id: 'leader', role: 'Project_Leader', tv: 0 }, { title: 'Project', ...link })).rejects.toMatchObject({ response: { code: 'VOTING_REQUIRED' } });
+    }
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('persists all selected external tools with the project', async () => {
     const { service, create } = serviceWithPrismaSpy();
     const externalTools = ['google', 'word', 'excel', 'forms', 'trello', 'asana'];

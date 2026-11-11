@@ -29,6 +29,7 @@ const userSections: Array<{ title: string; links: Link[] }> = [
 ];
 const adminSections: Array<{ title: string; links: Link[] }> = [
   { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'archive', label: 'Archived Accounts', icon: '🗄' }, { id: 'notifications', label: 'Notifications', icon: '♧' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
+  userSections[1],
 ];
 
 // The sidebar sections are the source of truth for which pages a role may land on, so a restored

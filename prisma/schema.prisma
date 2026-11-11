@@ -327,6 +327,7 @@ model PollOption {
   pollId String
   ideaId String
   label String
+  contentHash String? @db.VarChar(64)
   poll IdeaPoll @relation(fields: [pollId], references: [id])
   votes Vote[]
 }
@@ -432,6 +433,7 @@ model ToolConnection {
 }
 model LinkedResource {
   id String @id @default(cuid())
+  toolKind String?
   connectionId String?
   provider ProviderId?
   projectId String?

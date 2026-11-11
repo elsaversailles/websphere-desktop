@@ -66,6 +66,17 @@ describe('manual task file links', () => {
     await expect(service.launchResource(caller, 'resource-1')).rejects.toThrow('not available to you');
   });
 
+  it.each([
+    ['google-docs', 'google'], ['microsoft-word', 'microsoft'], ['microsoft-excel', 'microsoft'],
+  ] as const)('stores and returns a %s link', async (toolKind, provider) => {
+    const { service, prisma } = fixture();
+    const input = { ...link, provider, toolKind };
+    expect(resourceLinkSchema.safeParse(input).success).toBe(true);
+    const result = await service.linkTaskResource(caller, 'task-1', input);
+    expect(prisma.linkedResource.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ provider, toolKind, externalUrl: input.externalUrl }) }));
+    expect(result.externalUrl).toBe(input.externalUrl);
+  });
+
   it('rejects unsafe or malformed links', () => {
     expect(resourceLinkSchema.safeParse({ ...link, externalUrl: 'javascript:alert(1)' }).success).toBe(false);
     expect(resourceLinkSchema.safeParse({ ...link, externalUrl: 'not a URL' }).success).toBe(false);
