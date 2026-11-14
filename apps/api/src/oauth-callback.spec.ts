@@ -16,4 +16,12 @@ describe('OAuth callback URL', () => {
   it('uses an explicit callback base for deployments with a separate API origin', () => {
     expect(callbackUrl({ NODE_ENV: 'production', WEB_ORIGIN: 'https://websphere.fun', OAUTH_CALLBACK_BASE_URL: 'https://api.websphere.fun' }, 'trello')).toBe('https://api.websphere.fun/integrations/trello/callback');
   });
+
+  it('uses the new canonical origin during the domain overlap', () => {
+    expect(callbackUrl({ NODE_ENV: 'production', WEB_ORIGIN: 'https://websphere.cloud,https://websphere.fun' })).toBe('https://websphere.cloud/api/integrations/canva/callback');
+  });
+
+  it('can retain the registered legacy callback while the website moves', () => {
+    expect(callbackUrl({ NODE_ENV: 'production', WEB_ORIGIN: 'https://websphere.cloud,https://websphere.fun', OAUTH_CALLBACK_BASE_URL: 'https://websphere.fun/api' }, 'google')).toBe('https://websphere.fun/api/integrations/google/callback');
+  });
 });

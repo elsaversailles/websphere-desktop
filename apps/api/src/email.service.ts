@@ -100,7 +100,7 @@ export class EmailService {
     const escapedReason = safeReason.replace(/[<>&]/g, (char) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[char] ?? char));
     await this.send({
       from: this.config.get('SES_FROM'),
-      to: 'support@websphere.fun',
+      to: this.config.get('SUPPORT_EMAIL'),
       replyTo: requesterEmail,
       subject: `Account deactivation request — ${requesterEmail}`,
       text: `A WebSphere account deactivation request was submitted.\n\nAccount email: ${requesterEmail}\nReason: ${safeReason}\n\nReply to this email to reach the requester.`,

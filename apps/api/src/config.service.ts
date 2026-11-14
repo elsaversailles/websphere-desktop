@@ -26,6 +26,7 @@ const environmentSchema = z.object({
   SES_USER: z.string().optional(),
   SES_PASSWORD: z.string().optional(),
   SES_FROM: z.string().email().default('noreply@example.edu'),
+  SUPPORT_EMAIL: z.string().email().default('support@websphere.cloud'),
   VAPID_SUBJECT: z.string().min(1).optional(),
   VAPID_PUBLIC_KEY: z.string().min(1).optional(),
   VAPID_PRIVATE_KEY: z.string().min(1).optional(),
