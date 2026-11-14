@@ -22,10 +22,11 @@ Start from `example.env`, then set production values. In particular:
 
 ```dotenv
 NODE_ENV=production
-WEB_ORIGIN=https://your-domain.example
-# Optional when API traffic is served at https://your-domain.example/api.
-# Set this only when OAuth callbacks use another public API base.
-OAUTH_CALLBACK_BASE_URL=https://your-domain.example/api
+WEB_ORIGIN=https://websphere.cloud,https://websphere.fun
+OAUTH_CALLBACK_BASE_URL=https://websphere.cloud/api
+SES_FROM=hello@websphere.cloud
+# Incoming .cloud mail setup is deferred; retain the existing support inbox.
+SUPPORT_EMAIL=support@websphere.fun
 DATABASE_URL_DOCKER=mysql://websphere:strong-url-encoded-password@mysql:3306/websphere
 REDIS_URL_DOCKER=redis://redis:6379
 MYSQL_DATABASE=websphere
@@ -38,6 +39,8 @@ DOCKER_BUILD_NODE_OPTIONS=--max-old-space-size=512
 `DATABASE_URL_DOCKER` and `MYSQL_PASSWORD` must represent the same password. Keep the raw password in `MYSQL_PASSWORD`; percent-encode reserved URL characters only in `DATABASE_URL_DOCKER`.
 
 Also provide fresh JWT secrets, the 32-byte Base64 encryption key, SES credentials, and any enabled provider credentials. Do not commit this file.
+
+For the current domain migration, preserve the existing JWT/encryption keys and database/cache volumes. Incoming .cloud mail setup is deferred; keep the existing support recipient until a receiving provider is configured. See [the migration plan](../DOMAIN-MIGRATION-PLAN.md) for live progress.
 
 ## GitHub production environment
 
@@ -87,6 +90,16 @@ COMPOSE_FILE=docker/docker-compose.yml sh docker/reload-coturn-cert.sh
 ```
 
 For Certbot, register that command as a deploy hook. The API creates a unique one-hour TURN REST credential only after authenticating the caller and verifying group membership; neither the TURN shared secret nor a reusable TURN password is sent to the browser.
+
+The current Lightsail coturn image runs as UID/GID 65534. Production therefore uses a dedicated certificate export rather than allowing that process to traverse Certbot's private account directory:
+
+```dotenv
+TURN_HOST=turn.websphere.cloud
+TURN_CERT_DIR=/home/ubuntu/websphere/shared/turn-certs
+TURN_CERT_NAME=websphere-turn
+```
+
+The relay certificate covers both turn.websphere.fun and turn.websphere.cloud. [renew-websphere-certificates.sh](../docker/renew-websphere-certificates.sh) is installed at /etc/letsencrypt/renewal-hooks/deploy/websphere-services.sh on this host. It refreshes the export and signals USR2, which coturn 4.6.2 uses to reload certificates. HUP only resets logging. This hook uses the current container name and needs adjustment if the deployment project changes.
 
 Run host Nginx on ports 80/443 and proxy the site to `http://127.0.0.1:8080`. The web-container Nginx keeps `proxy_pass http://api:3000/` with its trailing slash so `/api/auth/login` reaches the backend as `/auth/login`.
 
