@@ -113,9 +113,11 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const [chatMenu, setChatMenu] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<ConfirmAction | null>(null);
   const [extensionHours, setExtensionHours] = useState('24');
+  const hubRequestGeneration = useRef(0);
   const refreshHub = useCallback(async () => {
     if (!selectedGroupId) return;
-    try { setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); } catch { /* the next tally or refresh will retry */ }
+    const generation = ++hubRequestGeneration.current;
+    try { const next = await request<GroupHub>(`/groups/${selectedGroupId}/hub`); if (hubRequestGeneration.current === generation) setHub(next); } catch { /* the next tally or refresh will retry */ }
   }, [selectedGroupId]);
   const poll = hub?.poll ?? null;
   const rankedIdeas = [...(poll?.options ?? [])].sort((a, b) => b.votes - a.votes);
@@ -143,7 +145,13 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     }).catch(() => { if (!cancelled) setNextEvent(null); });
     return () => { cancelled = true; };
   }, []);
-  useEffect(() => { setManageOpen(false); if (!selectedGroupId) { setHub(null); return; } void request<GroupHub>(`/groups/${selectedGroupId}/hub`).then(setHub).catch((error: Error) => notify(error.message)); }, [selectedGroupId, notify]);
+  useEffect(() => {
+    setManageOpen(false);
+    setHub(null);
+    const generation = ++hubRequestGeneration.current;
+    if (selectedGroupId) void request<GroupHub>(`/groups/${selectedGroupId}/hub`).then((next) => { if (hubRequestGeneration.current === generation) setHub(next); }).catch((error: Error) => { if (hubRequestGeneration.current === generation) notify(error.message); });
+    return () => { hubRequestGeneration.current += 1; };
+  }, [selectedGroupId, notify]);
   useEffect(() => { if (!selectedGroupId) return; let active = true; void request(`/groups/${selectedGroupId}/chat/read`, { method: 'POST' }).then(() => request<GroupSummary[]>('/groups')).then((next) => { if (active) setGroups(next); }).catch((error: Error) => notify(error.message)); return () => { active = false; }; }, [selectedGroupId, notify]);
   useEffect(() => {
     const term = searchQuery.trim();
@@ -547,13 +555,17 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     catch (error: any) { notify(error.message); }
   }
 
-  async function setChatState(groupId: string, action: 'read' | 'unread' | 'hide') {
+  async function setChatState(groupId: string, action: 'read' | 'unread' | 'delete') {
     try {
       await request(`/groups/${groupId}/chat/${action}`, { method: 'POST' });
+      if (action === 'delete') {
+        if (groupId === selectedGroupId) { hubRequestGeneration.current += 1; setHub(null); }
+        setSearchQuery(''); setSearchedGroups(null); setMatchingMessages(null);
+      }
       const next = await request<GroupSummary[]>('/groups');
       setGroups(next);
-      if (action === 'hide' && groupId === selectedGroupId) { setHub(null); onSelectGroup(next.find(chatIsVisible)?.id ?? ''); }
-      if (action === 'hide') notify('Chat removed from your list.');
+      if (action === 'delete' && groupId === selectedGroupId) onSelectGroup(next.find(chatIsVisible)?.id ?? '');
+      if (action === 'delete') notify('Chat deleted.');
       if (action === 'unread') notify('Chat marked as unread.');
     } catch (error: any) { notify(error.message); }
   }
@@ -593,7 +605,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     <div className="ph"><h2>Group Chat</h2></div>
     {incomingCall ? <div className="call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => void joinCall(incomingCall.kind)}>Join call</button><button className="btn-o btn-sm" onClick={onIncomingCallHandled}>Dismiss</button></div> : null}
     <div className="gc-teams-layout">
-      <aside className="gc-left-panel"><div className="gc-left-head"><h3>Chats</h3></div><div className="gc-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search chats or messages..." aria-label="Search group chats and messages" /></div><div className="gc-chat-list">{visibleGroups.length ? visibleGroups.map((group) => <div className={`gc-chat-row ${group.id === selectedGroupId ? 'active' : ''}`} key={group.id}><button type="button" className="gc-chat-item" onClick={() => { onSelectGroup(group.id); setChatMenu(null); void setChatState(group.id, 'read'); }}><GroupAvatar id={group.id} name={group.name} className="gc-list-avatar" /><span><strong>{group.name}</strong>{group.messageMatch ? <small>Message: {group.messageMatch}</small> : null}</span>{groups.find((item) => item.id === group.id)?.members[0]?.chatUnread ? <i className="gc-unread-dot" aria-label="Unread" /> : null}</button><div className="gc-chat-options"><button type="button" className="gc-chat-menu-button" aria-label={`Options for ${group.name}`} aria-expanded={chatMenu === group.id} onClick={() => setChatMenu(chatMenu === group.id ? null : group.id)}>⋯</button>{chatMenu === group.id ? <div className="gc-chat-menu"><button type="button" onClick={() => { setChatMenu(null); void setChatState(group.id, 'unread'); }}>Mark as unread</button><button type="button" onClick={() => { setChatMenu(null); setConfirmation({ title: 'Delete chat?', description: `Remove ${group.name} from your chat list? The group and shared messages will remain available.`, confirmLabel: 'Delete chat', destructive: true, action: () => void setChatState(group.id, 'hide') }); }}>Delete</button></div> : null}</div></div>) : <div className="gc-panel-empty">{searchTerm ? 'No chats or messages match your search.' : 'Your groups will appear here.'}</div>}</div><div className="gc-mini-calendar"><strong>{new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</strong><span>{searchTerm ? 'Matching messages are shown in the selected chat.' : nextEvent ? `${nextEvent.title} · ${new Date(nextEvent.startAt).toLocaleString()}` : 'No upcoming scheduled events.'}</span></div></aside>
+      <aside className="gc-left-panel"><div className="gc-left-head"><h3>Chats</h3></div><div className="gc-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search chats or messages..." aria-label="Search group chats and messages" /></div><div className="gc-chat-list">{visibleGroups.length ? visibleGroups.map((group) => <div className={`gc-chat-row ${group.id === selectedGroupId ? 'active' : ''}`} key={group.id}><button type="button" className="gc-chat-item" onClick={() => { onSelectGroup(group.id); setChatMenu(null); void setChatState(group.id, 'read'); }}><GroupAvatar id={group.id} name={group.name} className="gc-list-avatar" /><span><strong>{group.name}</strong>{group.messageMatch ? <small>Message: {group.messageMatch}</small> : null}</span>{groups.find((item) => item.id === group.id)?.members[0]?.chatUnread ? <i className="gc-unread-dot" aria-label="Unread" /> : null}</button><div className="gc-chat-options"><button type="button" className="gc-chat-menu-button" aria-label={`Options for ${group.name}`} aria-expanded={chatMenu === group.id} onClick={() => setChatMenu(chatMenu === group.id ? null : group.id)}>⋯</button>{chatMenu === group.id ? <div className="gc-chat-menu"><button type="button" onClick={() => { setChatMenu(null); void setChatState(group.id, 'unread'); }}>Mark as unread</button><button type="button" onClick={() => { setChatMenu(null); setConfirmation({ title: 'Delete chat?', description: `Delete your chat history for ${group.name}? You will remain in the group. Opening the chat or receiving a new message will show it again without your old messages.`, confirmLabel: 'Delete chat', destructive: true, action: () => void setChatState(group.id, 'delete') }); }}>Delete chat</button></div> : null}</div></div>) : <div className="gc-panel-empty">{searchTerm ? 'No chats or messages match your search.' : 'Your groups will appear here.'}</div>}</div><div className="gc-mini-calendar"><strong>{new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</strong><span>{searchTerm ? 'Matching messages are shown in the selected chat.' : nextEvent ? `${nextEvent.title} · ${new Date(nextEvent.startAt).toLocaleString()}` : 'No upcoming scheduled events.'}</span></div></aside>
       {hub ? <>
         <main className="gc-main-chat">
           <header className="gc-chat-header"><GroupAvatar id={hub.group.id} name={hub.group.name} className="gc-list-avatar large" /><div><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => setManageOpen(true)}>Add Members</button><button className="gc-leave-btn" disabled={leaving} onClick={() => setConfirmation({ title: 'Leave group?', description: `You will lose access to ${hub.group.name}’s chat, projects, and tasks.`, confirmLabel: 'Leave group', destructive: true, action: () => void leaveGroup() })}>{leaving ? 'Leaving…' : 'Leave'}</button></div></header>

@@ -177,6 +177,7 @@ model GroupMember {
   role ProjectRole @default(Project_Member)
   joinedAt DateTime @default(now())
   chatHiddenAt DateTime?
+  chatDeletedAt DateTime?
   chatUnread Boolean @default(false)
   group Group @relation(fields: [groupId], references: [id])
   user User @relation(fields: [userId], references: [id])
