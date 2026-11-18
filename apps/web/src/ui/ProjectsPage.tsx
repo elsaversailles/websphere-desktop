@@ -71,7 +71,7 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
       void refreshTasks();
     });
     socket.on('task:updated', () => { void Promise.all([refreshProjects(), refreshTasks()]); });
-    socket.on('notification:new', () => { void refreshProjects(); });
+    socket.on('notification:new', () => { void Promise.all([refreshProjects(), refreshTasks()]); });
     return () => { socket.disconnect(); };
   }, [refreshProjects, refreshTasks, notify]);
 

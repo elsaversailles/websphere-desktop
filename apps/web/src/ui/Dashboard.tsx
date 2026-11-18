@@ -29,6 +29,7 @@ type DashboardData = {
   projects: DashboardProject[];
   tasks: DashboardTask[];
   notifications: DashboardNotification[];
+  unreadNotifications?: number;
   activity?: DashboardActivity[];
   online?: DashboardTeammate[];
   announcements?: EventAnnouncement[];
@@ -62,7 +63,7 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
 
   const refreshDashboard = useCallback(() => request<DashboardData>('/dashboard').then(setData).catch((error: Error) => notify(error.message)), [notify]);
   useEffect(() => { void refreshDashboard(); }, [refreshDashboard]);
-  useEffect(() => { setUnread(data?.notifications.filter((item) => !item.read).length ?? 0); }, [data]);
+  useEffect(() => { setUnread(data?.unreadNotifications ?? data?.notifications.filter((item) => !item.read).length ?? 0); }, [data]);
   useEffect(() => {
     const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
     socket.on('connect', () => {
@@ -71,6 +72,7 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
     });
     socket.on('notification:new', () => void refreshDashboard());
     socket.on('task:updated', () => void refreshDashboard());
+    socket.on('group:removed', () => void refreshDashboard());
     return () => { socket.disconnect(); };
   }, [refreshDashboard]);
   useEffect(() => {
@@ -175,7 +177,7 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
   const today = new Date();
   const todayKey = dateKey(today);
   return <section className="sp on dashboard-page">
-    <div className="ph"><div><h2>Dashboard</h2><div className="ph-sub dashboard-welcome">Welcome, {name}!</div></div><div className="ph-acts"><button className="ai-head-btn" title="WebSphere AI" onClick={() => onPage('assistant')}>✦</button><button className="new-btn" title="Create new project" onClick={() => void openCreateDialog()}>+</button><div className="notif-popover-wrap" ref={notificationsRef}><button className="notif-head-btn" title="Notifications" aria-label="Notifications" aria-haspopup="dialog" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen((open) => !open)}><BellIcon />{unread ? <span className="notif-head-dot">{unread > 9 ? '9+' : unread}</span> : null}</button>{notificationsOpen ? <section className="notif-popover" role="dialog" aria-label="Notifications"><header className="notif-popover-header"><h3>Notifications</h3><button type="button" onClick={() => { setNotificationsOpen(false); onPage('notifications'); }}>View All</button></header><div className="notif-popover-list">{data.notifications.length ? data.notifications.slice(0, 4).map((item) => <button type="button" className={`notif-popover-item ${item.read ? 'read' : ''}`} key={item.id} onClick={() => activateNotification(item)}><span className="notif-popover-dot" /><span><strong>{item.message}</strong><small>{item.createdAt ? relativeTime(item.createdAt) : item.read ? 'Read' : 'New'}</small></span></button>) : <p className="notif-popover-empty">You have no notifications yet.</p>}</div></section> : null}</div></div></div>
+    <div className="ph"><div><h2>Dashboard</h2><div className="ph-sub dashboard-welcome">Welcome, {name}!</div></div><div className="ph-acts"><button className="ai-head-btn" title="WebSphere AI" onClick={() => onPage('assistant')}>✦</button><button className="new-btn" title="Create new project" onClick={() => void openCreateDialog()}>+</button><div className="notif-popover-wrap" ref={notificationsRef}><button className="notif-head-btn" title="Notifications" aria-label="Notifications" aria-haspopup="dialog" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen((open) => !open)}><BellIcon />{unread ? <span className="notif-head-dot">{unread >= 9 ? '9+' : unread}</span> : null}</button>{notificationsOpen ? <section className="notif-popover" role="dialog" aria-label="Notifications"><header className="notif-popover-header"><h3>Notifications</h3><button type="button" onClick={() => { setNotificationsOpen(false); onPage('notifications'); }}>View All</button></header><div className="notif-popover-list">{data.notifications.length ? data.notifications.slice(0, 4).map((item) => <button type="button" className={`notif-popover-item ${item.read ? 'read' : ''}`} key={item.id} onClick={() => activateNotification(item)}><span className="notif-popover-dot" /><span><strong>{item.message}</strong><small>{item.createdAt ? relativeTime(item.createdAt) : item.read ? 'Read' : 'New'}</small></span></button>) : <p className="notif-popover-empty">You have no notifications yet.</p>}</div></section> : null}</div></div></div>
     {createOpen ? <div className="modal-ov open project-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setCreateOpen(false); }}><div className="modal-box project-modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title"><div className="modal-ttl"><div><span id="project-modal-title">Create New Project</span><small>New Project Details</small></div><button type="button" className="modal-close" onClick={() => setCreateOpen(false)} aria-label="Close new project form">×</button></div><form className="project-create-form" onSubmit={createProject}>
       <label className="lbl" htmlFor="project-title">Project Name</label><input className="ifield" id="project-title" name="title" required minLength={2} maxLength={180} placeholder="Enter project name" />
       <label className="lbl" htmlFor="project-group">Project Group</label><select className="ifield" id="project-group" value={createGroupId} onChange={(event) => void pickCreateGroup(event.target.value)}><option value="">No group — independent project</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select>
@@ -188,7 +190,7 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
     {helpOpen ? <div className="modal-ov open support-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}><div className="modal-box support-modal" role="dialog" aria-modal="true" aria-labelledby="support-request-title"><div className="modal-ttl"><div><span id="support-request-title">Request support</span><small>Tell the WebSphere administrators what you need.</small></div><button type="button" className="modal-close" onClick={() => setHelpOpen(false)} aria-label="Close support request">×</button></div><form onSubmit={submitHelpTicket}>
       <label className="lbl" htmlFor="support-category">Category</label><select className="ifield" id="support-category" name="category" defaultValue="bug_report"><option value="bug_report">Report a problem</option><option value="account_reactivation">Account access</option><option value="password_concern">Password concern</option><option value="account_deletion">Account deletion</option><option value="other">Other request</option></select>
       <label className="lbl" htmlFor="support-subject">Subject</label><input className="ifield" id="support-subject" name="subject" required minLength={2} maxLength={180} placeholder="Briefly describe the issue" />
-      <label className="lbl" htmlFor="support-details">Details</label><textarea className="ifield support-details" id="support-details" name="body" required minLength={1} placeholder="Include anything that will help us understand the request." />
+      <label className="lbl" htmlFor="support-details">Details</label><textarea className="ifield support-details" id="support-details" name="body" required minLength={1} maxLength={200} placeholder="Include anything that will help us understand the request." />
       <div className="modal-acts"><button type="button" className="btn-o" onClick={() => setHelpOpen(false)}>Cancel</button><button className="btn" disabled={helpSaving}>{helpSaving ? 'Sending…' : 'Send request'}</button></div>
     </form></div></div> : null}
     <div className="krow c3"><Kpi label="Active Projects" value={activeProjects.length} tone="grn" /><Kpi label="Pending Tasks" value={data.glance.pendingTasks} tone="yel" /><Kpi label="Ideas Submitted" value={data.glance.ideasSubmitted} /></div>

@@ -8,6 +8,7 @@ function fixture() {
   let calendarEvent: any = null;
   const task: any = { id: 'task-1', projectId: 'project-1', createdBy: 'leader-1', title: 'Research report', status: 'pending', startedAt: null, completedAt: null, assignments: [{ assigneeId: actor.id, assignerId: 'leader-1', active: true }] };
   const prisma: any = {
+    project: { findFirst: vi.fn().mockResolvedValue({ groupId: null }) },
     calendarEvent: {
       create: vi.fn(async ({ data }) => (calendarEvent = { id: 'event-1', projectId: null, endAt: null, ...data })),
       findUniqueOrThrow: vi.fn(async () => ({ ...calendarEvent })),
@@ -148,9 +149,9 @@ describe('task status notifications', () => {
       findUniqueOrThrow: vi.fn(async () => ({ id: 'resource-1', task: { ...task, project: { members: [] } } })),
       update: vi.fn(async () => ({})),
     };
-    prisma.toolConnection = { findFirst: vi.fn(async () => ({ id: 'connection-1' })) };
+    prisma.toolConnection = { findFirst: vi.fn(async () => ({ id: 'connection-1', provider: 'google' })) };
     prisma.toolUsage = { create: vi.fn(async () => ({})) };
-    await service.updateLinkedResource(actor, 'resource-1', { connectionId: 'connection-1', title: 'Report document', externalUrl: 'https://example.com/report', status: 'for_review' });
+    await service.updateLinkedResource(actor, 'resource-1', { connectionId: 'connection-1', title: 'Report document', externalUrl: 'https://docs.google.com/document/d/report/edit', status: 'for_review' });
     expect(stored).toHaveLength(1);
     expect(stored[0].message).toBe('Alex Santos updated “Research report” to For Review.');
     expect(task.completedAt).toBeNull();

@@ -9,7 +9,7 @@ function fixture() {
   const prisma = {
     user: { findMany: vi.fn().mockResolvedValue([]) },
     task: { findMany: vi.fn().mockImplementation(async () => [task]) },
-    project: { findMany: vi.fn().mockResolvedValue([]) },
+    project: { findFirst: vi.fn().mockResolvedValue({ id: 'project-1' }), findMany: vi.fn().mockResolvedValue([]) },
     notificationPreference: { findUnique: vi.fn().mockResolvedValue(null) },
     notification: { upsert: vi.fn().mockImplementation(async ({ where, create }) => { if (!stored.has(where.id)) stored.set(where.id, create); return stored.get(where.id); }) },
   };
@@ -160,4 +160,12 @@ describe('task deadline reminders', () => {
       expect(note.message).toContain('is due today.');
     }
   });
+});
+
+
+it('does not create reminders for a former group member with an old task assignment', async () => {
+  const { prisma, scan, stored } = fixture();
+  prisma.project.findFirst.mockResolvedValue(null as any);
+  await scan();
+  expect(stored.size).toBe(0);
 });

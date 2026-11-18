@@ -13,10 +13,16 @@ export function brandedEmailHtml(content: string, env: NodeJS.ProcessEnv = proce
 export async function deliverNotificationEmail(prisma: PrismaClient, notificationId: string, env: NodeJS.ProcessEnv = process.env) {
   const notification = await prisma.notification.findUnique({
     where: { id: notificationId },
-    include: { user: { select: { email: true, status: true, preference: { select: { emailEnabled: true } } } } },
+    include: { user: { select: { email: true, status: true, role: true, preference: { select: { emailEnabled: true } } } } },
   });
   if (!notification || notification.user.status !== 'active' || notification.user.preference?.emailEnabled === false) return;
 
+  // Recheck queued mail: membership may have ended after the reminder was queued.
+  if (notification.user.role !== 'Administrator' && notification.relatedId && ['task', 'project'].includes(notification.relatedType ?? '')) {
+    const userId = notification.userId;
+    const access = await prisma.project.findFirst({ where: { ...(notification.relatedType === 'project' ? { members: { some: { userId } } } : {}), OR: [{ groupId: null }, { group: { members: { some: { userId } } } }], ...(notification.relatedType === 'task' ? { tasks: { some: { id: notification.relatedId } } } : { id: notification.relatedId }) }, select: { id: true } });
+    if (!access) return;
+  }
   const { SES_HOST: host, SES_USER: user, SES_PASSWORD: pass, SES_FROM: from } = env;
   if (!host || !user || !pass || !from) throw new Error('SES SMTP configuration is incomplete');
   const port = Number(env.SES_PORT ?? 587);

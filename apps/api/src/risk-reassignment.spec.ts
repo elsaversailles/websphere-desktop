@@ -32,7 +32,7 @@ describe('risk-based task reassignment', () => {
     await expect(service.assignTask(caller, 'task-1', 'other')).rejects.toMatchObject({ response: { code: 'RISK_REASSIGNMENT_FORBIDDEN' }, status: 403 });
     await expect(service.updateTask(caller, 'task-1', { assigneeId: 'other' })).rejects.toMatchObject({ status: 403 });
     await expect(service.updateTask(caller, 'task-1', { assigneeId: null })).rejects.toMatchObject({ status: 403 });
-    await expect(service.updateLinkedResource(caller, 'resource-1', { provider: 'google', title: 'Document', externalUrl: 'https://example.com/', assigneeId: 'other' })).rejects.toMatchObject({ status: 403 });
+    await expect(service.updateLinkedResource(caller, 'resource-1', { provider: 'google', title: 'Document', externalUrl: 'https://docs.google.com/document/d/report/edit', assigneeId: 'other' })).rejects.toMatchObject({ status: 403 });
     expect(prisma.task.update).not.toHaveBeenCalled();
     expect(prisma.taskAssignment.create).not.toHaveBeenCalled();
     expect(prisma.linkedResource.update).not.toHaveBeenCalled();
@@ -49,7 +49,7 @@ describe('risk-based task reassignment', () => {
 
   it('permits a high-risk reassignment through a linked resource', async () => {
     const { service, prisma } = fixture(0.5);
-    await expect(service.updateLinkedResource(caller, 'resource-1', { provider: 'google', title: 'Document', externalUrl: 'https://example.com/', assigneeId: 'other' })).resolves.toMatchObject({ ok: true });
+    await expect(service.updateLinkedResource(caller, 'resource-1', { provider: 'google', title: 'Document', externalUrl: 'https://docs.google.com/document/d/report/edit', assigneeId: 'other' })).resolves.toMatchObject({ ok: true });
     expect(prisma.taskAssignment.create).toHaveBeenCalledOnce();
     expect(prisma.linkedResource.update).toHaveBeenCalledOnce();
   });

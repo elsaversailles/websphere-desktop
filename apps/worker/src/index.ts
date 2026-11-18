@@ -1,7 +1,7 @@
 import { Queue, Worker } from 'bullmq';
 import { PrismaClient } from '@prisma/client';
 import nodemailer from 'nodemailer';
-import { deliverNotificationEmail } from './notification-email.js';
+import { brandedEmailHtml, deliverNotificationEmail } from './notification-email.js';
 import { scanDeadlineReminders, scheduleDeadlineReminders } from './deadline-reminders.js';
 const prisma: any = new PrismaClient();
 const connection = { url: process.env.REDIS_URL ?? 'redis://localhost:6379' };
@@ -86,11 +86,11 @@ new Worker('inactive-account-scan', async () => {
     return `<li><strong>${escapeHtml(account.fullName)}</strong> (${escapeHtml(account.email)}) — last sign-in: ${lastSeen.toLocaleDateString()}</li>`;
   }).join('');
   await transport.sendMail({
-    from: process.env.SES_FROM ?? 'noreply@example.edu',
+    from: { name: 'WebSphere', address: process.env.SES_FROM ?? 'noreply@example.edu' },
     to: recipient,
     subject: `WebSphere inactive-account alert — ${accounts.length} account${accounts.length === 1 ? '' : 's'}`,
     text: `${accounts.length} active WebSphere account(s) have not signed in for at least ${inactivityDays} days.\n\n${accounts.map((account: { fullName: string; email: string; lastLoginAt: Date | null; createdAt: Date }) => `${account.fullName} (${account.email}) — last sign-in: ${(account.lastLoginAt ?? account.createdAt).toLocaleDateString()}`).join('\n')}`,
-    html: `<p>${accounts.length} active WebSphere account${accounts.length === 1 ? '' : 's'} have not signed in for at least ${inactivityDays} days.</p><ul>${rows}</ul>`,
+    html: brandedEmailHtml(`<p>${accounts.length} active WebSphere account${accounts.length === 1 ? '' : 's'} have not signed in for at least ${inactivityDays} days.</p><ul>${rows}</ul>`),
   });
   await prisma.systemSetting.update({ where: { key: 'inactiveAccountAlerts' }, data: { value: { ...config, lastSentAt: now.toISOString() } } });
   await prisma.auditLog.create({ data: { module: 'SecuritySettings', activity: 'inactive_account_alert_sent', severity: 'info', description: `Sent inactive-account alert covering ${accounts.length} account(s)` } });

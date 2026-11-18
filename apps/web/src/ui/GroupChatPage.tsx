@@ -1,6 +1,7 @@
 import { avatarColor } from './health';
 import { type CSSProperties, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
+import { CHAT_MESSAGE_MAX_LENGTH } from '@websphere/shared';
 import type { CallHostAction, CallKind, CallParticipant, CallSignal } from '@websphere/shared';
 import { getAccessToken, request, socketBaseUrl } from '../api';
 import { GroupAvatar } from './GroupAvatar';
@@ -9,9 +10,9 @@ import { PollStatus } from './PollStatus';
 import { ConfirmDialog } from './ConfirmDialog';
 import type { GroupHub, GroupSummary, Poll } from './types';
 
-type Props = { userId: string; selectedGroupId: string; onSelectGroup: (id: string) => void; onIdeas: () => void; notify: (message: string) => void; incomingCall: { groupId: string; kind: CallKind } | null; onIncomingCallHandled: () => void };
+type Props = { userId: string; selectedGroupId: string; onSelectGroup: (id: string) => void; onIdeas: () => void; notify: (message: string) => void; incomingCall: { groupId: string; kind: CallKind } | null; onIncomingCallHandled: () => void; onCallChange: (call: { groupId: string; startedAt: number } | null) => void };
 type ActiveCall = { groupId: string; kind: CallKind };
-type RemoteStream = { socketId: string; userId: string; stream: MediaStream };
+type RemoteStream = { socketId: string; userId: string; fullName?: string; avatarUrl?: string | null; stream: MediaStream };
 type ChatSearchGroup = GroupSummary & { messageMatch?: string | null };
 type UpcomingEvent = { id: string; title: string; startAt: string; endAt?: string | null; type: string };
 type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
@@ -31,7 +32,7 @@ function mediaDeviceErrorMessage(error: unknown, kind: CallKind) {
   return error instanceof Error ? error.message : 'Could not start the call.';
 }
 
-function MediaTile({ label, stream, muted, micMuted, cameraOn, local, presenting, handRaised }: { label: string; stream: MediaStream; muted?: boolean; micMuted: boolean; cameraOn?: boolean; local?: boolean; presenting?: boolean; handRaised?: boolean }) {
+function MediaTile({ label, stream, muted, micMuted, cameraOn, local, presenting, handRaised, avatarUrl }: { avatarUrl?: string | null; label: string; stream: MediaStream; muted?: boolean; micMuted: boolean; cameraOn?: boolean; local?: boolean; presenting?: boolean; handRaised?: boolean }) {
   const media = useRef<HTMLVideoElement | null>(null);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const hasVideo = cameraOn !== false && stream.getVideoTracks().some((track) => track.enabled && track.readyState === 'live');
@@ -49,12 +50,24 @@ function MediaTile({ label, stream, muted, micMuted, cameraOn, local, presenting
   }
   return <div className={`call-media-tile ${hasVideo ? 'has-video' : ''} ${presenting ? 'is-presenting' : ''}`}>
     <video ref={media} autoPlay playsInline muted={muted} />
-    {!hasVideo ? <span className="call-avatar">{label.slice(0, 1).toUpperCase()}</span> : null}
+    {!hasVideo ? <MemberAvatar id={label} name={label} avatarUrl={avatarUrl} className="call-avatar" /> : null}
     {playbackBlocked ? <button type="button" className="call-resume-playback" onClick={resumePlayback}>Play {local ? 'your video' : `${label}’s audio and video`}</button> : null}
     {handRaised ? <span className="call-hand-indicator" aria-label={`${local ? 'You have' : `${label} has`} raised a hand`} title="Hand raised"><CallIcon name="hand" /></span> : null}
     <span className={`call-mic-indicator ${micMuted ? 'is-muted' : ''}`} aria-label={`${label}: microphone ${micMuted ? 'muted' : 'unmuted'}`} title={micMuted ? 'Muted' : 'Unmuted'}><CallIcon name={micMuted ? 'microphoneOff' : 'microphone'} /></span>
     <small>{local ? 'You' : label}{presenting ? ' is presenting' : ''}</small>
   </div>;
+}
+
+
+function SharedScreenDialog({ stream, onClose }: { stream: MediaStream; onClose: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [zoom, setZoom] = useState(1);
+  useEffect(() => { const element = dialog.current; element?.showModal(); return () => element?.close(); }, []);
+  return <dialog ref={dialog} className="call-screen-dialog" aria-label="Shared screen" onCancel={onClose}>
+    <header><strong>Shared screen</strong><button type="button" onClick={onClose} autoFocus>Close</button></header>
+    <div className="call-screen-viewport"><div className="call-screen-canvas" style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%` }}><MediaTile label="Shared screen" stream={stream} muted micMuted={false} presenting /></div></div>
+    <footer><button type="button" aria-label="Zoom out" disabled={zoom <= 1} onClick={() => setZoom((value) => Math.max(1, value - 0.5))}>−</button><button type="button" onClick={() => setZoom(1)}>Fit screen</button><span>{Math.round(zoom * 100)}%</span><button type="button" aria-label="Zoom in" disabled={zoom >= 4} onClick={() => setZoom((value) => Math.min(4, value + 0.5))}>+</button></footer>
+  </dialog>;
 }
 
 function CallIcon({ name }: { name: 'microphone' | 'microphoneOff' | 'camera' | 'cameraOff' | 'screen' | 'people' | 'phone' | 'hand' | 'more' }) {
@@ -89,7 +102,9 @@ function IdeaVoteCard({ option, totalVotes, viewerOptionId, viewerId, votingOpen
   </article>;
 }
 
-export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas, notify, incomingCall, onIncomingCallHandled }: Props) {
+export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas, notify, incomingCall, onIncomingCallHandled, onCallChange }: Props) {
+  const [chatListOpen, setChatListOpen] = useState(false);
+  const [pinnedSocketId, setPinnedSocketId] = useState<string | null>(null);
   const [groups, setGroups] = useState<GroupSummary[]>([]);
   const [hub, setHub] = useState<GroupHub | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -107,6 +122,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const [presenterSocketId, setPresenterSocketId] = useState<string | null>(null);
   const [presentationStream, setPresentationStream] = useState<MediaStream | null>(null);
   const [peopleOpen, setPeopleOpen] = useState(false);
+  const [expandedScreen, setExpandedScreen] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [closingPoll, setClosingPoll] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
@@ -130,6 +146,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   const reconnectGenerationRef = useRef(0);
   const localStreamRef = useRef<MediaStream | null>(null);
   const presentationStreamRef = useRef<MediaStream | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
   const peersRef = useRef(new Map<string, RTCPeerConnection>());
   const peerUserIdsRef = useRef(new Map<string, string>());
   const pendingCandidatesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
@@ -200,6 +217,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     presentationStreamRef.current?.getTracks().forEach((track) => track.stop());
     presentationStreamRef.current = null;
     callRef.current = null;
+    onCallChange(null);
     iceServersRef.current = [];
     setCall(null);
     setCallReconnecting(false);
@@ -212,6 +230,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     setPresenterSocketId(null);
     setPresentationStream(null);
     setPeopleOpen(false);
+    setExpandedScreen(false);
     setRaisedHandSocketIds([]);
   }
 
@@ -226,27 +245,35 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   }
 
   async function createPeer(participant: CallParticipant, offer: boolean) {
+    // Signaling/media can precede the roster. Enrich existing peers too.
+    if (participant.userId) {
+      peerUserIdsRef.current.set(participant.socketId, participant.userId);
+      setRemoteStreams((current) => current.map((item) => item.socketId === participant.socketId ? { ...item, userId: participant.userId, fullName: participant.fullName || item.fullName, avatarUrl: participant.avatarUrl !== undefined ? participant.avatarUrl : item.avatarUrl } : item));
+    }
     if (peersRef.current.has(participant.socketId) || !localStreamRef.current) return peersRef.current.get(participant.socketId);
     const peer = new RTCPeerConnection(callConfiguration());
     peersRef.current.set(participant.socketId, peer);
     if (participant.userId) peerUserIdsRef.current.set(participant.socketId, participant.userId);
     localStreamRef.current.getTracks().forEach((track) => peer.addTrack(track, localStreamRef.current!));
+    if (!localStreamRef.current.getVideoTracks().length) peer.addTransceiver('video', { direction: 'sendrecv', streams: [localStreamRef.current] });
+    const screenAudio = peer.addTransceiver('audio', { direction: 'sendrecv' });
     const presentation = presentationStreamRef.current;
     const sharedVideo = presentation?.getVideoTracks()[0];
     if (sharedVideo) {
-      const videoSender = peer.getSenders().find((sender) => sender.track?.kind === 'video');
+      const videoSender = peer.getTransceivers().find((item) => item.receiver.track.kind === 'video')?.sender;
       if (videoSender) await videoSender.replaceTrack(sharedVideo);
     }
-    presentation?.getAudioTracks().forEach((track) => peer.addTrack(track, presentation));
+    if (presentation?.getAudioTracks()[0]) await screenAudio.sender.replaceTrack(presentation.getAudioTracks()[0]);
     peer.onicecandidate = (event) => { if (event.candidate) void sendSignal(participant.socketId, { type: 'ice-candidate', candidate: event.candidate.toJSON() }); };
     peer.ontrack = (event) => {
+      if (peersRef.current.get(participant.socketId) !== peer) return;
       const incomingTracks = event.streams[0]?.getTracks() ?? [event.track];
       setRemoteStreams((current) => {
         const existing = current.find((item) => item.socketId === participant.socketId);
         const tracks = [...(existing?.stream.getTracks() ?? [])];
         for (const track of incomingTracks) if (!tracks.some((currentTrack) => currentTrack.id === track.id)) tracks.push(track);
         const stream = new MediaStream(tracks);
-        return [...current.filter((item) => item.socketId !== participant.socketId), { socketId: participant.socketId, userId: peerUserIdsRef.current.get(participant.socketId) ?? '', stream }];
+        return [...current.filter((item) => item.socketId !== participant.socketId), { socketId: participant.socketId, userId: peerUserIdsRef.current.get(participant.socketId) ?? '', fullName: participant.fullName || existing?.fullName, avatarUrl: participant.avatarUrl !== undefined ? participant.avatarUrl : existing?.avatarUrl, stream }];
       });
     };
     peer.onconnectionstatechange = () => { if (peer.connectionState === 'failed') { removePeer(participant.socketId); notify('A participant media connection could not be established.'); } else if (peer.connectionState === 'closed') removePeer(participant.socketId); };
@@ -318,6 +345,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       });
       if (generation !== reconnectGenerationRef.current) { if (result.ok && callRef.current?.groupId !== active.groupId) socketRef.current?.emit('call:leave', { groupId: active.groupId }, () => undefined); return; }
       if (!result?.ok) throw new Error(result?.error?.message ?? 'Could not join the call.');
+      onCallChange({ groupId: active.groupId, startedAt: Date.now() });
       // A mute change may have occurred while the join acknowledgement was pending.
       publishMuteState(active.groupId, microphoneMuted(stream));
       setRemoteCameraStates((current) => ({ ...Object.fromEntries((result.participants ?? []).filter((participant) => participant.cameraEnabled !== undefined).map((participant) => [participant.socketId, participant.cameraEnabled!])), ...current }));
@@ -370,26 +398,27 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     if (!presentation) return;
     presentation.getVideoTracks().forEach((track) => { track.onended = null; });
     const cameraTrack = localStreamRef.current?.getVideoTracks()[0] ?? null;
-    await Promise.all([...peersRef.current.values()].map(async (peer) => {
-      const videoSender = peer.getSenders().find((sender) => sender.track?.kind === 'video');
+    await Promise.allSettled([...peersRef.current.values()].map(async (peer) => {
+      const videoSender = peer.getTransceivers().find((item) => item.receiver.track.kind === 'video')?.sender;
       if (videoSender) await videoSender.replaceTrack(cameraTrack);
-      presentation.getAudioTracks().forEach((track) => {
-        const sender = peer.getSenders().find((candidate) => candidate.track?.id === track.id);
-        if (sender) peer.removeTrack(sender);
-      });
+      const screenAudioSender = peer.getSenders().find((sender) => presentation.getAudioTracks().some((track) => sender.track?.id === track.id));
+      if (screenAudioSender) await screenAudioSender.replaceTrack(null);
     }));
     presentation.getTracks().forEach((track) => track.stop());
     presentationStreamRef.current = null;
     setPresentationStream(null);
     setPresenterSocketId(null);
+    setExpandedScreen(false);
     if (notifyOthers && callRef.current && socketRef.current) socketRef.current.emit('call:screen-share', { groupId: callRef.current.groupId, sharing: false }, () => undefined);
   }
 
   async function togglePresenting() {
-    if (!callRef.current || !navigator.mediaDevices?.getDisplayMedia) return notify('Screen sharing is not supported by this browser.');
+    if (!callRef.current || !navigator.mediaDevices?.getDisplayMedia) return notify('This browser cannot share your screen. You can still watch shared screens. To present, use the WebSphere Android app or a desktop browser with screen sharing.');
     if (presentationStreamRef.current) return void stopPresenting();
     try {
+      const group = callRef.current.groupId;
       const presentation = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      if (callRef.current?.groupId !== group) { presentation.getTracks().forEach((track) => track.stop()); return; }
       const videoTrack = presentation.getVideoTracks()[0];
       if (!videoTrack) throw new Error('No display was selected.');
       presentationStreamRef.current = presentation;
@@ -397,12 +426,14 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       setPresenterSocketId(socketRef.current?.id ?? 'local');
       videoTrack.onended = () => { void stopPresenting(); };
       await Promise.all([...peersRef.current.values()].map(async (peer) => {
-        const videoSender = peer.getSenders().find((sender) => sender.track?.kind === 'video');
+        const videoSender = peer.getTransceivers().find((item) => item.receiver.track.kind === 'video')?.sender;
         if (videoSender) await videoSender.replaceTrack(videoTrack);
-        presentation.getAudioTracks().forEach((track) => peer.addTrack(track, presentation));
+        const screenAudioSender = peer.getTransceivers().filter((item) => item.receiver.track.kind === 'audio')[1]?.sender;
+        if (screenAudioSender && presentation.getAudioTracks()[0]) await screenAudioSender.replaceTrack(presentation.getAudioTracks()[0]);
       }));
       socketRef.current?.emit('call:screen-share', { groupId: callRef.current.groupId, sharing: true }, () => undefined);
     } catch (error) {
+      await stopPresenting();
       if (error instanceof DOMException && error.name === 'NotAllowedError') return;
       notify(error instanceof Error ? error.message : 'Could not start screen sharing.');
     }
@@ -464,6 +495,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       presentationStreamRef.current?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
       presentationStreamRef.current = null; setPresentationStream(null); setPresenterSocketId(null);
     });
+    socket.on('notification:new', () => { void refreshHub(); });
     socket.on('poll:tally', (tally: { groupId?: string }) => { if (tally.groupId === selectedGroupId) void refreshHub(); });
     socket.on('chat:message', (message: GroupHub['messages'][number]) => setHub((current) => current ? { ...current, messages: [message, ...current.messages.filter((item) => item.id !== message.id)] } : current));
     socket.on('group:removed', (event: { groupId: string }) => { if (event.groupId === selectedGroupId) { if (callRef.current?.groupId === selectedGroupId) clearCall(); setManageOpen(false); setHub(null); onSelectGroup(''); notify('You were removed from this group.'); } });
@@ -485,6 +517,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     event.preventDefault();
     const form = event.currentTarget; const body = String(new FormData(form).get('body') ?? '').trim();
     if (!body || !selectedGroupId || !socketRef.current) return;
+    if (body.length > CHAT_MESSAGE_MAX_LENGTH) return notify('Messages can contain up to 10,000 characters.');
     socketRef.current.emit('chat:send', { groupId: selectedGroupId, body }, (result: { ok: boolean; error?: { message?: string } }) => { if (result.ok) form.reset(); else notify(result.error?.message ?? 'Message could not be sent.'); });
   }
 
@@ -555,6 +588,12 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     catch (error: any) { notify(error.message); }
   }
 
+  async function demoteMember(memberUserId: string) {
+    if (!hub || !viewerIsLeader) return;
+    try { await request(`/groups/${selectedGroupId}/members/${memberUserId}/demote`, { method: 'POST' }); await refreshHub(); notify('Admin role removed.'); }
+    catch (error: any) { notify(error.message); }
+  }
+
   async function setChatState(groupId: string, action: 'read' | 'unread' | 'delete') {
     try {
       await request(`/groups/${groupId}/chat/${action}`, { method: 'POST' });
@@ -576,40 +615,54 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     try { await request(`/groups/${selectedGroupId}/ideas/${winningIdea.ideaId}/begin`, { method: 'POST' }); setHub(await request<GroupHub>(`/groups/${selectedGroupId}/hub`)); notify('The idea selection process is complete. You can now start your project.'); } catch (error: any) { notify(error.message); }
   }
 
-  const participantName = (participantUserId: string) => hub?.group.members.find((member) => member.userId === participantUserId)?.user.fullName ?? 'Group member';
+  const participantAvatar = (id: string) => {
+    const member = hub?.group.members.find((item) => item.userId === id);
+    return member ? member.user.avatarUrl : remoteStreams.find((item) => item.userId === id)?.avatarUrl;
+  };
+  const participantName = (participantUserId: string) => hub?.group.members.find((member) => member.userId === participantUserId)?.user.fullName || remoteStreams.find((item) => item.userId === participantUserId)?.fullName || 'Connecting participant…';
   const searchTerm = searchQuery.trim();
   const visibleGroups = (searchTerm ? searchedGroups ?? groups.filter((group) => group.name.toLocaleLowerCase().includes(searchTerm.toLocaleLowerCase())) : groups).filter((group) => { const current = groups.find((item) => item.id === group.id); return current && chatIsVisible(current); });
   const visibleMessages = searchTerm ? matchingMessages ?? hub?.messages.filter((message) => message.body.toLocaleLowerCase().includes(searchTerm.toLocaleLowerCase())) ?? [] : hub?.messages ?? [];
+  useEffect(() => {
+    const list = messageListRef.current;
+    if (list && !searchTerm && !call) list.scrollTop = list.scrollHeight;
+  }, [selectedGroupId, hub?.messages, searchTerm, call]);
   const ownSocketId = socketRef.current?.id ?? null;
   const isHost = !!ownSocketId && ownSocketId === hostSocketId;
+  const pinnedParticipant = remoteStreams.find((item) => item.socketId === pinnedSocketId);
+  const hasPin = pinnedSocketId === 'self' || !!pinnedParticipant;
   const callStage = call ? <div className="call-stage" role="region" aria-label={`${call.kind === 'video' ? 'Video' : 'Voice'} call`}>
       <header className="call-stage-head"><div><strong>{hub?.group.name ?? 'Group meeting'}</strong><span>{call.kind === 'video' ? 'Video meeting' : 'Voice meeting'} · {remoteStreams.length + 1} participant{remoteStreams.length ? 's' : ''}</span></div><div className="call-stage-status"><span className="call-live-dot" />{callReconnecting ? 'Reconnecting…' : isHost ? 'You are host' : 'In meeting'}</div></header>
-      <main className={`call-media-grid ${presenterSocketId ? 'has-presentation' : ''}`}>
+      <main className={`call-media-grid ${presenterSocketId ? 'has-presentation' : hasPin ? 'has-pin' : ''}`}>
+        {!presenterSocketId && hasPin ? <div className="call-pinned"><MediaTile avatarUrl={participantAvatar(pinnedParticipant?.userId ?? userId)} label={pinnedParticipant ? participantName(pinnedParticipant.userId) : 'You'} stream={pinnedParticipant?.stream ?? localStreamRef.current!} muted micMuted={pinnedParticipant ? !!remoteMuteStates[pinnedParticipant.socketId] : muted} cameraOn={pinnedParticipant ? remoteCameraStates[pinnedParticipant.socketId] !== false : cameraEnabled} local={!pinnedParticipant} /><button type="button" onClick={() => setPinnedSocketId(null)}>Unpin</button></div> : null}
         {presenterSocketId ? <>
           <div className="call-presentation">
-            {presentationStream ? <MediaTile label="You" stream={presentationStream} muted micMuted={muted} local presenting /> : remoteStreams.filter((item) => item.socketId === presenterSocketId).map((item) => <MediaTile key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} presenting handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
+            <button type="button" className="call-screen-expand" onClick={() => setExpandedScreen(true)}>Expand / Zoom</button>
+            {presentationStream ? <MediaTile avatarUrl={participantAvatar(userId)} label="You" stream={presentationStream} muted micMuted={muted} local presenting /> : remoteStreams.filter((item) => item.socketId === presenterSocketId).map((item) => <MediaTile avatarUrl={participantAvatar(item.userId)} key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} presenting handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
           </div>
           <div className="call-thumbnails">
-            {remoteStreams.map((item) => item.socketId === presenterSocketId ? <div className="call-media-tile call-presenter-placeholder" key={item.socketId}><span className="call-avatar">{participantName(item.userId).slice(0, 1).toUpperCase()}</span><small>{participantName(item.userId)} · presenting</small></div> : <MediaTile key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} cameraOn={remoteCameraStates[item.socketId] !== false} handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
-            <MediaTile label="You" stream={localStreamRef.current!} muted micMuted={muted} cameraOn={cameraEnabled} local handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} />
+            {remoteStreams.map((item) => item.socketId === presenterSocketId ? <div className="call-media-tile call-presenter-placeholder" key={item.socketId}><MemberAvatar id={item.userId} name={participantName(item.userId)} avatarUrl={participantAvatar(item.userId)} className="call-avatar" /><small>{participantName(item.userId)} · presenting</small></div> : <MediaTile avatarUrl={participantAvatar(item.userId)} key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} cameraOn={remoteCameraStates[item.socketId] !== false} handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
+            <MediaTile avatarUrl={participantAvatar(userId)} label="You" stream={localStreamRef.current!} muted micMuted={muted} cameraOn={cameraEnabled} local handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} />
           </div>
         </> : <>
-          {remoteStreams.map((item) => <MediaTile key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} cameraOn={remoteCameraStates[item.socketId] !== false} handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
-          <MediaTile label="You" stream={localStreamRef.current!} muted micMuted={muted} cameraOn={cameraEnabled} local handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} />
+          {remoteStreams.map((item) => <MediaTile avatarUrl={participantAvatar(item.userId)} key={item.socketId} label={participantName(item.userId)} stream={item.stream} micMuted={!!remoteMuteStates[item.socketId]} cameraOn={remoteCameraStates[item.socketId] !== false} handRaised={raisedHandSocketIds.includes(item.socketId)} />)}
+          <MediaTile avatarUrl={participantAvatar(userId)} label="You" stream={localStreamRef.current!} muted micMuted={muted} cameraOn={cameraEnabled} local handRaised={!!ownSocketId && raisedHandSocketIds.includes(ownSocketId)} />
         </>}
       </main>
       {peopleOpen ? <aside className="call-people-panel"><div className="call-people-head"><strong>People</strong><button type="button" onClick={() => setPeopleOpen(false)} aria-label="Close people panel" title="Close people panel">×</button></div><div className="call-person-row"><span>You {isHost ? '(Host)' : ''}</span><small>{muted ? 'Muted' : 'Unmuted'}</small>{ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? <small className="call-hand-state">Hand raised</small> : <small>In meeting</small>}</div>{remoteStreams.map((item) => <div className="call-person-row" key={item.socketId}><span>{participantName(item.userId)}{item.socketId === hostSocketId ? ' (Host)' : ''}</span><small>{remoteMuteStates[item.socketId] ? 'Muted' : 'Unmuted'}</small>{isHost ? <button type="button" className="call-remove" onClick={() => requestHostAction('remove-participant', item.socketId)}>Remove</button> : raisedHandSocketIds.includes(item.socketId) ? <small className="call-hand-state">Hand raised</small> : <small>In meeting</small>}</div>)}{isHost ? <div className="call-host-actions"><strong>Host controls</strong><button type="button" onClick={() => requestHostAction('mute-all')}>Mute all</button><button type="button" className="call-end-all" onClick={() => requestHostAction('end-call')}>End call for everyone</button></div> : null}</aside> : null}
+      {expandedScreen && presenterSocketId && (presentationStream || remoteStreams.find((item) => item.socketId === presenterSocketId)?.stream) ? <SharedScreenDialog stream={(presentationStream || remoteStreams.find((item) => item.socketId === presenterSocketId)!.stream)} onClose={() => setExpandedScreen(false)} /> : null}
+      <div className="call-pin-controls" aria-label="Pin a participant"><button type="button" onClick={() => setPinnedSocketId(pinnedSocketId === 'self' ? null : 'self')}>{pinnedSocketId === 'self' ? 'Unpin' : 'Pin'} yourself</button>{remoteStreams.map((item) => <button key={item.socketId} type="button" onClick={() => setPinnedSocketId(pinnedSocketId === item.socketId ? null : item.socketId)}>{pinnedSocketId === item.socketId ? 'Unpin' : 'Pin'} {participantName(item.userId)}</button>)}</div>
       <footer className="call-controls"><button type="button" className={`call-control ${muted ? 'is-off' : ''}`} onClick={toggleMute} aria-label={muted ? 'Turn microphone on' : 'Turn microphone off'} title={muted ? 'Turn microphone on' : 'Turn microphone off'}><CallIcon name={muted ? 'microphoneOff' : 'microphone'} /></button>{call.kind === 'video' ? <button type="button" className={`call-control ${cameraEnabled ? '' : 'is-off'}`} onClick={toggleCamera} aria-label={cameraEnabled ? 'Turn camera off' : 'Turn camera on'} title={cameraEnabled ? 'Turn camera off' : 'Turn camera on'}><CallIcon name={cameraEnabled ? 'camera' : 'cameraOff'} /></button> : null}<button type="button" className={`call-control ${presentationStream ? 'is-sharing' : ''}`} onClick={() => void togglePresenting()} aria-label={presentationStream ? 'Stop presenting' : 'Present screen'} title={presentationStream ? 'Stop presenting' : 'Present screen'}><CallIcon name="screen" /></button><button type="button" className={`call-control ${ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'is-active' : ''}`} onClick={toggleRaiseHand} aria-label={ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'Lower hand' : 'Raise hand'} title={ownSocketId && raisedHandSocketIds.includes(ownSocketId) ? 'Lower hand' : 'Raise hand'}><CallIcon name="hand" /></button><button type="button" className={`call-control ${peopleOpen ? 'is-active' : ''}`} onClick={() => setPeopleOpen((open) => !open)} aria-label="Show people and host controls" title="Show people and host controls"><CallIcon name="people" /></button><button type="button" className="call-control call-hangup" onClick={leaveCall} aria-label="Leave call" title="Leave call"><CallIcon name="phone" /></button></footer>
     </div> : null;
   return <section className="sp on">
     <div className="ph"><h2>Group Chat</h2></div>
     {incomingCall ? <div className="call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => void joinCall(incomingCall.kind)}>Join call</button><button className="btn-o btn-sm" onClick={onIncomingCallHandled}>Dismiss</button></div> : null}
-    <div className="gc-teams-layout">
-      <aside className="gc-left-panel"><div className="gc-left-head"><h3>Chats</h3></div><div className="gc-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search chats or messages..." aria-label="Search group chats and messages" /></div><div className="gc-chat-list">{visibleGroups.length ? visibleGroups.map((group) => <div className={`gc-chat-row ${group.id === selectedGroupId ? 'active' : ''}`} key={group.id}><button type="button" className="gc-chat-item" onClick={() => { onSelectGroup(group.id); setChatMenu(null); void setChatState(group.id, 'read'); }}><GroupAvatar id={group.id} name={group.name} className="gc-list-avatar" /><span><strong>{group.name}</strong>{group.messageMatch ? <small>Message: {group.messageMatch}</small> : null}</span>{groups.find((item) => item.id === group.id)?.members[0]?.chatUnread ? <i className="gc-unread-dot" aria-label="Unread" /> : null}</button><div className="gc-chat-options"><button type="button" className="gc-chat-menu-button" aria-label={`Options for ${group.name}`} aria-expanded={chatMenu === group.id} onClick={() => setChatMenu(chatMenu === group.id ? null : group.id)}>⋯</button>{chatMenu === group.id ? <div className="gc-chat-menu"><button type="button" onClick={() => { setChatMenu(null); void setChatState(group.id, 'unread'); }}>Mark as unread</button><button type="button" onClick={() => { setChatMenu(null); setConfirmation({ title: 'Delete chat?', description: `Delete your chat history for ${group.name}? You will remain in the group. Opening the chat or receiving a new message will show it again without your old messages.`, confirmLabel: 'Delete chat', destructive: true, action: () => void setChatState(group.id, 'delete') }); }}>Delete chat</button></div> : null}</div></div>) : <div className="gc-panel-empty">{searchTerm ? 'No chats or messages match your search.' : 'Your groups will appear here.'}</div>}</div><div className="gc-mini-calendar"><strong>{new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</strong><span>{searchTerm ? 'Matching messages are shown in the selected chat.' : nextEvent ? `${nextEvent.title} · ${new Date(nextEvent.startAt).toLocaleString()}` : 'No upcoming scheduled events.'}</span></div></aside>
+    <div className={`gc-teams-layout ${hub && !chatListOpen ? 'has-chat' : ''}`}>
+      <aside className="gc-left-panel"><div className="gc-left-head"><h3>Chats</h3></div><div className="gc-search"><span>⌕</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search chats or messages..." aria-label="Search group chats and messages" /></div><div className="gc-chat-list">{visibleGroups.length ? visibleGroups.map((group) => <div className={`gc-chat-row ${group.id === selectedGroupId ? 'active' : ''}`} key={group.id}><button type="button" className="gc-chat-item" onClick={() => { setChatListOpen(false); onSelectGroup(group.id); setChatMenu(null); void setChatState(group.id, 'read'); }}><GroupAvatar id={group.id} name={group.name} className="gc-list-avatar" /><span><strong>{group.name}</strong>{group.messageMatch ? <small>Message: {group.messageMatch}</small> : null}</span>{groups.find((item) => item.id === group.id)?.members[0]?.chatUnread ? <i className="gc-unread-dot" aria-label="Unread" /> : null}</button><div className="gc-chat-options"><button type="button" className="gc-chat-menu-button" aria-label={`Options for ${group.name}`} aria-expanded={chatMenu === group.id} onClick={() => setChatMenu(chatMenu === group.id ? null : group.id)}>⋯</button>{chatMenu === group.id ? <div className="gc-chat-menu"><button type="button" onClick={() => { setChatMenu(null); void setChatState(group.id, 'unread'); }}>Mark as unread</button><button type="button" onClick={() => { setChatMenu(null); setConfirmation({ title: 'Delete chat?', description: `Delete your chat history for ${group.name}? You will remain in the group. Opening the chat or receiving a new message will show it again without your old messages.`, confirmLabel: 'Delete chat', destructive: true, action: () => void setChatState(group.id, 'delete') }); }}>Delete chat</button></div> : null}</div></div>) : <div className="gc-panel-empty">{searchTerm ? 'No chats or messages match your search.' : 'Your groups will appear here.'}</div>}</div><div className="gc-mini-calendar"><strong>{new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</strong><span>{searchTerm ? 'Matching messages are shown in the selected chat.' : nextEvent ? `${nextEvent.title} · ${new Date(nextEvent.startAt).toLocaleString()}` : 'No upcoming scheduled events.'}</span></div></aside>
       {hub ? <>
         <main className="gc-main-chat">
-          <header className="gc-chat-header"><GroupAvatar id={hub.group.id} name={hub.group.name} className="gc-list-avatar large" /><div><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => setManageOpen(true)}>Add Members</button><button className="gc-leave-btn" disabled={leaving} onClick={() => setConfirmation({ title: 'Leave group?', description: `You will lose access to ${hub.group.name}’s chat, projects, and tasks.`, confirmLabel: 'Leave group', destructive: true, action: () => void leaveGroup() })}>{leaving ? 'Leaving…' : 'Leave'}</button></div></header>
-          {callStage ?? <><div className="gchat-msgs">{visibleMessages.length ? [...visibleMessages].reverse().map((message) => { const member = hub.group.members.find((value) => value.userId === message.senderId); const sender = message.senderId === userId ? 'You' : member?.user.fullName ?? 'Group member'; return <div className={`gc-msg ${message.senderId === userId ? 'me' : ''}`} key={message.id}><MemberAvatar id={message.senderId} name={member?.user.fullName ?? sender} avatarUrl={member?.user.avatarUrl} className="gc-message-avatar" /><div className="gc-bub"><div className="gc-name">{sender}</div><div className="gc-txt">{message.body}</div><div className="gc-time">{new Date(message.createdAt).toLocaleString()}</div></div></div>; }) : <div className="legacy-empty">{searchTerm ? 'No messages match your search in this chat.' : 'Choose or create a group to begin a conversation.'}</div>}</div><form className="gchat-ir" onSubmit={send}><input className="gchat-input" name="body" placeholder="Type a message to your group…" autoComplete="off" /><button className="gchat-send">Send</button></form></>}
+          <header className="gc-chat-header"><button type="button" className="gc-back-chats" onClick={() => setChatListOpen(true)}>Chats</button><GroupAvatar id={hub.group.id} name={hub.group.name} className="gc-list-avatar large" /><div className="gc-chat-title"><strong>{hub.group.name}</strong><span>● {hub.group.members.length} members</span></div><div className="gc-header-actions"><button disabled={!!call} onClick={() => void joinCall('voice')}>Call</button><button disabled={!!call} onClick={() => void joinCall('video')}>Video</button><button onClick={() => setManageOpen(true)}>Add Members</button><button className="gc-leave-btn" disabled={leaving} onClick={() => setConfirmation({ title: 'Leave group?', description: `You will lose access to ${hub.group.name}’s chat, projects, and tasks.`, confirmLabel: 'Leave group', destructive: true, action: () => void leaveGroup() })}>{leaving ? 'Leaving…' : 'Leave'}</button></div></header>
+          {callStage ?? <><div className="gchat-msgs" ref={messageListRef}>{visibleMessages.length ? [...visibleMessages].reverse().map((message) => { const member = hub.group.members.find((value) => value.userId === message.senderId); const sender = message.senderId === userId ? 'You' : member?.user.fullName ?? 'Group member'; return <div className={`gc-msg ${message.senderId === userId ? 'me' : ''}`} key={message.id}><MemberAvatar id={message.senderId} name={member?.user.fullName ?? sender} avatarUrl={member?.user.avatarUrl} className="gc-message-avatar" /><div className="gc-bub"><div className="gc-name">{sender}</div><div className="gc-txt">{message.body}</div><div className="gc-time">{new Date(message.createdAt).toLocaleString()}</div></div></div>; }) : <div className="legacy-empty">{searchTerm ? 'No messages match your search in this chat.' : 'Choose or create a group to begin a conversation.'}</div>}</div><form className="gchat-ir" onSubmit={send}><textarea className="gchat-input" name="body" rows={1} maxLength={CHAT_MESSAGE_MAX_LENGTH} aria-label="Message, up to 10,000 characters" placeholder="Type a message to your group…" /><button className="gchat-send">Send</button></form></>}
         </main>
         <aside className="gc-right-panel">
           <section><div className="gc-side-title"><h3>Members</h3><span>{hub.group.members.length}</span></div>{hub.group.members.map((member) => <div className="gc-member-row" key={member.userId}><MemberAvatar id={member.userId} name={member.user.fullName} avatarUrl={member.user.avatarUrl} /><span><strong>{member.user.fullName}</strong><small>{member.role === 'Project_Leader' ? 'Leader' : 'Member'}</small></span>{viewerIsLeader && member.userId !== userId ? <button type="button" className="gc-member-remove" aria-label={`Remove ${member.user.fullName} from the group`} title={`Remove ${member.user.fullName}`} onClick={() => setConfirmation({ title: 'Remove member?', description: `${member.user.fullName} will immediately lose access to this group’s chat, projects, and tasks.`, confirmLabel: 'Remove member', destructive: true, action: () => void removeMember(member.userId) })}>Remove</button> : <i />}</div>)}<button type="button" className="gc-manage-members" onClick={() => setManageOpen(true)}>{viewerIsLeader ? 'Manage members' : 'Add members'}</button></section>
@@ -617,13 +670,13 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
           <button className="gc-start-project" disabled={!viewerIsLeader || !hub.poll || hub.poll.open || !winningIdea} onClick={() => void startProject()}>Start Project</button>{viewerIsLeader && hub.poll && !hub.poll.open && !winningIdea ? <p>A project needs at least one vote and a clear winner. Start another vote if the result is tied.</p> : null}
           {hub?.poll && !hub.poll.open && viewerIsLeader ? <button type="button" className="btn-o btn-sm btn-red" onClick={() => setConfirmation({ title: 'Delete finished voting?', description: 'This removes the completed vote and its unused ideas. Ideas already turned into projects will be kept.', confirmLabel: 'Delete finished voting', destructive: true, action: () => void deleteFinishedVoting() })}>Delete finished voting</button> : null}
         </aside>
-      </> : <div className="gc-no-selection"><strong>Your workspace is ready</strong><span>Choose or create a group to begin a conversation.</span></div>}
+      </> : <div className="gc-no-selection"><strong>{selectedGroupId ? 'Loading conversation…' : 'Your workspace is ready'}</strong><span>{selectedGroupId ? 'Retrieving your group messages.' : 'Choose or create a group to begin a conversation.'}</span></div>}
     </div>
     {confirmation ? <ConfirmDialog {...confirmation} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation.action; setConfirmation(null); action(); }} /> : null}
     {manageOpen && hub ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setManageOpen(false); }}>
       <div className="modal-box hub-modal" role="dialog" aria-modal="true" aria-label={`Group Hub for ${hub.group.name}`}>
         <div className="modal-ttl"><span>Group Hub · {hub.group.name}</span><div className="hub-heading-actions"><button type="button" className="button primary" onClick={onIdeas}>Open ideas</button><button type="button" className="modal-close" aria-label="Close Group Hub" onClick={() => setManageOpen(false)}>×</button></div></div>
-        <GroupHubPanel hub={hub} userId={userId} notify={notify} onAdd={addMember} onPromote={promoteMember} onRemove={(memberUserId) => { const member = hub.group.members.find((item) => item.userId === memberUserId); setConfirmation({ title: 'Remove member?', description: `${member?.user.fullName ?? 'This member'} will immediately lose access to this group’s chat, projects, and tasks.`, confirmLabel: 'Remove member', destructive: true, action: () => void removeMember(memberUserId) }); return Promise.resolve(); }} onIdeas={onIdeas} />
+        <GroupHubPanel hub={hub} userId={userId} notify={notify} onAdd={addMember} onPromote={promoteMember} onDemote={demoteMember} onRemove={(memberUserId) => { const member = hub.group.members.find((item) => item.userId === memberUserId); setConfirmation({ title: 'Remove member?', description: `${member?.user.fullName ?? 'This member'} will immediately lose access to this group’s chat, projects, and tasks.`, confirmLabel: 'Remove member', destructive: true, action: () => void removeMember(memberUserId) }); return Promise.resolve(); }} onIdeas={onIdeas} />
       </div>
     </div> : null}
   </section>;

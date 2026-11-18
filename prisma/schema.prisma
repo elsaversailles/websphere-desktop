@@ -127,6 +127,7 @@ model User {
   archivedAt DateTime?
   createdAt DateTime @default(now())
   groupMembers GroupMember[]
+  groupRoleHistory GroupRoleHistory[]
   projectMembers ProjectMember[]
   admin Admin?
   notifications Notification[]
@@ -151,6 +152,7 @@ model Group {
   createdBy String
   createdAt DateTime @default(now())
   members GroupMember[]
+  roleHistory GroupRoleHistory[]
   joinCodes JoinCode[]
   ideas Idea[]
   projects Project[]
@@ -182,6 +184,17 @@ model GroupMember {
   group Group @relation(fields: [groupId], references: [id])
   user User @relation(fields: [userId], references: [id])
   @@unique([groupId, userId])
+}
+// Remembers a removed member's role without granting current group access.
+model GroupRoleHistory {
+  groupId String
+  userId String
+  role ProjectRole
+  updatedAt DateTime @updatedAt
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([groupId, userId])
+  @@index([userId])
 }
 model JoinCode {
   id String @id @default(cuid())

@@ -62,7 +62,7 @@ export class PushService {
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify(batch.map(({ token }) => ({
             to: token,
-            title: 'WebSphere',
+            title: notification.relatedType === 'chat' ? 'Group chat' : 'New activity',
             body: notification.message,
             sound: 'default',
             channelId: 'notifications',

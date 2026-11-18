@@ -42,6 +42,14 @@ export async function scanDeadlineReminders(prisma: PrismaClient, dispatchQueue:
   const short = (title: string, max: number) => title.length > max ? `${title.slice(0, max - 1)}…` : title;
 
   async function notify(userId: string, relatedId: string, relatedType: 'task' | 'project', deadline: Date, phase: ReminderPhase, message: string) {
+    if (!administrators.some((admin) => admin.id === userId)) {
+      const access = await prisma.project.findFirst({ where: {
+        ...(relatedType === 'project' ? { members: { some: { userId } } } : {}),
+        OR: [{ groupId: null }, { group: { members: { some: { userId } } } }],
+        ...(relatedType === 'task' ? { tasks: { some: { id: relatedId } } } : { id: relatedId }),
+      }, select: { id: true } });
+      if (!access) return;
+    }
     const preference = await prisma.notificationPreference.findUnique({ where: { userId } });
     if (relatedType === 'task' ? preference?.tasks === false : preference?.deadlines === false) return;
     const type = phase === 'overdue' ? 'delay_risk' : 'deadline_reminder';

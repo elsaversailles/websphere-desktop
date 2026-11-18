@@ -3,7 +3,7 @@ import { NotificationDispatchService } from './notification-dispatch.service.js'
 
 function fixture(status = 'active') {
   const notification = { id: 'reminder-1', userId: 'user-1', type: 'deadline_reminder', message: 'Task “Report” is due today.', relatedId: 'task-1', relatedType: 'task', user: { status, role: 'Project_Member' } };
-  const prisma = { notification: { findUnique: vi.fn().mockResolvedValue(notification) }, task: { findUnique: vi.fn().mockResolvedValue({ status: 'pending', deadline: new Date('2026-10-28'), createdBy: 'creator-1', assignments: [{ assigneeId: 'user-1' }] }) } };
+  const prisma = { project: { findFirst: vi.fn().mockResolvedValue({ id: 'project-1' }) }, notification: { findUnique: vi.fn().mockResolvedValue(notification) }, task: { findUnique: vi.fn().mockResolvedValue({ status: 'pending', deadline: new Date('2026-10-28'), createdBy: 'creator-1', assignments: [{ assigneeId: 'user-1' }] }) } };
   const events = { emitNotification: vi.fn() };
   const push = { deliver: vi.fn().mockResolvedValue(undefined) };
   const jobs = { enqueueNotificationEmail: vi.fn().mockResolvedValue(undefined) };
@@ -77,4 +77,14 @@ describe('scheduled notification delivery', () => {
     expect(events.emitNotification).toHaveBeenCalledTimes(shouldDeliver ? 1 : 0);
     expect(push.deliver).toHaveBeenCalledTimes(shouldDeliver ? 1 : 0);
   });
+});
+
+
+it('does not dispatch a reminder queued before group access was revoked', async () => {
+  const { service, prisma, events, jobs, push } = fixture();
+  prisma.project.findFirst.mockResolvedValueOnce(null as any);
+  await service.deliver('reminder-1');
+  expect(events.emitNotification).not.toHaveBeenCalled();
+  expect(jobs.enqueueNotificationEmail).not.toHaveBeenCalled();
+  expect(push.deliver).not.toHaveBeenCalled();
 });

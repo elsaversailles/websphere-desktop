@@ -9,7 +9,7 @@ function fixture(disabled = false) {
   const deliver = vi.fn().mockResolvedValue(undefined);
   const service = Object.create(AppService.prototype) as AppService;
   Object.assign(service, {
-    prisma: { notification: { create }, notificationPreference: { findMany } },
+    prisma: { project: { findFirst: vi.fn().mockResolvedValue({ groupId: null }) }, notification: { create }, notificationPreference: { findMany } },
     jobs: { enqueueNotificationEmail },
     events: { emitNotification },
     push: { deliver },
@@ -60,4 +60,13 @@ describe('notification email queueing', () => {
     expect(create.mock.calls[0][0].data.message.length).toBeLessThanOrEqual(191);
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ relatedId: 'task-1', relatedType: 'task' }));
   });
+  it('filters departed group members before live, push, and email fan-out while retaining admin oversight', async () => {
+    const { service, create, emitNotification } = fixture();
+    Object.assign(service.prisma, { project: { findFirst: vi.fn().mockResolvedValue({ groupId: 'group' }) }, user: { findMany: vi.fn().mockResolvedValue([{ id: 'current' }, { id: 'admin' }]) } });
+    const result = await service.notify(['former', 'current', 'admin'], 'task_update', 'Status changed', 'task', 'task');
+    expect(result.delivered).toBe(2);
+    expect(create.mock.calls.map(([query]) => query.data.userId)).toEqual(['current', 'admin']);
+    expect(emitNotification).not.toHaveBeenCalledWith('former', expect.anything());
+  });
+
 });

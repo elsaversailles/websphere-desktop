@@ -3,7 +3,8 @@ self.addEventListener('push', (event) => {
   try { payload = { ...payload, ...event.data.json() }; } catch { /* A malformed push should still show a safe notification. */ }
   event.waitUntil(self.registration.showNotification(payload.title, {
     body: payload.body,
-    badge: '/favicon.ico',
+    icon: '/favicon-192.png',
+    badge: '/favicon-192.png',
     data: { url: payload.url || '/' },
   }));
 });

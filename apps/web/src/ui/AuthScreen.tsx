@@ -236,7 +236,7 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <AuthField label="Email Address" name="email" type="email" placeholder="your@email.com" />
       <label className="auth-field"><span className="lbl">Category</span><select className="afield" name="category" defaultValue="bug_report"><option value="bug_report">Report a problem</option><option value="account_reactivation">Account access</option><option value="password_concern">Password concern</option><option value="account_deletion">Account deletion</option><option value="other">Other request</option></select></label>
       <AuthField label="Subject" name="subject" placeholder="Briefly describe the issue" />
-      <label className="auth-field"><span className="lbl">Details<span className="required-mark" aria-hidden="true"> *</span></span><textarea className="afield" name="body" required rows={4} maxLength={5000} placeholder="Include anything that will help us understand the request." /></label>
+      <label className="auth-field"><span className="lbl">Details<span className="required-mark" aria-hidden="true"> *</span></span><textarea className="afield" name="body" required rows={4} maxLength={200} placeholder="Include anything that will help us understand the request." /></label>
       <button className="abtn" disabled={busy}>{busy ? 'Sending…' : 'Send request'}</button>
       <p className="alink"><button type="button" onClick={() => changeMode('login')}>Back to sign in</button></p>
     </form> : null}
