@@ -24,7 +24,8 @@ describe('notification email delivery', () => {
   it('sends the notification through the configured SMTP transport', async () => {
     await deliverNotificationEmail(fixture(), 'notification-1', env);
     expect(nodemailer.createTransport).toHaveBeenCalledWith({ host: env.SES_HOST, port: 587, secure: false, auth: { user: env.SES_USER, pass: env.SES_PASSWORD } });
-    expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: 'recipient@example.test', from: env.SES_FROM, text: expect.stringContaining('Task <review> assigned'), html: expect.stringContaining('Task &lt;review&gt; assigned') }));
+    expect(sendMail.mock.calls[0][0].html).toContain('https://websphere.cloud/email-logo.png');
+    expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: 'recipient@example.test', from: { name: 'WebSphere', address: env.SES_FROM }, text: expect.stringContaining('Task <review> assigned'), html: expect.stringContaining('Task &lt;review&gt; assigned') }));
   });
 
   it('respects the email opt-out and inactive account status', async () => {
