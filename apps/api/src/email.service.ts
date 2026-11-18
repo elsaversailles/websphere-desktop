@@ -27,7 +27,10 @@ export class EmailService {
 
   private async send(message: Parameters<ReturnType<typeof nodemailer.createTransport>['sendMail']>[0], unavailableMessage: string) {
     try {
-      await this.transport().sendMail(message);
+      const origin = this.config.get('WEB_ORIGIN').split(',')[0].trim();
+      const logo = new URL('/email-logo.png', origin).toString();
+      const html = typeof message.html === 'string' ? `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto"><p><img src="${logo}" width="48" height="48" alt="" style="vertical-align:middle;border-radius:10px"> <strong>WebSphere</strong></p>${message.html}</div>` : message.html;
+      await this.transport().sendMail({ ...message, from: { name: 'WebSphere', address: this.config.get('SES_FROM') }, html });
     } catch {
       throw new ServiceUnavailableException({ code: 'EMAIL_DELIVERY_FAILED', message: unavailableMessage });
     }

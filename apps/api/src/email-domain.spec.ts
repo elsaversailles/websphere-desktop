@@ -31,3 +31,20 @@ describe('email domain migration', () => {
     expect(send.mock.calls[0][0]).toMatchObject({ to: 'support@websphere.cloud', replyTo: 'member@example.com' });
   });
 });
+
+
+describe('transactional email branding', () => {
+  it('keeps the configured sender address and reset link with the app display name and logo', async () => {
+    const sendMail = vi.fn().mockResolvedValue({});
+    const values = { WEB_ORIGIN: 'https://websphere.cloud,https://websphere.fun', SES_FROM: 'hello@websphere.cloud' };
+    const service = Object.assign(Object.create(EmailService.prototype), {
+      config: { get: (key: string) => values[key] }, transport: () => ({ sendMail }),
+    }) as EmailService;
+    await service.sendPasswordReset('recipient@example.test', 'test-token');
+    expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({
+      from: { name: 'WebSphere', address: 'hello@websphere.cloud' },
+      to: 'recipient@example.test', text: expect.stringContaining('https://websphere.cloud/?resetToken=test-token'),
+      html: expect.stringContaining('https://websphere.cloud/email-logo.png'),
+    }));
+  });
+});
