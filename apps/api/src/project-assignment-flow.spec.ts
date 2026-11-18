@@ -19,8 +19,9 @@ describe('project creation assignment flow', () => {
     let committed = false;
     const prisma: any = {
       project: {
+      findFirst: vi.fn().mockResolvedValue({ groupId: null }),
         create: vi.fn(async ({ data }) => {
-          project = { ...data, id: 'project-1', status: 'active', group: { name: 'Research group' } };
+          project = { ...data, members: data.members.create, id: 'project-1', status: 'active', group: { name: 'Research group' } };
           return project;
         }),
         findMany: vi.fn(async () => [{ ...project, tasks }]),

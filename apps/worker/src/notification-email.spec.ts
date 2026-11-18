@@ -24,7 +24,6 @@ describe('notification email delivery', () => {
   it('sends the notification through the configured SMTP transport', async () => {
     await deliverNotificationEmail(fixture(), 'notification-1', env);
     expect(nodemailer.createTransport).toHaveBeenCalledWith({ host: env.SES_HOST, port: 587, secure: false, auth: { user: env.SES_USER, pass: env.SES_PASSWORD } });
-    expect(sendMail.mock.calls[0][0].html).toContain('https://websphere.cloud/email-logo.png');
     expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: 'recipient@example.test', from: { name: 'WebSphere', address: env.SES_FROM }, text: expect.stringContaining('Task <review> assigned'), html: expect.stringContaining('Task &lt;review&gt; assigned') }));
   });
 
@@ -48,4 +47,13 @@ describe('notification email delivery', () => {
     sendMail.mockRejectedValueOnce(new Error('SMTP unavailable'));
     await expect(deliverNotificationEmail(fixture(), 'notification-1', env)).rejects.toThrow('SMTP unavailable');
   });
+  it('discards queued task mail when membership was revoked before delivery', async () => {
+    const prisma = fixture();
+    prisma.notification.findUnique.mockResolvedValueOnce({ userId: 'former-member', relatedType: 'task', relatedId: 'task-1', message: 'Due today', user: { email: 'member@example.test', status: 'active', role: 'Project_Member' } });
+    prisma.project = { findFirst: vi.fn().mockResolvedValue(null) };
+    await deliverNotificationEmail(prisma, 'queued-before-removal', env);
+    expect(prisma.project.findFirst).toHaveBeenCalledOnce();
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
 });

@@ -4,11 +4,10 @@ import './landing-reference.css';
 
 type LandingPageProps = { onGetStarted: (mode: 'login' | 'register') => void; notify: (message: string) => void };
 
-export function LandingPage({ onGetStarted, notify }: LandingPageProps) {
+export function LandingPage({ onGetStarted }: LandingPageProps) {
   function handleClick(event: MouseEvent<HTMLElement>) {
-    const target = (event.target as Element).closest<HTMLElement>('[data-auth], [data-android]');
+    const target = (event.target as Element).closest<HTMLElement>('[data-auth]');
     if (target?.dataset.auth === 'login' || target?.dataset.auth === 'register') onGetStarted(target.dataset.auth);
-    if (target?.dataset.android) notify('The Android app is coming soon!');
   }
 
   return <main className="landing-reference" onClick={handleClick} dangerouslySetInnerHTML={{ __html: landingMarkup }} />;

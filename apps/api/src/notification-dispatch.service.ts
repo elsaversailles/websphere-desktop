@@ -38,6 +38,14 @@ export class NotificationDispatchService implements OnApplicationBootstrap, OnAp
       const responsible = task.assignments.length ? task.assignments.some((assignment) => assignment.assigneeId === notification.userId) : task.createdBy === notification.userId;
       if (!responsible && notification.user.role !== 'Administrator') return;
     }
+    if (notification.user.role !== 'Administrator' && notification.relatedId && ['task', 'project'].includes(notification.relatedType ?? '')) {
+      const access = await this.prisma.project.findFirst({ where: {
+        ...(notification.relatedType === 'project' ? { members: { some: { userId: notification.userId } } } : {}),
+        OR: [{ groupId: null }, { group: { members: { some: { userId: notification.userId } } } }],
+        ...(notification.relatedType === 'task' ? { tasks: { some: { id: notification.relatedId } } } : { id: notification.relatedId }),
+      }, select: { id: true } });
+      if (!access) return;
+    }
     // Do not expose the included user record in websocket/push payloads.
     const { user, ...payload } = notification;
     await this.jobs.enqueueNotificationEmail(notification.id);

@@ -18,7 +18,7 @@ function fixture() {
   return { service, prisma, notifyTaskStatus };
 }
 const caller = { id: 'member-1', role: 'Project_Member', tv: 0 } as const;
-const link = { provider: 'google' as const, title: 'Report file', externalUrl: 'https://example.com/report' };
+const link = { provider: 'google' as const, title: 'Report file', externalUrl: 'https://docs.google.com/document/d/report/edit' };
 
 describe('manual task file links', () => {
   it('saves a link without a connection and updates the assigned task status', async () => {
@@ -67,14 +67,21 @@ describe('manual task file links', () => {
   });
 
   it.each([
-    ['google-docs', 'google'], ['microsoft-word', 'microsoft'], ['microsoft-excel', 'microsoft'],
+    ['google-docs', 'google'], ['google-forms', 'google'], ['microsoft-word', 'microsoft'], ['microsoft-excel', 'microsoft'],
   ] as const)('stores and returns a %s link', async (toolKind, provider) => {
     const { service, prisma } = fixture();
-    const input = { ...link, provider, toolKind };
+    const externalUrl = toolKind === 'google-forms' ? 'https://forms.gle/example' : provider === 'microsoft' ? 'https://tenant.sharepoint.com/report' : link.externalUrl;
+    const input = { ...link, provider, toolKind, externalUrl };
     expect(resourceLinkSchema.safeParse(input).success).toBe(true);
     const result = await service.linkTaskResource(caller, 'task-1', input);
     expect(prisma.linkedResource.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ provider, toolKind, externalUrl: input.externalUrl }) }));
     expect(result.externalUrl).toBe(input.externalUrl);
+  });
+
+  it.each(['https://canva.com/design/123', 'https://figma.com/design/123', 'https://docs.google.com.evil.test/document/d/123', 'https://docs.google.com/forms/d/123'])('rejects a mismatched Docs URL before writing: %s', async (externalUrl) => {
+    const { service, prisma } = fixture();
+    await expect(service.linkTaskResource(caller, 'task-1', { ...link, toolKind: 'google-docs', externalUrl })).rejects.toMatchObject({ status: 400 });
+    expect(prisma.linkedResource.create).not.toHaveBeenCalled();
   });
 
   it('rejects unsafe or malformed links', () => {

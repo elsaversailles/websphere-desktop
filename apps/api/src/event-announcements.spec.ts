@@ -10,7 +10,7 @@ describe('event announcements', () => {
     const service = Object.assign(Object.create(AppService.prototype), { prisma }) as AppService;
     expect(await service.eventAnnouncements(caller, 4)).toEqual([expect.objectContaining({ id: event.id, authorName: 'Team member', title: event.title, project: event.project })]);
     expect(prisma.calendarEvent.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { source: 'websphere', OR: [{ ownerId: caller.id }, { project: { members: { some: { userId: caller.id } } } }] }, take: 4,
+      where: { source: 'websphere', OR: [{ ownerId: caller.id, projectId: null }, { project: { members: { some: { userId: caller.id } }, OR: [{ groupId: null }, { group: { members: { some: { userId: caller.id } } } }] } }] }, take: 4,
     }));
     await service.eventAnnouncements(caller);
     expect(prisma.calendarEvent.findMany.mock.calls[1][0]).not.toHaveProperty('take');

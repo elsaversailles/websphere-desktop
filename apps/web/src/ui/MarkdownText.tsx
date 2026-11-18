@@ -1,14 +1,15 @@
+import { parseMarkdownBlocks } from './markdown';
 import { Fragment, type ReactNode } from 'react';
 
 export function MarkdownText({ source }: { source: string }) {
-  const blocks = source.trim().split(/\n{2,}/);
+  const blocks = parseMarkdownBlocks(source);
   return <>{blocks.map((block, index) => {
-    const lines = block.split('\n');
-    if (lines.every((line) => /^[-*]\s+/.test(line))) return <ul key={index}>{lines.map((line, lineIndex) => <li key={lineIndex}>{inline(line.replace(/^[-*]\s+/, ''))}</li>)}</ul>;
-    if (lines.every((line) => /^\d+\.\s+/.test(line))) return <ol key={index}>{lines.map((line, lineIndex) => <li key={lineIndex}>{inline(line.replace(/^\d+\.\s+/, ''))}</li>)}</ol>;
-    const heading = block.match(/^(#{1,3})\s+(.+)$/);
-    if (heading) return <h3 key={index}>{inline(heading[2])}</h3>;
-    return <p key={index}>{lines.map((line, lineIndex) => <Fragment key={lineIndex}>{lineIndex ? <br /> : null}{inline(line)}</Fragment>)}</p>;
+    if (block.kind === 'list') {
+      const items = block.items.map((item, itemIndex) => <li key={itemIndex} value={item.number} style={item.indent ? { marginLeft: Math.min(item.indent, 12) * 4 } : undefined}>{inline(item.text)}</li>);
+      return block.ordered ? <ol key={index} start={block.items[0]?.number}>{items}</ol> : <ul key={index}>{items}</ul>;
+    }
+    if (block.kind === 'heading') return <h3 key={index}>{inline(block.text)}</h3>;
+    return <p key={index}>{inline(block.text)}</p>;
   })}</>;
 }
 

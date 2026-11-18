@@ -115,6 +115,6 @@ describe('task authorization and persistence', () => {
     const service = Object.assign(Object.create(AppService.prototype), { prisma: { task: { findMany }, user: { findMany: vi.fn().mockResolvedValue([]) } } }) as AppService;
     const tasks = await service.myTasks(assignee, { sort: 'assigned' });
     expect(tasks.map((task: any) => task.id)).toEqual(['old-task-new-assignment', 'new-task']);
-    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { assignments: { some: { assigneeId: assignee.id, active: true } } } }));
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ assignments: { some: { assigneeId: assignee.id, active: true } } }) }));
   });
 });

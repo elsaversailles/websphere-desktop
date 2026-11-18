@@ -3,10 +3,13 @@ export { SCHEDULING_TIME_ZONE, sameScheduleDate, scheduleDateErrors, schedulingD
 
 export const roles = ['Administrator', 'Project_Leader', 'Project_Member'] as const;
 export type Role = (typeof roles)[number];
+export const CHAT_MESSAGE_MAX_LENGTH = 10_000;
+export const chatMessageSchema = z.object({ groupId: z.string().min(1), body: z.string().trim().min(1).max(CHAT_MESSAGE_MAX_LENGTH, 'Messages can contain up to 10,000 characters') });
+
 export type ApiError = { code: string; message: string; fields?: Record<string, string> };
 export type AckDto = { ok: boolean; error?: ApiError };
 export type CallKind = 'voice' | 'video';
-export type CallParticipant = { socketId: string; userId: string; fullName?: string; muted?: boolean; cameraEnabled?: boolean };
+export type CallParticipant = { socketId: string; userId: string; fullName?: string; avatarUrl?: string | null; muted?: boolean; cameraEnabled?: boolean };
 export type CallSignal = { type: 'offer' | 'answer' | 'ice-candidate'; sdp?: string; candidate?: RTCIceCandidateInit | null };
 export type CallHostAction = 'mute-all' | 'remove-participant' | 'end-call';
 export type IceServerConfig = { urls: string | string[]; username?: string; credential?: string };
@@ -152,7 +155,7 @@ export const taskEditSchema = taskSchema.partial().extend({
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one task change' });
 export const resourceLinkSchema = z.object({
   connectionId: z.string().cuid().optional(),
-  toolKind: z.enum(['google-docs', 'microsoft-word', 'microsoft-excel']).nullable().optional(),
+  toolKind: z.enum(['google-docs', 'google-forms', 'microsoft-word', 'microsoft-excel']).nullable().optional(),
   provider: z.enum(['google', 'microsoft', 'trello', 'asana', 'notion', 'canva']).optional(),
   title: z.string().trim().min(2).max(180),
   externalUrl: z.string().url().max(4000).refine((value) => /^https?:\/\//i.test(value), 'Use an HTTP or HTTPS link'),
@@ -168,13 +171,24 @@ export const calendarEventSchema = z.object({ title: z.string().trim().min(2), t
 /** `durationHours` is how long members may vote; null/omitted means no time limit (the leader closes it by hand). Up to 30 days. */
 export const pollCreateSchema = z.object({ ideaIds: z.array(z.string().min(1)).min(2), durationHours: z.number().positive().max(720).nullable().optional() });
 export const pollExtendSchema = z.object({ hours: z.number().positive().max(720) });
-export const supportTicketSchema = z.object({ category: z.enum(['account_reactivation','account_deletion','password_concern','bug_report','other']), subject: z.string().trim().min(2).max(180), body: z.string().trim().min(1).max(5000) });
+export const supportTicketSchema = z.object({ category: z.enum(['account_reactivation','account_deletion','password_concern','bug_report','other']), subject: z.string().trim().min(2).max(180), body: z.string().trim().min(1).max(200) });
+// Feedback from existing clients shares the ticket queue and has its own text limit.
+const ratedFeedbackSchema = supportTicketSchema.extend({
+  category: z.literal('other'),
+  subject: z.string().regex(/^Feedback · [1-5]\/5 stars$/),
+  body: z.string().max(3913),
+}).refine(({ subject, body }) => {
+  const rating = subject.match(/[1-5]/)?.[0];
+  const prefix = `Rating: ${rating}/5\n\n`;
+  return body.startsWith(prefix) && !!body.slice(prefix.length).trim();
+});
+export const signedInTicketSchema = z.union([supportTicketSchema, ratedFeedbackSchema]);
 export const publicSupportTicketSchema = supportTicketSchema.extend({ email: requiredEmail.max(320) });
 export const ticketStatuses = ['pending', 'in_progress', 'resolved', 'rejected'] as const;
 export type TicketStatus = (typeof ticketStatuses)[number];
 /** What people see for each stored ticket status. */
 export const ticketStatusLabels: Record<TicketStatus, string> = { pending: 'Ongoing', in_progress: 'In Progress', resolved: 'Completed', rejected: 'Declined' };
-export const ticketUpdateSchema = z.object({ status: z.enum(ticketStatuses), response: z.string().trim().max(2000).optional() });
+export const ticketUpdateSchema = z.object({ status: z.enum(ticketStatuses), response: z.string().trim().max(200).optional() });
 export const aiAskSchema = z.object({ prompt: z.string().trim().min(1).max(12000), scopeType: z.enum(['project','group','idea']).optional(), scopeId: z.string().cuid().optional(), parts: z.array(z.object({ type: z.string() })).optional() });
 export const announcementSchema = z.object({ title: z.string().trim().min(2).max(180), body: z.string().trim().min(1), priority: z.enum(['normal','important','urgent']).default('normal') });
 export const notificationPreferencesSchema = z.object({
@@ -238,3 +252,5 @@ export type ClientToServerEvents = {
 };
 
 export const apiError = (code: string, message: string, fields?: Record<string, string>): ApiError => ({ code, message, ...(fields ? { fields } : {}) });
+
+export { resourceLinkError } from './resource-link.js';

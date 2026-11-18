@@ -5,8 +5,11 @@ function setup() {
   const service = Object.create(AppService.prototype) as AppService;
   const member = vi.fn().mockResolvedValue({});
   const update = vi.fn().mockResolvedValue({});
-  Object.assign(service, { member, prisma: { groupMember: { update } } });
-  return { service, member, update };
+  const projectUpdate = vi.fn().mockResolvedValue({ count: 2 });
+  const findUnique = vi.fn().mockResolvedValue({ role: 'Project_Leader' });
+  const prisma = { group: { findUnique: vi.fn().mockResolvedValue({ name: 'Capstone' }) }, $queryRaw: vi.fn().mockResolvedValue([]), groupRoleHistory: { upsert: vi.fn() }, groupMember: { update, findUnique }, projectMember: { updateMany: projectUpdate }, $transaction: async (fn: any) => fn(prisma) };
+  Object.assign(service, { member, prisma, notify: vi.fn().mockResolvedValue(undefined) });
+  return { service, member, update, projectUpdate, findUnique };
 }
 const caller = { id: 'alice' } as any;
 
@@ -48,16 +51,32 @@ describe('group chat preferences and leadership', () => {
     expect(update).toHaveBeenLastCalledWith(expect.objectContaining({ data: { chatHiddenAt: null, chatUnread: false } }));
   });
   it('requires a group leader and a target member before promoting', async () => {
-    const { service, member, update } = setup();
+    const { service, findUnique, update, projectUpdate } = setup();
     await service.promoteGroupMember(caller, 'group', 'bob');
-    expect(member).toHaveBeenNthCalledWith(1, 'group', 'alice', true);
-    expect(member).toHaveBeenNthCalledWith(2, 'group', 'bob');
+    expect(projectUpdate).toHaveBeenCalledWith({ where: { userId: 'bob', project: { groupId: 'group' } }, data: { role: 'Project_Leader' } });
+    expect(findUnique).toHaveBeenNthCalledWith(1, { where: { groupId_userId: { groupId: 'group', userId: 'alice' } } });
+    expect(findUnique).toHaveBeenNthCalledWith(2, { where: { groupId_userId: { groupId: 'group', userId: 'bob' } } });
     expect(update).toHaveBeenCalledWith({ where: { groupId_userId: { groupId: 'group', userId: 'bob' } }, data: { role: 'Project_Leader' } });
+    expect((service as any).notify).toHaveBeenCalledWith(['bob'], expect.anything(), expect.stringContaining('Capstone'), 'group', 'group');
   });
   it('does not promote when the caller lacks leader permission', async () => {
-    const { service, member, update } = setup();
-    member.mockRejectedValueOnce(new Error('Forbidden'));
-    await expect(service.promoteGroupMember(caller, 'group', 'bob')).rejects.toThrow('Forbidden');
+    const { service, findUnique, update } = setup();
+    findUnique.mockResolvedValueOnce({ role: 'Project_Member' });
+    await expect(service.promoteGroupMember(caller, 'group', 'bob')).rejects.toMatchObject({ status: 403 });
     expect(update).not.toHaveBeenCalled();
   });
+  it('honors an earlier group promotion for a member of that group’s project', async () => {
+    const service = Object.create(AppService.prototype) as AppService;
+    Object.assign(service, { prisma: { projectMember: { findUnique: vi.fn().mockResolvedValue({ userId: 'bob', role: 'Project_Member', project: { group: { members: [{ userId: 'bob', role: 'Project_Leader' }] } } }) } } });
+    await expect(service.projectMember('project', 'bob', true)).resolves.toMatchObject({ role: 'Project_Leader' });
+  });
+
+  it('does not grant leader access in an unrelated project or without project membership', async () => {
+    const service = Object.create(AppService.prototype) as AppService;
+    const findUnique = vi.fn().mockResolvedValueOnce({ userId: 'bob', role: 'Project_Member', project: { group: { members: [] } } }).mockResolvedValueOnce(null);
+    Object.assign(service, { prisma: { projectMember: { findUnique } } });
+    await expect(service.projectMember('unrelated', 'bob', true)).rejects.toMatchObject({ status: 403 });
+    await expect(service.projectMember('not-a-member', 'bob', true)).rejects.toMatchObject({ status: 403 });
+  });
+
 });

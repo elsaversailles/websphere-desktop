@@ -14,7 +14,7 @@ import { DomainEventsService } from './domain-events.service.js';
 import { AuditLogService } from './audit-log.service.js';
 import { PushService } from './push.service.js';
 import { LocalStorageService } from './local-storage.service.js';
-import { passwordRequirements, sameScheduleDate, scheduleDateErrors, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
+import { resourceLinkError, passwordRequirements, sameScheduleDate, scheduleDateErrors, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
@@ -40,6 +40,7 @@ const passwordPolicyFailed = (reason: PasswordRequirementId) => fail('VALIDATION
 type Caller = { id: string; role: Role; tv: number; sessionId?: string };
 type SessionClient = 'web' | 'mobile';
 const taskProgress = (status: string) => status === 'completed' ? 100 : status === 'for_review' ? 75 : status === 'ongoing' ? 50 : 0;
+const averageTaskProgress = (tasks: Array<{ status: string }>) => { const average = tasks.length ? tasks.reduce((sum, task) => sum + taskProgress(task.status), 0) / tasks.length : 0; return average < 100 ? Math.min(99, Math.round(average)) : 100; };
 const ideaContentHash = (idea: { title: string; body?: string | null; category?: string | null }) =>
   createHash('sha256').update(JSON.stringify([idea.title, idea.body ?? '', idea.category ?? 'Academic Project'])).digest('hex');
 const taskPrediction = (task: any, now: Date) => {
@@ -239,12 +240,12 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async createDatabaseBackup(caller: Caller) {
     await this.admin(caller);
-    const [users, admins, groups, announcements, groupMembers, joinCodes, messages, projects, projectMembers, tasks, dependencies, assignments, comments, workflow, ideas, polls, pollOptions, votes, calendarEvents, notifications, preferences, pushSubscriptions, mobileTokens, tools, connections, resources, usage, aiInteractions, embeddings, snapshots, tickets, settings, auditLogs, systemNotices, backups] = await this.prisma.$transaction([
-      this.prisma.user.findMany(), this.prisma.admin.findMany(), this.prisma.group.findMany(), this.prisma.announcement.findMany(), this.prisma.groupMember.findMany(), this.prisma.joinCode.findMany(), this.prisma.chatMessage.findMany(), this.prisma.project.findMany(), this.prisma.projectMember.findMany(), this.prisma.task.findMany(), this.prisma.taskDependency.findMany(), this.prisma.taskAssignment.findMany(), this.prisma.taskComment.findMany(), this.prisma.workflowEvent.findMany(), this.prisma.idea.findMany(), this.prisma.ideaPoll.findMany(), this.prisma.pollOption.findMany(), this.prisma.vote.findMany(), this.prisma.calendarEvent.findMany(), this.prisma.notification.findMany(), this.prisma.notificationPreference.findMany(), this.prisma.pushSubscription.findMany(), this.prisma.mobilePushToken.findMany(), this.prisma.connectedTool.findMany(), this.prisma.toolConnection.findMany(), this.prisma.linkedResource.findMany(), this.prisma.toolUsage.findMany(), this.prisma.aiInteraction.findMany(), this.prisma.embedding.findMany(), this.prisma.analyticsSnapshot.findMany(), this.prisma.supportTicket.findMany(), this.prisma.systemSetting.findMany(), this.prisma.auditLog.findMany(), this.prisma.systemNotice.findMany(), this.prisma.systemBackup.findMany(),
+    const [groupRoleHistory, users, admins, groups, announcements, groupMembers, joinCodes, messages, projects, projectMembers, tasks, dependencies, assignments, comments, workflow, ideas, polls, pollOptions, votes, calendarEvents, notifications, preferences, pushSubscriptions, mobileTokens, tools, connections, resources, usage, aiInteractions, embeddings, snapshots, tickets, settings, auditLogs, systemNotices, backups] = await this.prisma.$transaction([
+      this.prisma.groupRoleHistory.findMany(), this.prisma.user.findMany(), this.prisma.admin.findMany(), this.prisma.group.findMany(), this.prisma.announcement.findMany(), this.prisma.groupMember.findMany(), this.prisma.joinCode.findMany(), this.prisma.chatMessage.findMany(), this.prisma.project.findMany(), this.prisma.projectMember.findMany(), this.prisma.task.findMany(), this.prisma.taskDependency.findMany(), this.prisma.taskAssignment.findMany(), this.prisma.taskComment.findMany(), this.prisma.workflowEvent.findMany(), this.prisma.idea.findMany(), this.prisma.ideaPoll.findMany(), this.prisma.pollOption.findMany(), this.prisma.vote.findMany(), this.prisma.calendarEvent.findMany(), this.prisma.notification.findMany(), this.prisma.notificationPreference.findMany(), this.prisma.pushSubscription.findMany(), this.prisma.mobilePushToken.findMany(), this.prisma.connectedTool.findMany(), this.prisma.toolConnection.findMany(), this.prisma.linkedResource.findMany(), this.prisma.toolUsage.findMany(), this.prisma.aiInteraction.findMany(), this.prisma.embedding.findMany(), this.prisma.analyticsSnapshot.findMany(), this.prisma.supportTicket.findMany(), this.prisma.systemSetting.findMany(), this.prisma.auditLog.findMany(), this.prisma.systemNotice.findMany(), this.prisma.systemBackup.findMany(),
     ]);
     const now = new Date();
     const fileName = `websphere-backup-${now.toISOString().replace(/[:.]/g, '-')}-${randomBytes(4).toString('hex')}.json`;
-    const snapshot = JSON.stringify({ format: 'websphere-database-backup', version: 1, generatedAt: now.toISOString(), data: { users, admins, groups, announcements, groupMembers, joinCodes, messages, projects, projectMembers, tasks, dependencies, assignments, comments, workflow, ideas, polls, pollOptions, votes, calendarEvents, notifications, preferences, pushSubscriptions, mobileTokens, tools, connections, resources, usage, aiInteractions, embeddings, snapshots, tickets, settings, auditLogs, systemNotices, backups } });
+    const snapshot = JSON.stringify({ format: 'websphere-database-backup', version: 1, generatedAt: now.toISOString(), data: { groupRoleHistory, users, admins, groups, announcements, groupMembers, joinCodes, messages, projects, projectMembers, tasks, dependencies, assignments, comments, workflow, ideas, polls, pollOptions, votes, calendarEvents, notifications, preferences, pushSubscriptions, mobileTokens, tools, connections, resources, usage, aiInteractions, embeddings, snapshots, tickets, settings, auditLogs, systemNotices, backups } });
     const bytes = await this.storage.saveBackup(fileName, snapshot);
     const backup = await this.prisma.systemBackup.create({ data: { fileName, bytes, createdBy: caller.id } });
     await this.systemNotice('Database backup created', `${fileName} was created successfully.`, 'backup');
@@ -481,12 +482,36 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return { ok: true };
   }
   async member(groupId: string, userId: string, leader = false) { const membership = await this.prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId } } }); if (!membership || (leader && membership.role !== ProjectRole.Project_Leader)) fail('RBAC_FORBIDDEN', 'Group membership does not grant this action', 403); return membership; }
-  async projectMember(projectId: string, userId: string, leader = false) { const membership = await this.prisma.projectMember.findUnique({ where: { projectId_userId: { projectId, userId } } }); if (!membership || (leader && membership.role !== ProjectRole.Project_Leader)) fail('RBAC_FORBIDDEN', 'Project membership does not grant this action', 403); return membership; }
+  private groupAccessWhere(userId: string) {
+    return { OR: [{ groupId: null }, { group: { members: { some: { userId } } } }] };
+  }
+  private projectAccessWhere(userId: string) {
+    return { members: { some: { userId } }, ...this.groupAccessWhere(userId) };
+  }
+  async projectMember(projectId: string, userId: string, leader = false) {
+    const membership = await this.prisma.projectMember.findUnique({ where: { projectId_userId: { projectId, userId } }, include: { project: { select: { group: { select: { members: { where: { userId }, select: { userId: true, role: true } } } } } } } });
+    const group = membership?.project?.group;
+    if (group && !group.members.length) fail('RBAC_FORBIDDEN', 'Current group membership is required', 403);
+    const effective = group ? { ...membership, role: group.members[0]?.role } : membership;
+    if (!effective || (leader && effective.role !== ProjectRole.Project_Leader)) fail('RBAC_FORBIDDEN', 'Project membership does not grant this action', 403);
+    return effective;
+  }
   code() { return `${randomBytes(3).toString('hex').slice(0, 3)}-${randomBytes(3).toString('hex').slice(0, 3)}-${randomBytes(3).toString('hex').slice(0, 3)}`; }
   async createGroup(caller: Caller, name: string) { const group = await this.prisma.group.create({ data: { name, createdBy: caller.id, members: { create: { userId: caller.id, role: ProjectRole.Project_Leader } } } }); const code = await this.issueJoinCode(group.id); return { ...group, joinCode: code }; }
   /** Mints a fresh, unique join code for a group (30-day expiry). Used at creation and to self-heal expired codes. */
   async issueJoinCode(groupId: string) { let code = this.code(); while (await this.prisma.joinCode.findUnique({ where: { code } })) code = this.code(); await this.prisma.joinCode.create({ data: { groupId, code, expiresAt: new Date(Date.now() + 30 * 864e5) } }); return code; }
-  async joinGroup(caller: Caller, code: string) { const entry = await this.prisma.joinCode.findUnique({ where: { code }, include: { group: true } }); if (!entry || !entry.active || (entry.expiresAt && entry.expiresAt < new Date())) fail('INVALID_JOIN_CODE', 'Join code is invalid or expired', 400); await this.prisma.groupMember.upsert({ where: { groupId_userId: { groupId: entry.groupId, userId: caller.id } }, update: {}, create: { groupId: entry.groupId, userId: caller.id } }); return entry.group; }
+  private async restoreAssignedProjects(userId: string, groupId: string) {
+    const projects = await this.prisma.project.findMany({ where: { groupId, OR: [{ createdBy: userId }, { tasks: { some: { assignments: { some: { assigneeId: userId, active: true } } } } }] }, select: { id: true } });
+    if (projects.length) await this.prisma.projectMember.createMany({ data: projects.map((project) => ({ projectId: project.id, userId })), skipDuplicates: true });
+  }
+  private async rememberedGroupRole(groupId: string, userId: string) {
+    const history = await this.prisma.groupRoleHistory.findUnique({ where: { groupId_userId: { groupId, userId } } });
+    if (history) return history.role;
+    // Recover leadership from pre-history project rows for members already removed.
+    const previous = await this.prisma.projectMember.findFirst({ where: { userId, project: { groupId }, role: ProjectRole.Project_Leader } });
+    return previous ? ProjectRole.Project_Leader : ProjectRole.Project_Member;
+  }
+  async joinGroup(caller: Caller, code: string) { const entry = await this.prisma.joinCode.findUnique({ where: { code }, include: { group: true } }); if (!entry || !entry.active || (entry.expiresAt && entry.expiresAt < new Date())) fail('INVALID_JOIN_CODE', 'Join code is invalid or expired', 400); const role = await this.rememberedGroupRole(entry.groupId, caller.id); await this.prisma.groupMember.upsert({ where: { groupId_userId: { groupId: entry.groupId, userId: caller.id } }, update: {}, create: { groupId: entry.groupId, userId: caller.id, role } }); await this.restoreAssignedProjects(caller.id, entry.groupId); return entry.group; }
   async groups(caller: Caller) { return this.prisma.group.findMany({ where: { members: { some: { userId: caller.id } } }, include: { members: { where: { userId: caller.id }, select: { role: true, chatHiddenAt: true, chatDeletedAt: true, chatUnread: true } }, messages: { orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } }, _count: { select: { projects: true, ideas: true } } } }); }
   async searchGroupChats(caller: Caller, query: string) {
     const term = query.trim();
@@ -525,7 +550,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.member(groupId, caller.id);
     const existing = await this.prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId } } });
     if (existing) return existing;
-    const membership = await this.prisma.groupMember.create({ data: { groupId, userId } });
+    const role = await this.rememberedGroupRole(groupId, userId);
+    const membership = await this.prisma.groupMember.create({ data: { groupId, userId, role } });
+    await this.restoreAssignedProjects(userId, groupId);
     if (caller.id !== userId) {
       const group = await this.prisma.group.findUniqueOrThrow({ where: { id: groupId }, select: { name: true } });
       await this.notify([userId], NotificationType.group_activity, `You were added to “${group.name}” group chat`, groupId, 'group');
@@ -539,34 +566,55 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return this.prisma.groupMember.update({ where: { groupId_userId: { groupId, userId: caller.id } }, data: action === 'delete' ? { chatHiddenAt: now, chatDeletedAt: now, chatUnread: false } : action === 'hide' ? { chatHiddenAt: now, chatUnread: false } : action === 'unread' ? { chatUnread: true } : { chatHiddenAt: null, chatUnread: false } });
   }
   async promoteGroupMember(caller: Caller, groupId: string, userId: string) {
-    await this.member(groupId, caller.id, true);
-    await this.member(groupId, userId);
-    return this.prisma.groupMember.update({ where: { groupId_userId: { groupId, userId } }, data: { role: ProjectRole.Project_Leader } });
+    return this.changeGroupRole(caller, groupId, userId, ProjectRole.Project_Leader);
   }
-  async removeGroupMember(caller: Caller, groupId: string, userId: string) { await this.member(groupId, caller.id, true); await this.prisma.groupMember.delete({ where: { groupId_userId: { groupId, userId } } }); this.events.emitGroupMembershipRevoked(groupId, userId); return { ok: true }; }
-  /**
-   * Self-service exit, unlike removeGroupMember which is leader-only.
-   * The last leader is held back so a group cannot be left without anyone able to administer it.
-   */
-  async leaveGroup(caller: Caller, groupId: string) {
-    const membership = await this.member(groupId, caller.id);
-    if (membership.role === ProjectRole.Project_Leader) {
-      const leaders = await this.prisma.groupMember.count({ where: { groupId, role: ProjectRole.Project_Leader } });
-      if (leaders <= 1) fail('VALIDATION_FAILED', 'Promote another member to leader before you leave this group', 400);
-    }
-    await this.prisma.$transaction([
-      this.prisma.projectMember.deleteMany({ where: { userId: caller.id, project: { groupId } } }),
-      this.prisma.groupMember.delete({ where: { groupId_userId: { groupId, userId: caller.id } } }),
-    ]);
+  async demoteGroupMember(caller: Caller, groupId: string, userId: string) {
+    return this.changeGroupRole(caller, groupId, userId, ProjectRole.Project_Member);
+  }
+  private async changeGroupRole(caller: Caller, groupId: string, userId: string, role: typeof ProjectRole[keyof typeof ProjectRole]) {
+    const membership = await this.prisma.$transaction(async (tx: any) => {
+      // Serialize membership changes in this group, including competing last-leader actions.
+      await tx.$queryRaw`SELECT id FROM \`Group\` WHERE id = ${groupId} FOR UPDATE`;
+      const actor = await tx.groupMember.findUnique({ where: { groupId_userId: { groupId, userId: caller.id } } });
+      if (actor?.role !== ProjectRole.Project_Leader) fail('RBAC_FORBIDDEN', 'Only group leaders can change group roles', 403);
+      const target = await tx.groupMember.findUnique({ where: { groupId_userId: { groupId, userId } } });
+      if (!target) fail('NOT_FOUND', 'Group member not found', 404);
+      if (target.role === ProjectRole.Project_Leader && role !== ProjectRole.Project_Leader && await tx.groupMember.count({ where: { groupId, role: ProjectRole.Project_Leader } }) <= 1) fail('VALIDATION_FAILED', 'Keep at least one group leader', 400);
+      const updated = await tx.groupMember.update({ where: { groupId_userId: { groupId, userId } }, data: { role } });
+      await tx.groupRoleHistory.upsert({ where: { groupId_userId: { groupId, userId } }, create: { groupId, userId, role }, update: { role } });
+      await tx.projectMember.updateMany({ where: { userId, project: { groupId } }, data: { role } });
+      return updated;
+    });
+    const group = await this.prisma.group.findUnique({ where: { id: groupId }, select: { name: true } });
+    const groupName = group?.name ?? 'your group';
+    await this.notify([userId], NotificationType.project_change, role === ProjectRole.Project_Leader ? `You are now an admin of “${groupName}”. Your project permissions have been updated.` : `Your admin role in “${groupName}” was removed. Your project permissions have been updated.`, groupId, 'group');
+    return membership;
+  }
+  private async revokeGroupMembership(caller: Caller, groupId: string, userId: string, self: boolean) {
+    await this.prisma.$transaction(async (tx: any) => {
+      await tx.$queryRaw`SELECT id FROM \`Group\` WHERE id = ${groupId} FOR UPDATE`;
+      const actor = await tx.groupMember.findUnique({ where: { groupId_userId: { groupId, userId: caller.id } } });
+      if (!actor || (!self && actor.role !== ProjectRole.Project_Leader)) fail('RBAC_FORBIDDEN', 'Group membership does not grant this action', 403);
+      const target = self ? actor : await tx.groupMember.findUnique({ where: { groupId_userId: { groupId, userId } } });
+      if (!target) fail('NOT_FOUND', 'Group member not found', 404);
+      if (target.role === ProjectRole.Project_Leader && await tx.groupMember.count({ where: { groupId, role: ProjectRole.Project_Leader } }) <= 1) fail('VALIDATION_FAILED', 'Promote another member to leader before you leave or remove the last leader', 400);
+      await tx.groupRoleHistory.upsert({ where: { groupId_userId: { groupId, userId } }, create: { groupId, userId, role: target.role }, update: { role: target.role } });
+      // Tasks and project membership remain historical; current group access is checked separately.
+      await tx.groupMember.delete({ where: { groupId_userId: { groupId, userId } } });
+    });
+    this.events.emitGroupMembershipRevoked(groupId, userId);
     return { ok: true };
   }
+  async removeGroupMember(caller: Caller, groupId: string, userId: string) { return this.revokeGroupMembership(caller, groupId, userId, false); }
+  async leaveGroup(caller: Caller, groupId: string) { return this.revokeGroupMembership(caller, groupId, caller.id, true); }
   async createProject(caller: Caller, input: any) {
     const { memberIds: requested, initialTasks = [], groupId, title, description, startDate, deadline, externalTools } = input;
     if (input.ideaId !== undefined || input.idea !== undefined) fail('VOTING_REQUIRED', 'Create projects from ideas through the completed group vote.', 403);
     const data = { title, description, startDate, deadline, externalTools };
     if (groupId) await this.member(groupId, caller.id);
     const memberIds = [...new Set<string>([caller.id, ...(requested ?? [])])];
-    if (groupId) for (const userId of memberIds) await this.member(groupId, userId);
+    const groupLeaders = new Set<string>();
+    if (groupId) for (const userId of memberIds) { const membership = await this.member(groupId, userId); if (membership.role === ProjectRole.Project_Leader) groupLeaders.add(userId); }
     else if (memberIds.length > 1) fail('VALIDATION_FAILED', 'Add collaborators after connecting this project to a group.', 400, { memberIds: 'Independent projects start with their creator only' });
     const responsibilities = new Map<string, string>();
     for (const { assigneeId, title } of initialTasks) {
@@ -581,7 +629,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       const project = await tx.project.create({ data: {
         ...data, ...(groupId ? { groupId } : {}), createdBy: caller.id,
         members: { create: memberIds.map((userId) => ({
-          userId, role: userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member,
+          userId, role: userId === caller.id || groupLeaders.has(userId) ? ProjectRole.Project_Leader : ProjectRole.Project_Member,
           ...(responsibilities.has(userId) ? { responsibility: responsibilities.get(userId) } : {}),
         })) },
       }, include: { members: true } });
@@ -604,8 +652,11 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     ));
     return project;
   }
-  async projects(caller: Caller) { return this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } } }, include: { group: true, members: { where: { userId: caller.id } }, tasks: true, _count: { select: { members: true } } } }); }
-  async project(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { group: { include: { members: { include: { user: { select: { id: true, fullName: true } } } } } }, members: { include: { user: { select: { id: true, fullName: true } } } }, tasks: { include: { assignments: { where: { active: true } } } } } }); return { ...project, tasks: project.tasks.map((task: any) => ({ ...task, risk: taskPrediction(task, new Date()) })) }; }
+  async projects(caller: Caller) {
+    const projects = await this.prisma.project.findMany({ where: this.projectAccessWhere(caller.id), include: { group: { include: { members: { where: { userId: caller.id }, select: { userId: true, role: true } } } }, members: { where: { userId: caller.id } }, tasks: true, _count: { select: { members: true } } } });
+    return projects.map((project) => ({ ...project, members: project.members.map((member) => project.group ? { ...member, role: project.group.members?.find((groupMember) => groupMember.userId === member.userId)?.role ?? ProjectRole.Project_Member } : member) }));
+  }
+  async project(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { group: { include: { members: { include: { user: { select: { id: true, fullName: true } } } } } }, members: { include: { user: { select: { id: true, fullName: true } } } }, tasks: { include: { assignments: { where: { active: true } } } } } }); return { ...project, members: project.members.map((member: any) => project.group ? { ...member, role: project.group.members.find((groupMember: any) => groupMember.userId === member.userId)?.role ?? ProjectRole.Project_Member } : member), tasks: project.tasks.map((task: any) => ({ ...task, risk: taskPrediction(task, new Date()) })) }; }
   private validateSchedule(input: any, previous?: any, kind: 'date' | 'datetime' = 'date', endLabel = 'End date') {
     const startField = kind === 'date' ? 'startDate' : 'startAt';
     const endField = kind === 'date' ? 'deadline' : 'endAt';
@@ -646,12 +697,13 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     });
     return { ok: true };
   }
-  async addProjectMember(caller: Caller, projectId: string, userId: string) { await this.projectMember(projectId, caller.id, true); const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } }); if (!project.groupId) fail('INVALID_OPERATION', 'Connect this independent project to a group before adding members.', 400); await this.member(project.groupId, userId); return this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: ProjectRole.Project_Member } }); }
+  async addProjectMember(caller: Caller, projectId: string, userId: string) { await this.projectMember(projectId, caller.id, true); const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } }); if (!project.groupId) fail('INVALID_OPERATION', 'Connect this independent project to a group before adding members.', 400); const groupMembership = await this.member(project.groupId, userId); return this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: groupMembership.role } }); }
   async updateResponsibility(caller: Caller, projectId: string, userId: string, responsibility: string) { await this.projectMember(projectId, caller.id, true); await this.projectMember(projectId, userId); return this.prisma.projectMember.update({ where: { projectId_userId: { projectId, userId } }, data: { responsibility } }); }
-  async projectProgress(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { tasks: true } }); const analytics = projectAnalytics(project.tasks, project.deadline); return { progress: completionRate(project.tasks.filter((t) => t.status === 'completed').length, project.tasks.length), onTrack: analytics.riskLevel === 'on_track', ...analytics }; }
+  async projectProgress(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { tasks: true } }); const analytics = projectAnalytics(project.tasks, project.deadline); return { progress: averageTaskProgress(project.tasks) / 100, onTrack: analytics.riskLevel === 'on_track', ...analytics }; }
   async createTask(caller: Caller, projectId: string, input: any) { await this.projectMember(projectId, caller.id, true); if (!input.startDate || !input.deadline) fail('VALIDATION_FAILED', 'Start date and due date are required to create a task.', 400, { ...(!input.startDate ? { startDate: 'Start date is required' } : {}), ...(!input.deadline ? { deadline: 'Due date is required' } : {}) }); this.validateSchedule(input, undefined, 'date', 'Due date'); return this.prisma.task.create({ data: { ...input, projectId, createdBy: caller.id } }); }
   async task(caller: Caller, id: string) {
     const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, include: { assignments: { where: { active: true } }, project: true } });
+    if (task.project?.groupId) await this.member(task.project.groupId, caller.id);
     if (!task.assignments.some((assignment: { assigneeId: string }) => assignment.assigneeId === caller.id)) await this.projectMember(task.projectId, caller.id);
     const assignment = task.assignments[0];
     const [assignee, assigner] = assignment ? await Promise.all([this.prisma.user.findUnique({ where: { id: assignment.assigneeId }, select: { id: true, fullName: true } }), this.prisma.user.findUnique({ where: { id: assignment.assignerId }, select: { id: true, fullName: true } })]) : [null, null];
@@ -750,7 +802,8 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
    * authorization check runs.
    */
   async taskStatus(caller: Caller, id: string, status: TaskStatus) {
-    const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, select: { id: true, projectId: true, status: true, startedAt: true } });
+    const task = await this.prisma.task.findUniqueOrThrow({ where: { id }, select: { id: true, projectId: true, status: true, startedAt: true, project: { select: { groupId: true } } } });
+    if (task.project?.groupId) await this.member(task.project.groupId, caller.id);
     const assignment = await this.prisma.taskAssignment.findFirst({ where: { taskId: id, assigneeId: caller.id, active: true } });
     if (!assignment) await this.projectMember(task.projectId, caller.id, true);
     if (status === task.status) return this.prisma.task.findUniqueOrThrow({ where: { id } });
@@ -765,30 +818,30 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return updated;
   }
   async myTasks(caller: Caller, filter: any) {
-    const tasks = await this.prisma.task.findMany({ where: { assignments: { some: { assigneeId: caller.id, active: true } }, ...(filter.projectId ? { projectId: filter.projectId } : {}), ...(filter.status ? { status: filter.status } : {}) }, orderBy: filter.sort === 'deadline' ? { deadline: 'asc' } : { createdAt: 'desc' }, include: { project: { select: { id: true, title: true } }, assignments: { where: { assigneeId: caller.id, active: true }, take: 1 } } });
+    const tasks = await this.prisma.task.findMany({ where: { project: this.groupAccessWhere(caller.id), assignments: { some: { assigneeId: caller.id, active: true } }, ...(filter.projectId ? { projectId: filter.projectId } : {}), ...(filter.status ? { status: filter.status } : {}) }, orderBy: filter.sort === 'deadline' ? { deadline: 'asc' } : { createdAt: 'desc' }, include: { project: { select: { id: true, title: true } }, assignments: { where: { assigneeId: caller.id, active: true }, take: 1 } } });
     const assignerIds = [...new Set(tasks.map((task: any) => task.assignments[0]?.assignerId).filter(Boolean))];
     const assigners = assignerIds.length ? await this.prisma.user.findMany({ where: { id: { in: assignerIds } }, select: { id: true, fullName: true } }) : [];
     const assignerName = (id?: string) => assigners.find((user: any) => user.id === id)?.fullName ?? 'Unassigned';
     const assignedTasks = tasks.map((task: any) => ({ ...task, project: task.project, assignedBy: assignerName(task.assignments[0]?.assignerId), assignedAt: task.assignments[0]?.assignedAt ?? task.createdAt, progress: taskProgress(task.status) }));
     return filter.sort === 'assigned' ? assignedTasks.sort((a: any, b: any) => new Date(b.assignedAt).getTime() - new Date(a.assignedAt).getTime()) : assignedTasks;
   }
-  async tracker(caller: Caller, projectId: string) { await this.projectMember(projectId, caller.id); const tasks = await this.prisma.task.findMany({ where: { projectId } }); const counts = Object.fromEntries(['pending', 'ongoing', 'for_review', 'completed'].map((status) => [status, tasks.filter((task) => task.status === status).length])); return { ...counts, total: tasks.length, progress: completionRate(counts.completed, tasks.length) }; }
+  async tracker(caller: Caller, projectId: string) { await this.projectMember(projectId, caller.id); const tasks = await this.prisma.task.findMany({ where: { projectId } }); const counts = Object.fromEntries(['pending', 'ongoing', 'for_review', 'completed'].map((status) => [status, tasks.filter((task) => task.status === status).length])); return { ...counts, total: tasks.length, progress: averageTaskProgress(tasks) / 100 }; }
   async taskTracker(caller: Caller) {
     const [tasks, connections, workflow, usage, projects] = await Promise.all([
       this.prisma.task.findMany({
-        where: { project: { members: { some: { userId: caller.id } } } },
+        where: { project: this.projectAccessWhere(caller.id) },
         orderBy: { createdAt: 'desc' },
         include: {
-          project: { select: { id: true, title: true, members: { include: { user: { select: { id: true, fullName: true, avatarUrl: true } } } } } },
+          project: { select: { id: true, title: true, group: { select: { members: { where: { userId: caller.id }, select: { userId: true, role: true } } } }, members: { include: { user: { select: { id: true, fullName: true, avatarUrl: true } } } } } },
           assignments: { where: { active: true } },
           linkedResources: { include: { connection: { include: { tool: true } } }, orderBy: { createdAt: 'desc' } },
           workflow: { orderBy: { createdAt: 'desc' }, take: 1 },
         },
       }),
       this.prisma.toolConnection.findMany({ where: { userId: caller.id }, include: { tool: true }, orderBy: { lastSyncedAt: 'desc' } }),
-      this.prisma.workflowEvent.findMany({ where: { project: { members: { some: { userId: caller.id } } } }, orderBy: { createdAt: 'desc' }, take: 24, include: { task: { select: { id: true, title: true } }, project: { select: { title: true } } } }),
+      this.prisma.workflowEvent.findMany({ where: { project: this.projectAccessWhere(caller.id) }, orderBy: { createdAt: 'desc' }, take: 24, include: { task: { select: { id: true, title: true } }, project: { select: { title: true } } } }),
       this.prisma.toolUsage.findMany({ where: { connection: { userId: caller.id } }, orderBy: { createdAt: 'desc' }, take: 24, include: { connection: { include: { tool: true } } } }),
-      this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } } }, select: { id: true, title: true, members: { select: { user: { select: { id: true, fullName: true, avatarUrl: true } } } } }, orderBy: { title: 'asc' } }),
+      this.prisma.project.findMany({ where: this.projectAccessWhere(caller.id), select: { id: true, title: true, members: { select: { user: { select: { id: true, fullName: true, avatarUrl: true } } } } }, orderBy: { title: 'asc' } }),
     ]);
     const actorIds = [...new Set(workflow.map((event: any) => event.actorId))];
     const actors = actorIds.length ? await this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, fullName: true, avatarUrl: true } }) : [];
@@ -797,11 +850,11 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       const latest = Math.max(new Date(task.createdAt).getTime(), task.startedAt ? new Date(task.startedAt).getTime() : 0, task.completedAt ? new Date(task.completedAt).getTime() : 0, task.workflow[0] ? new Date(task.workflow[0].createdAt).getTime() : 0, ...resourceDates);
       const callerMembership = task.project.members.find((member: any) => member.userId === caller.id);
       const canUpdateStatus = task.assignments.some((assignment: any) => assignment.assigneeId === caller.id);
-      const canAssign = callerMembership?.role === ProjectRole.Project_Leader;
+      const canAssign = callerMembership?.role === ProjectRole.Project_Leader || !!task.project.group?.members?.length;
       return {
         id: task.id, title: task.title, description: task.description, deadline: task.deadline, priority: task.priority, status: task.status,
         progress: taskProgress(task.status), createdAt: task.createdAt, latestActivityAt: new Date(latest), project: { id: task.project.id, title: task.project.title },
-        resources: task.linkedResources.map((resource: any) => ({ id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: resource.provider ?? resource.connection?.provider, toolKind: resource.toolKind, platform: ({ 'google-docs': 'Google Docs', 'microsoft-word': 'Microsoft Word', 'microsoft-excel': 'Microsoft Excel' } as Record<string, string>)[resource.toolKind] ?? resource.connection?.tool.name ?? providerNames[resource.provider as ProviderId] ?? resource.provider, category: resource.connection?.tool.category ?? '', createdAt: resource.createdAt })),
+        resources: task.linkedResources.map((resource: any) => ({ id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: resource.provider ?? resource.connection?.provider, toolKind: resource.toolKind, platform: ({ 'google-forms': 'Google Forms', 'google-docs': 'Google Docs', 'microsoft-word': 'Microsoft Word', 'microsoft-excel': 'Microsoft Excel' } as Record<string, string>)[resource.toolKind] ?? resource.connection?.tool.name ?? providerNames[resource.provider as ProviderId] ?? resource.provider, category: resource.connection?.tool.category ?? '', createdAt: resource.createdAt })),
         assignees: task.assignments.map((assignment: any) => task.project.members.find((member: any) => member.userId === assignment.assigneeId)?.user).filter(Boolean),
         canUpdateStatus,
         canAssign,
@@ -830,6 +883,8 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (input.connectionId && !connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before linking a file', 400);
     const provider = connection?.provider ?? input.provider;
     if (!provider) fail('VALIDATION_FAILED', 'Choose a platform for this file link', 400);
+    const linkError = resourceLinkError(input.externalUrl, provider, input.toolKind);
+    if (linkError) fail('VALIDATION_FAILED', linkError, 400, { externalUrl: linkError });
     const changedStatus = input.status && input.status !== task.status;
     const now = new Date();
     const resource = await this.prisma.$transaction(async (tx: any) => {
@@ -864,6 +919,8 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (input.connectionId && !connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before saving the file link', 400);
     const provider = input.provider ?? connection?.provider ?? resource.provider;
     if (!provider && !connection) fail('VALIDATION_FAILED', 'Choose a platform for this file link', 400);
+    const linkError = resourceLinkError(input.externalUrl, provider, input.toolKind === undefined ? resource.toolKind : input.toolKind);
+    if (linkError) fail('VALIDATION_FAILED', linkError, 400, { externalUrl: linkError });
     const now = new Date();
     const reassigned = input.assigneeId && input.assigneeId !== activeAssignment?.assigneeId;
     const changedStatus = input.status && input.status !== task.status;
@@ -1153,8 +1210,8 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       if (ranked.length < 2 || ranked[0].votes.length === 0 || ranked[1].votes.length === ranked[0].votes.length) fail('VOTE_NO_WINNER', 'A project requires at least one vote and a clear winner.', 409);
       if (ranked[0].ideaId !== ideaId) fail('IDEA_NOT_APPROVED', 'Only the winning idea can become a project.', 403);
       if (!ranked[0].contentHash || ranked[0].contentHash !== ideaContentHash(idea)) fail('IDEA_CHANGED', 'The winning idea cannot be verified against this vote. Start a new vote.', 409);
-      const members = await tx.groupMember.findMany({ where: { groupId }, select: { userId: true } });
-      const project = await tx.project.create({ data: { groupId, ideaId, title: idea.title, description: idea.body, createdBy: caller.id, members: { create: members.map((member: any) => ({ userId: member.userId, role: member.userId === caller.id ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } } });
+      const members = await tx.groupMember.findMany({ where: { groupId }, select: { userId: true, role: true } });
+      const project = await tx.project.create({ data: { groupId, ideaId, title: idea.title, description: idea.body, createdBy: caller.id, members: { create: members.map((member: any) => ({ userId: member.userId, role: member.userId === caller.id || member.role === ProjectRole.Project_Leader ? ProjectRole.Project_Leader : ProjectRole.Project_Member })) } } });
       await tx.idea.update({ where: { id: ideaId }, data: { status: 'selected' } });
       return project;
     }, { isolationLevel: 'Serializable' });
@@ -1188,11 +1245,12 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   async calendar(caller: Caller, from?: string, to?: string) {
     const dateRange = from || to ? { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } : {};
     const [events, projects, tasks, notifications, maintenanceSetting] = await Promise.all([
-      this.prisma.calendarEvent.findMany({ where: { OR: [{ ownerId: caller.id }, { project: { members: { some: { userId: caller.id } } } }], ...(from || to ? { startAt: dateRange } : {}) }, include: { project: { select: { id: true, title: true } } }, orderBy: { startAt: 'asc' } }),
-      this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, deadline: { not: null, ...dateRange } }, select: { id: true, title: true, deadline: true } }),
+      this.prisma.calendarEvent.findMany({ where: { OR: [{ ownerId: caller.id, projectId: null }, { project: this.projectAccessWhere(caller.id) }], ...(from || to ? { startAt: dateRange } : {}) }, include: { project: { select: { id: true, title: true } } }, orderBy: { startAt: 'asc' } }),
+      this.prisma.project.findMany({ where: { ...this.projectAccessWhere(caller.id), deadline: { not: null, ...dateRange } }, select: { id: true, title: true, deadline: true } }),
       // Task dates are projected from the task itself, so edits, completion and reassignment
       // never leave duplicate/stale calendar-event rows behind. Keep completed tasks as history.
       this.prisma.task.findMany({ where: {
+        project: this.groupAccessWhere(caller.id),
         OR: [{ createdBy: caller.id }, { assignments: { some: { assigneeId: caller.id, active: true } } }],
         deadline: { not: null, ...dateRange },
       }, select: { id: true, title: true, deadline: true, project: { select: { id: true, title: true } } }, orderBy: { deadline: 'asc' } }),
@@ -1205,12 +1263,12 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (maintenanceStart && Number.isFinite(maintenanceStart.getTime()) && (!from || maintenanceStart >= new Date(from)) && (!to || maintenanceStart <= new Date(to))) {
       calendarEvents.push({ id: 'system-maintenance', title: 'System maintenance', type: 'maintenance', source: 'system', startAt: maintenanceStart.toISOString(), description: typeof maintenance?.message === 'string' ? maintenance.message : null });
     }
-    return { events: calendarEvents, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))], notifications };
+    return { events: calendarEvents, hints: [...projects.map((p) => ({ type: 'project_deadline', ...p })), ...tasks.map((t) => ({ type: 'task_deadline', ...t }))], notifications: notifications.filter((notification) => tasks.some((task) => task.id === notification.relatedId)) };
   }
   /** User-created events visible on the calendar, shown newest first in Announcements. */
   async eventAnnouncements(caller: Caller, take?: number) {
     const events = await this.prisma.calendarEvent.findMany({
-      where: { source: 'websphere', OR: [{ ownerId: caller.id }, { project: { members: { some: { userId: caller.id } } } }] },
+      where: { source: 'websphere', OR: [{ ownerId: caller.id, projectId: null }, { project: this.projectAccessWhere(caller.id) }] },
       include: { project: { select: { id: true, title: true } } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       ...(take === undefined ? {} : { take }),
@@ -1278,7 +1336,16 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return null;
   }
   async notify(userIds: string[], type: NotificationType, message: string, relatedId?: string, relatedType?: string) {
-    const recipients = [...new Set(userIds)];
+    let recipients = [...new Set(userIds)];
+    if (recipients.length && relatedId && ['task', 'project'].includes(relatedType ?? '')) {
+      const project = await this.prisma.project.findFirst({ where: relatedType === 'task' ? { tasks: { some: { id: relatedId } } } : { id: relatedId }, select: { groupId: true } });
+      if (!project) recipients = [];
+      else if (project.groupId) {
+        const current = await this.prisma.user.findMany({ where: { id: { in: recipients }, OR: [{ role: Role.Administrator }, { groupMembers: { some: { groupId: project.groupId } } }] }, select: { id: true } });
+        const allowed = new Set(current.map((user) => user.id));
+        recipients = recipients.filter((userId) => allowed.has(userId));
+      }
+    }
     const preferenceKey = this.preferenceKeyForNotification(type, relatedType);
     const preferences = preferenceKey && recipients.length ? await this.prisma.notificationPreference.findMany({ where: { userId: { in: recipients } }, select: { userId: true, [preferenceKey]: true } }) : [];
     const enabled = new Map(preferences.map((preference: any) => [preference.userId, preference[preferenceKey!]]));
@@ -1321,6 +1388,11 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       .slice(0, take);
   }
   /** Announcements from every group the caller belongs to, newest first, with the author's group role. */
+  async systemAnnouncements(caller: Caller) {
+    // Each recipient can read only notices delivered to their own account.
+    const rows = await this.prisma.notification.findMany({ where: { userId: caller.id, type: NotificationType.announcement, relatedType: 'system' }, orderBy: { createdAt: 'desc' }, take: 100 });
+    return rows.map((row) => ({ id: row.id, title: row.relatedId === 'maintenance' ? 'WebSphere maintenance' : 'WebSphere announcement', body: row.message, createdAt: row.createdAt, authorName: 'WebSphere' }));
+  }
   async announcements(caller: Caller, take?: number) {
     const records = await this.prisma.announcement.findMany({
       where: { group: { members: { some: { userId: caller.id } } } },
@@ -1358,10 +1430,10 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
    */
   async milestones(caller: Caller, take = 5) {
     const [completedProjects, selectedIdeas, completedTasks, upcoming] = await Promise.all([
-      this.prisma.project.findMany({ where: { members: { some: { userId: caller.id } }, status: 'completed' }, orderBy: { createdAt: 'desc' }, take, include: { group: { select: { name: true } } } }),
+      this.prisma.project.findMany({ where: { ...this.projectAccessWhere(caller.id), status: 'completed' }, orderBy: { createdAt: 'desc' }, take, include: { group: { select: { name: true } } } }),
       this.prisma.idea.findMany({ where: { group: { members: { some: { userId: caller.id } } }, status: 'selected' }, orderBy: { createdAt: 'desc' }, take, include: { group: { select: { name: true } } } }),
-      this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, status: 'completed', completedAt: { not: null } }, orderBy: { completedAt: 'desc' }, take, include: { project: { select: { title: true } } } }),
-      this.prisma.task.findMany({ where: { project: { members: { some: { userId: caller.id } } }, status: { not: 'completed' }, deadline: { not: null } }, orderBy: { deadline: 'asc' }, take: 1, include: { project: { select: { title: true } } } }),
+      this.prisma.task.findMany({ where: { project: this.projectAccessWhere(caller.id), status: 'completed', completedAt: { not: null } }, orderBy: { completedAt: 'desc' }, take, include: { project: { select: { title: true } } } }),
+      this.prisma.task.findMany({ where: { project: this.projectAccessWhere(caller.id), status: { not: 'completed' }, deadline: { not: null } }, orderBy: { deadline: 'asc' }, take: 1, include: { project: { select: { title: true } } } }),
     ]);
     const items = [
       ...completedProjects.map((project: any) => ({ id: `project-${project.id}`, kind: 'achievement' as const, icon: 'check' as const, title: `${project.title} completed`, detail: `${project.group?.name ?? 'Independent'} · Project delivered`, at: project.createdAt })),
@@ -1375,7 +1447,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   /** Recent workflow events across every project the caller belongs to, shaped for the dashboard activity feed. */
   async activityFeed(caller: Caller, take = 8) {
     const events = await this.prisma.workflowEvent.findMany({
-      where: { project: { members: { some: { userId: caller.id } } } },
+      where: { project: this.projectAccessWhere(caller.id) },
       orderBy: { createdAt: 'desc' },
       take,
       include: { task: { select: { id: true, title: true } }, project: { select: { id: true, title: true } } },

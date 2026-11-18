@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 import { getAccessToken, request, socketBaseUrl } from '../api';
 import { categoryLabel, statusLabel, type SupportTicketRecord } from './ticketStatus';
@@ -30,4 +30,28 @@ export function SupportRequestsPage({ notify, focusedTicketId }: { notify: (mess
       </article>)}</div> : <div className="empty-message">You have not sent any support requests yet. Use the help button on the dashboard to send one.</div>}
     </section>
   </section>;
+}
+
+
+/** Ratings share the support queue so administrators receive the existing ticket alert. */
+export function FeedbackPage({ notify }: { notify: (message: string) => void }) {
+  const [rating, setRating] = useState(0);
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function send(event: FormEvent) {
+    event.preventDefault();
+    if (!rating || !message.trim()) { setError('Choose a rating and tell us about your experience.'); return; }
+    setBusy(true); setError(null);
+    try {
+      await request('/support/tickets', { method: 'POST', body: JSON.stringify({ category: 'other', subject: `Feedback · ${rating}/5 stars`, body: `Rating: ${rating}/5\n\n${message.trim()}` }) });
+      setRating(0); setMessage(''); notify('Feedback sent. You can track it in My Support Requests.');
+    } catch (error) { setError(error instanceof Error ? error.message : 'Could not send feedback.'); }
+    finally { setBusy(false); }
+  }
+  return <section className="sp on"><div className="ph"><div><h2>Feedback</h2><div className="ph-sub">Share your thoughts, suggestions, or concerns about WebSphere.</div></div></div><form className="cc" onSubmit={(event) => void send(event)}>
+    <fieldset disabled={busy} style={{ border: 0, padding: 0 }}><legend className="lbl">Rating</legend><div role="radiogroup" aria-label="Rating" style={{ display: 'flex', gap: 4, marginBottom: 18 }}>{[1,2,3,4,5].map((value) => <button key={value} type="button" role="radio" aria-checked={rating === value} aria-label={`${value} out of 5 stars`} onClick={() => setRating(value)} style={{ border: 0, background: 'transparent', color: value <= rating ? '#c97d10' : '#497b95', fontSize: 32, minWidth: 44, minHeight: 44, cursor: 'pointer' }}>{value <= rating ? '★' : '☆'}</button>)}</div></fieldset>
+    <label className="lbl" htmlFor="feedback-message">Your feedback</label><textarea id="feedback-message" className="ifield" rows={5} maxLength={3900} value={message} onChange={(event) => setMessage(event.target.value)} disabled={busy} placeholder="Tell us what you think…" required />
+    {error ? <p role="alert">{error}</p> : null}<button className="btn" disabled={busy}>{busy ? 'Sending…' : 'Send Feedback'}</button>
+  </form></section>;
 }

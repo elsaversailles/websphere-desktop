@@ -1,4 +1,5 @@
-import { HttpException, OnApplicationShutdown } from '@nestjs/common';
+import { chatMessageSchema } from '@websphere/shared';
+import { HttpException, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { ConnectedSocket, MessageBody, OnGatewayInit, SubscribeMessage, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import { createAdapter } from '@socket.io/redis-adapter';
 import type { Redis } from 'ioredis';
@@ -18,7 +19,7 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
   constructor(private readonly app: AppService, private readonly redis: RedisService, private readonly events: DomainEventsService) {
     this.events.onNotification((userId, notification) => this.publishNotification(userId, notification));
     this.events.onPollTally((groupId, tally) => this.publishPollTally(groupId, tally));
-    this.events.onGroupMembershipRevoked((groupId, userId) => this.revokeGroupAccess(groupId, userId));
+    this.events.onGroupMembershipRevoked((groupId, userId) => { void this.revokeGroupAccess(groupId, userId).catch((error) => new Logger(RealtimeGateway.name).error('Could not revoke all live project rooms', error)); });
     this.events.registerPresenceProvider(() => [...this.presence.keys()]);
   }
   async afterInit(server: Server | Namespace) {
@@ -36,18 +37,24 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
    * broadcasts until they reloaded. Force them out of the group (and any active call) and tell the
    * client it was removed so it can navigate away immediately.
    */
-  private revokeGroupAccess(groupId: string, userId: string) {
+  private async revokeGroupAccess(groupId: string, userId: string) {
     const userRoom = `user:${userId}`;
     this.server.in(userRoom).socketsLeave(`group:${groupId}`);
+    const callers = await this.server.in(userRoom).fetchSockets();
+    for (const caller of callers) {
+      if (caller.rooms.has(`call:${groupId}`)) await this.removeCallParticipant(groupId, caller.id);
+    }
     this.server.in(userRoom).socketsLeave(`call:${groupId}`);
     this.server.to(userRoom).emit('group:removed', { groupId });
+    const projects = await this.app.prisma.project.findMany({ where: { groupId }, select: { id: true } });
+    for (const project of projects) this.server.in(userRoom).socketsLeave(`project:${project.id}`);
   }
   publishTaskUpdated(projectId: string, task: unknown) { this.server.to(`project:${projectId}`).emit('task:updated', task); }
   publishNotification(userId: string, notification: unknown) { this.server.to(`user:${userId}`).emit('notification:new', notification); }
   handleDisconnect(socket: Socket) { const userId = socket.data.caller?.id; if (!userId) return; const ids = this.presence.get(userId); ids?.delete(socket.id); if (!ids?.size) this.presence.delete(userId); }
   @SubscribeMessage('group:join') groupJoin(@ConnectedSocket() socket: Socket, @MessageBody() groupId: string) { return this.ack(async () => { this.assertAuthenticated(socket); if (!groupId) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Group ID is required' }, 400); await this.app.member(groupId, socket.data.caller.id); await socket.join(`group:${groupId}`); }); }
   @SubscribeMessage('project:join') projectJoin(@ConnectedSocket() socket: Socket, @MessageBody() projectId: string) { return this.ack(async () => { this.assertAuthenticated(socket); if (!projectId) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Project ID is required' }, 400); await this.app.projectMember(projectId, socket.data.caller.id); await socket.join(`project:${projectId}`); }); }
-  @SubscribeMessage('chat:send') chatSend(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; body: string }) { return this.ack(async () => { this.assertAuthenticated(socket); const messageBody = body?.body?.trim(); if (!body?.groupId || !messageBody) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Group and message are required' }, 400); const senderId = socket.data.caller.id; await this.app.member(body.groupId, senderId); const message = await this.app.prisma.chatMessage.create({ data: { groupId: body.groupId, senderId, body: messageBody } }); this.server.to(`group:${body.groupId}`).emit('chat:message', message); await this.notifyGroupMessage(body.groupId, senderId); }); }
+  @SubscribeMessage('chat:send') chatSend(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; body: string }) { return this.ack(async () => { this.assertAuthenticated(socket); const parsed = chatMessageSchema.safeParse(body); if (!parsed.success) throw new HttpException({ code: 'VALIDATION_FAILED', message: parsed.error.issues[0].message }, 400); const messageBody = parsed.data.body; const senderId = socket.data.caller.id; await this.app.member(body.groupId, senderId); const message = await this.app.prisma.chatMessage.create({ data: { groupId: body.groupId, senderId, body: messageBody } }); this.server.to(`group:${body.groupId}`).emit('chat:message', message); await this.notifyGroupMessage(body.groupId, senderId); }); }
 
   /**
    * Tells every other member of the group that a new message landed, naming the group and the
@@ -76,9 +83,16 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
       if (body.muted !== undefined && typeof body.muted !== 'boolean') throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Invalid microphone state' }, 400);
       await this.app.member(body.groupId, socket.data.caller.id);
       const room = `call:${body.groupId}`;
-      const members = await this.server.in(room).fetchSockets();
+      const alreadyJoined = socket.rooms.has(room);
+      const members = (await this.server.in(room).fetchSockets()).filter((member) => member.id !== socket.id);
       if (members.length >= 6) throw new HttpException({ code: 'CALL_FULL', message: 'This call has reached its six-participant limit' }, 409);
-      const participants = members.map((member) => ({ socketId: member.id, userId: String(member.data.caller?.id ?? ''), muted: member.data.callMuteStates?.[body.groupId] === true, cameraEnabled: member.data.callCameraStates?.[body.groupId] }));
+      let profilesById = new Map<string, { fullName: string; avatarUrl: string | null }>();
+      const identity = (userId: string) => profilesById.get(userId) ?? {};
+      try {
+        const profiles = await this.app.prisma.user.findMany({ where: { id: { in: [socket.data.caller.id, ...members.map((member) => String(member.data.caller?.id ?? ''))] } }, select: { id: true, fullName: true, avatarUrl: true, preference: { select: { profileVisibility: true } } } });
+        profilesById = new Map(profiles.map((profile) => [profile.id, { fullName: profile.fullName, avatarUrl: profile.preference?.profileVisibility === false ? null : profile.avatarUrl }]));
+      } catch { /* A missing display name must not prevent joining a call. */ }
+      const participants = members.map((member) => ({ socketId: member.id, userId: String(member.data.caller?.id ?? ''), ...identity(member.data.caller?.id), muted: member.data.callMuteStates?.[body.groupId] === true, cameraEnabled: member.data.callCameraStates?.[body.groupId] }));
       const muted = body.muted === true;
       socket.data.callMuteStates = { ...socket.data.callMuteStates, [body.groupId]: muted };
       const cameraEnabled = body.kind === 'video' && body.cameraEnabled !== false;
@@ -86,10 +100,24 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
       await socket.join(room);
       const hostSocketId = this.callHosts.get(body.groupId) ?? socket.id;
       this.callHosts.set(body.groupId, hostSocketId);
-      if (!participants.length) this.server.to(`group:${body.groupId}`).emit('call:invite', { groupId: body.groupId, kind: body.kind, initiatorSocketId: socket.id, initiatorUserId: socket.data.caller.id });
-      socket.to(room).emit('call:participant-joined', { groupId: body.groupId, participant: { socketId: socket.id, userId: socket.data.caller.id, muted, cameraEnabled }, hostSocketId });
+      if (!alreadyJoined && !participants.length) {
+        this.server.to(`group:${body.groupId}`).emit('call:invite', { groupId: body.groupId, kind: body.kind, initiatorSocketId: socket.id, initiatorUserId: socket.data.caller.id });
+        void this.notifyGroupCall(body.groupId, socket.data.caller.id, body.kind, profilesById.get(socket.data.caller.id)?.fullName, socket.id);
+      }
+      if (!alreadyJoined) socket.to(room).emit('call:participant-joined', { groupId: body.groupId, participant: { socketId: socket.id, userId: socket.data.caller.id, ...identity(socket.data.caller.id), muted, cameraEnabled }, hostSocketId });
       return { ok: true, participants, hostSocketId, raisedHandSocketIds: [...(this.raisedHands.get(body.groupId) ?? [])] };
     } catch (error) { return this.ackError(error); }
+  }
+  /** Persist invitations so offline group members receive the existing mobile/browser push. */
+  private async notifyGroupCall(groupId: string, initiatorId: string, kind: 'voice' | 'video', fullName: string | undefined, initiatorSocketId: string) {
+    try {
+      const [group, members] = await Promise.all([
+        this.app.prisma.group.findUnique({ where: { id: groupId }, select: { name: true } }),
+        this.app.prisma.groupMember.findMany({ where: { groupId, userId: { not: initiatorId } }, select: { userId: true } }),
+      ]);
+      for (const member of members) this.server.to(`user:${member.userId}`).emit('call:invite', { groupId, kind, initiatorUserId: initiatorId, initiatorSocketId });
+      if (members.length) await this.app.notify(members.map((member) => member.userId), 'group_activity', `${fullName || 'A member'} started a ${kind} call in ${group?.name || 'your group'}.`, groupId, 'chat');
+    } catch { /* Notification delivery must not interrupt an established call. */ }
   }
   @SubscribeMessage('call:leave') callLeave(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string }) { return this.ack(async () => { this.assertAuthenticated(socket); if (!body?.groupId) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Group ID is required' }, 400); await this.removeCallParticipant(body.groupId, socket.id); }); }
   @SubscribeMessage('call:signal') async callSignal(@ConnectedSocket() socket: Socket, @MessageBody() body: { groupId: string; targetSocketId: string; signal: CallSignal }) { return this.ack(async () => { this.assertAuthenticated(socket); if (!body?.groupId || !body?.targetSocketId || !body.signal || !['offer', 'answer', 'ice-candidate'].includes(body.signal.type)) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Invalid call signal' }, 400); const room = `call:${body.groupId}`; if (!socket.rooms.has(room)) throw new HttpException({ code: 'RBAC_FORBIDDEN', message: 'Join the call before signaling' }, 403); const recipients = await this.server.in(room).fetchSockets(); if (!recipients.some((recipient) => recipient.id === body.targetSocketId)) throw new HttpException({ code: 'RBAC_FORBIDDEN', message: 'Call participant is unavailable' }, 403); this.server.to(body.targetSocketId).emit('call:signal', { groupId: body.groupId, fromSocketId: socket.id, signal: body.signal }); }); }
@@ -124,7 +152,7 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
     const room = `call:${body?.groupId}`;
     if (!body?.groupId || !['mute-all', 'remove-participant', 'end-call'].includes(body.action) || this.callHosts.get(body.groupId) !== socket.id || !socket.rooms.has(room)) throw new HttpException({ code: 'RBAC_FORBIDDEN', message: 'Only the meeting host can use this control' }, 403);
     if (body.action === 'mute-all') { socket.to(room).emit('call:mute-request', { groupId: body.groupId }); return; }
-    if (body.action === 'end-call') { this.server.to(room).emit('call:ended', { groupId: body.groupId }); const members = await this.server.in(room).fetchSockets(); await Promise.all(members.map((member) => member.leave(room))); this.callHosts.delete(body.groupId); this.raisedHands.delete(body.groupId); return; }
+    if (body.action === 'end-call') { this.server.to(room).emit('call:ended', { groupId: body.groupId }); void this.notifyCallEnded(body.groupId); const members = await this.server.in(room).fetchSockets(); await Promise.all(members.map((member) => member.leave(room))); this.callHosts.delete(body.groupId); this.raisedHands.delete(body.groupId); return; }
     if (!body.targetSocketId || body.targetSocketId === socket.id) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Choose another participant to remove' }, 400);
     const target = (await this.server.in(room).fetchSockets()).find((member) => member.id === body.targetSocketId);
     if (!target) throw new HttpException({ code: 'NOT_FOUND', message: 'That participant has already left' }, 404);
@@ -158,10 +186,10 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
     }
     return { ok: false, error: { code: 'SOCKET_ERROR', message: 'Socket request failed' } };
   }
-  private async removeCallParticipant(groupId: string, socketId: string) {
+  private async removeCallParticipant(groupId: string, socketId: string, disconnected = false) {
     const room = `call:${groupId}`;
     const members = await this.server.in(room).fetchSockets();
-    if (!members.some((member) => member.id === socketId)) return;
+    if (!disconnected && !members.some((member) => member.id === socketId)) return;
     await this.server.in(socketId).socketsLeave(room);
     this.server.to(room).emit('call:participant-left', { groupId, socketId });
     this.server.to(room).emit('call:screen-share', { groupId, socketId, sharing: false });
@@ -172,10 +200,17 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
     const remaining = await this.server.in(room).fetchSockets();
     const nextHost = remaining[0]?.id ?? null;
     if (nextHost) this.callHosts.set(groupId, nextHost);
-    else this.callHosts.delete(groupId);
+    else { this.callHosts.delete(groupId); void this.notifyCallEnded(groupId); }
     this.server.to(room).emit('call:host-changed', { groupId, hostSocketId: nextHost });
   }
+  private async notifyCallEnded(groupId: string) {
+    try {
+      const members = await this.app.prisma.groupMember.findMany({ where: { groupId }, select: { userId: true } });
+      for (const member of members) this.server.to(`user:${member.userId}`).emit('call:ended', { groupId });
+    } catch { /* Call cleanup must still finish if notification lookup is unavailable. */ }
+  }
   private async removeSocketFromCalls(socket: Socket) {
-    for (const room of socket.rooms) if (room.startsWith('call:')) await this.removeCallParticipant(room.slice(5), socket.id);
+    const rooms = [...socket.rooms].filter((room) => room.startsWith('call:'));
+    await Promise.all(rooms.map((room) => this.removeCallParticipant(room.slice(5), socket.id, true)));
   }
 }

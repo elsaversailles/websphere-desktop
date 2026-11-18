@@ -13,7 +13,7 @@ describe('task tracker project selector', () => {
     };
     const service = Object.assign(Object.create(AppService.prototype), { prisma }) as AppService;
     const result = await service.taskTracker({ id: 'member' } as any);
-    expect(prisma.project.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { members: { some: { userId: 'member' } } } }));
+    expect(prisma.project.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { members: { some: { userId: 'member' } }, OR: [{ groupId: null }, { group: { members: { some: { userId: 'member' } } } }] } }));
     expect(result.projects).toEqual([{ id: 'project-1', title: 'First', collaborators: [{ id: 'member', fullName: 'Member', avatarUrl: null }] }, { id: 'project-2', title: 'No tasks', collaborators: [] }]);
     expect(result.activity[0]).toMatchObject({ projectId: 'project-1', taskTitle: 'Report' });
   });

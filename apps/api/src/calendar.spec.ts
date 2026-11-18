@@ -22,7 +22,7 @@ describe('calendar event visibility', () => {
 
     expect(result.events.map((event: { id: string }) => event.id)).toEqual(['personal-event', 'team-event']);
     expect(findEvents).toHaveBeenCalledWith({
-      where: { OR: [{ ownerId: 'user-1' }, { project: { members: { some: { userId: 'user-1' } } } }] },
+      where: { OR: [{ ownerId: 'user-1', projectId: null }, { project: { members: { some: { userId: 'user-1' } }, OR: [{ groupId: null }, { group: { members: { some: { userId: 'user-1' } } } }] } }] },
       orderBy: { startAt: 'asc' },
       include: { project: { select: { id: true, title: true } } },
     });
@@ -41,6 +41,7 @@ describe('calendar event visibility', () => {
     const result = await service.calendar({ id: 'user-1', role: 'Project_Member', tv: 0 });
 
     expect(findTasks).toHaveBeenCalledWith({ where: {
+      project: { OR: [{ groupId: null }, { group: { members: { some: { userId: 'user-1' } } } }] },
       OR: [{ createdBy: 'user-1' }, { assignments: { some: { assigneeId: 'user-1', active: true } } }], deadline: { not: null },
     }, select: { id: true, title: true, deadline: true, project: { select: { id: true, title: true } } }, orderBy: { deadline: 'asc' } });
     expect(result.hints).toEqual(tasks.map((task) => ({ ...task, type: 'task_deadline' })));

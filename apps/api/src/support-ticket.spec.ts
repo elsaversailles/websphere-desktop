@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AppService } from './app.service.js';
+import { signedInTicketSchema, publicSupportTicketSchema, ticketUpdateSchema } from '@websphere/shared';
 
 const admin = { id: 'admin-1', role: 'Administrator', tv: 0 } as any;
 const member = { id: 'member-1', role: 'Project_Member', tv: 0 } as any;
@@ -90,5 +91,23 @@ describe('support ticket status updates', () => {
   it('rejects non-administrators and unknown tickets', async () => {
     await expect(serviceWith(existing).service.updateTicket(member, 'ticket-1', { status: 'resolved' })).rejects.toMatchObject({ status: 403 });
     await expect(serviceWith(null).service.updateTicket(admin, 'missing', { status: 'resolved' })).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('support text limits', () => {
+  it('preserves longer rated feedback from the existing clients', () => {
+    const feedback = { category: 'other', subject: 'Feedback · 4/5 stars', body: 'Rating: 4/5\n\n' + 'x'.repeat(3900) };
+    expect(signedInTicketSchema.safeParse(feedback).success).toBe(true);
+    expect(signedInTicketSchema.safeParse({ ...feedback, subject: 'Help' }).success).toBe(false);
+    expect(publicSupportTicketSchema.safeParse({ ...feedback, email: 'u@example.com' }).success).toBe(false);
+  });
+  it('accepts 200 characters and rejects 201 for requests and replies', () => {
+    const base = { category: 'bug_report', subject: 'Help' };
+    for (const length of [200, 201]) {
+      const body = 'x'.repeat(length);
+      expect(signedInTicketSchema.safeParse({ ...base, body }).success).toBe(length === 200);
+      expect(publicSupportTicketSchema.safeParse({ ...base, email: 'user@example.com', body }).success).toBe(length === 200);
+      expect(ticketUpdateSchema.safeParse({ status: 'resolved', response: body }).success).toBe(length === 200);
+    }
   });
 });

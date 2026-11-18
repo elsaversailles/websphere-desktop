@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { RealtimeGateway } from './realtime.gateway.js';
 
 const socket = (caller?: { id: string }) => ({
-  id: 'socket-1', data: { caller }, handshake: { auth: {} }, join: vi.fn(), leave: vi.fn(), to: vi.fn(() => ({ emit: vi.fn() })), rooms: new Set<string>(['socket-1']), disconnect: vi.fn(),
+  id: caller?.id.replace('user-', 'socket-') ?? 'socket-1', data: { caller }, handshake: { auth: {} }, join: vi.fn(), leave: vi.fn(), to: vi.fn(() => ({ emit: vi.fn() })), rooms: new Set<string>(['socket-1']), disconnect: vi.fn(),
 }) as any;
 
 const events = { onNotification: vi.fn(), onPollTally: vi.fn(), onGroupMembershipRevoked: vi.fn(), registerPresenceProvider: vi.fn() } as any;
@@ -170,14 +170,15 @@ describe('RealtimeGateway room authorization', () => {
     expect(app.notify).not.toHaveBeenCalled();
   });
 
-  it('evicts a kicked member from the group and call rooms and tells their client', () => {
-    const gateway = new RealtimeGateway({} as any, {} as any, events);
+  it('evicts a kicked member from the group, call, and project rooms and tells their client', async () => {
+    const gateway = new RealtimeGateway({ prisma: { project: { findMany: vi.fn().mockResolvedValue([{ id: 'project-1' }]) } } } as any, {} as any, events);
     const onGroupMembershipRevoked = events.onGroupMembershipRevoked.mock.calls.at(-1)?.[0] as (groupId: string, userId: string) => void;
     const socketsLeave = vi.fn();
     const emit = vi.fn();
-    gateway.server = { in: vi.fn(() => ({ socketsLeave })), to: vi.fn(() => ({ emit })) } as any;
+    gateway.server = { in: vi.fn(() => ({ socketsLeave, fetchSockets: vi.fn().mockResolvedValue([]) })), to: vi.fn(() => ({ emit })) } as any;
 
     onGroupMembershipRevoked('group-1', 'user-9');
+    await vi.waitFor(() => expect(socketsLeave).toHaveBeenCalledWith('project:project-1'));
 
     expect(gateway.server.in).toHaveBeenCalledWith('user:user-9');
     expect(socketsLeave).toHaveBeenCalledWith('group:group-1');
@@ -196,4 +197,66 @@ describe('RealtimeGateway room authorization', () => {
     expect(result).toEqual({ ok: false, error: { code: 'CALL_FULL', message: 'This call has reached its six-participant limit' } });
     expect(client.join).not.toHaveBeenCalled();
   });
+});
+
+
+describe('call invitation notifications and identities', () => {
+  it('includes names when signaling beats the roster and notifies absent members only on call creation', async () => {
+    const notify = vi.fn().mockResolvedValue(undefined);
+    const groupEmit = vi.fn();
+    const app = {
+      member: vi.fn().mockResolvedValue({}), notify,
+      prisma: {
+        user: { findMany: vi.fn().mockResolvedValue([{ id: 'user-1', fullName: 'Ada Lovelace' }, { id: 'user-2', fullName: 'Grace Hopper' }]) },
+        group: { findUnique: vi.fn().mockResolvedValue({ name: 'Capstone' }) },
+        groupMember: { findMany: vi.fn().mockResolvedValue([{ userId: 'user-2' }]) },
+      },
+    };
+    const fetchSockets = vi.fn().mockResolvedValue([]);
+    const gateway = new RealtimeGateway(app as any, {} as any, events);
+    gateway.server = { in: vi.fn(() => ({ fetchSockets })), to: vi.fn(() => ({ emit: groupEmit })) } as any;
+    const client = socket({ id: 'user-1' });
+    const participantEmit = vi.fn();
+    client.to = vi.fn(() => ({ emit: participantEmit }));
+    await expect(gateway.callJoin(client, { groupId: 'group-1', kind: 'voice' })).resolves.toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
+    expect(gateway.server.to).toHaveBeenCalledWith('user:user-2');
+    expect(notify).toHaveBeenCalledWith(['user-2'], 'group_activity', 'Ada Lovelace started a voice call in Capstone.', 'group-1', 'chat');
+    expect(participantEmit).toHaveBeenCalledWith('call:participant-joined', expect.objectContaining({ participant: expect.objectContaining({ fullName: 'Ada Lovelace' }) }));
+    fetchSockets.mockResolvedValue([client]);
+    const joiner = socket({ id: 'user-2' });
+    const result = await gateway.callJoin(joiner, { groupId: 'group-1', kind: 'voice' });
+    expect(result.participants?.[0]).toMatchObject({ userId: 'user-1', fullName: 'Ada Lovelace' });
+    expect(notify).toHaveBeenCalledOnce();
+  });
+});
+
+
+describe('chat message bounds', () => {
+  it('accepts 10,000 characters and rejects 10,001 before persisting or broadcasting', async () => {
+    const create = vi.fn().mockResolvedValue({ id: 'message' });
+    const app = { member: vi.fn().mockResolvedValue({}), prisma: { chatMessage: { create } } };
+    const gateway = new RealtimeGateway(app as any, {} as any, events);
+    const emit = vi.fn();
+    gateway.server = { to: vi.fn(() => ({ emit })) } as any;
+    const client = socket({ id: 'user-1' });
+    await expect(gateway.chatSend(client, { groupId: 'group', body: 'a'.repeat(10000) })).resolves.toEqual({ ok: true });
+    await expect(gateway.chatSend(client, { groupId: 'group', body: 'a'.repeat(10001) })).resolves.toMatchObject({ ok: false, error: { code: 'VALIDATION_FAILED' } });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledTimes(1);
+  });
+  it('includes public profile avatars in the roster and hides private profile avatars', async () => {
+    const app = { member: vi.fn().mockResolvedValue({}), prisma: { user: { findMany: vi.fn().mockResolvedValue([
+      { id: 'user-1', fullName: 'Public', avatarUrl: '/public.png', preference: { profileVisibility: true } },
+      { id: 'user-2', fullName: 'Private', avatarUrl: '/private.png', preference: { profileVisibility: false } },
+    ]) } } };
+    const gateway = new RealtimeGateway(app as any, {} as any, events);
+    gateway.server = { in: vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([socket({ id: 'user-1' }), socket({ id: 'user-2' })]) })) } as any;
+    const result = await gateway.callJoin(socket({ id: 'user-3' }), { groupId: 'group', kind: 'voice' });
+    expect(result.participants).toEqual([
+      expect.objectContaining({ userId: 'user-1', fullName: 'Public', avatarUrl: '/public.png' }),
+      expect.objectContaining({ userId: 'user-2', fullName: 'Private', avatarUrl: null }),
+    ]);
+  });
+
 });
