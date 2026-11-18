@@ -1,0 +1,1 @@
+ALTER TABLE `GroupMember` ADD COLUMN `chatDeletedAt` DATETIME(3) NULL;

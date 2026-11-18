@@ -487,16 +487,21 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   /** Mints a fresh, unique join code for a group (30-day expiry). Used at creation and to self-heal expired codes. */
   async issueJoinCode(groupId: string) { let code = this.code(); while (await this.prisma.joinCode.findUnique({ where: { code } })) code = this.code(); await this.prisma.joinCode.create({ data: { groupId, code, expiresAt: new Date(Date.now() + 30 * 864e5) } }); return code; }
   async joinGroup(caller: Caller, code: string) { const entry = await this.prisma.joinCode.findUnique({ where: { code }, include: { group: true } }); if (!entry || !entry.active || (entry.expiresAt && entry.expiresAt < new Date())) fail('INVALID_JOIN_CODE', 'Join code is invalid or expired', 400); await this.prisma.groupMember.upsert({ where: { groupId_userId: { groupId: entry.groupId, userId: caller.id } }, update: {}, create: { groupId: entry.groupId, userId: caller.id } }); return entry.group; }
-  async groups(caller: Caller) { return this.prisma.group.findMany({ where: { members: { some: { userId: caller.id } } }, include: { members: { where: { userId: caller.id }, select: { role: true, chatHiddenAt: true, chatUnread: true } }, messages: { orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } }, _count: { select: { projects: true, ideas: true } } } }); }
+  async groups(caller: Caller) { return this.prisma.group.findMany({ where: { members: { some: { userId: caller.id } } }, include: { members: { where: { userId: caller.id }, select: { role: true, chatHiddenAt: true, chatDeletedAt: true, chatUnread: true } }, messages: { orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } }, _count: { select: { projects: true, ideas: true } } } }); }
   async searchGroupChats(caller: Caller, query: string) {
     const term = query.trim();
     if (!term) return this.groups(caller);
     const groups = await this.prisma.group.findMany({
       where: { members: { some: { userId: caller.id } }, OR: [{ name: { contains: term } }, { messages: { some: { body: { contains: term } } } }] },
-      include: { members: { where: { userId: caller.id }, select: { role: true, chatHiddenAt: true, chatUnread: true } }, _count: { select: { projects: true, ideas: true } }, messages: { where: { body: { contains: term } }, orderBy: { createdAt: 'desc' }, take: 1, select: { body: true } } },
+      include: { members: { where: { userId: caller.id }, select: { role: true, chatHiddenAt: true, chatDeletedAt: true, chatUnread: true } }, _count: { select: { projects: true, ideas: true } }, messages: { where: { body: { contains: term } }, orderBy: { createdAt: 'desc' }, take: 1, select: { body: true, createdAt: true } } },
       orderBy: { name: 'asc' },
     });
-    return groups.map((group: any) => ({ id: group.id, name: group.name, members: group.members, _count: group._count, messageMatch: group.messages[0]?.body ?? null }));
+    return groups.map((group: any) => {
+      const message = group.messages[0];
+      const cutoff = group.members[0]?.chatDeletedAt;
+      const messageMatch = message && (!cutoff || message.createdAt > cutoff) ? message.body : null;
+      return { id: group.id, name: group.name, members: group.members, _count: group._count, messageMatch };
+    }).filter((group: any) => group.messageMatch !== null || group.name.toLocaleLowerCase().includes(term.toLocaleLowerCase()));
   }
   private redactPrivateMemberProfiles(group: any) {
     return {
@@ -528,9 +533,10 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return membership;
   }
   async addGroupMemberByEmail(caller: Caller, groupId: string, email: string) { const user = await this.prisma.user.findUnique({ where: { email } }); if (!user) fail('NOT_FOUND', 'No registered account uses that email address', 404); return this.addGroupMember(caller, groupId, user.id); }
-  async setChatState(caller: Caller, groupId: string, action: 'read' | 'unread' | 'hide') {
+  async setChatState(caller: Caller, groupId: string, action: 'read' | 'unread' | 'hide' | 'delete') {
     await this.member(groupId, caller.id);
-    return this.prisma.groupMember.update({ where: { groupId_userId: { groupId, userId: caller.id } }, data: action === 'hide' ? { chatHiddenAt: new Date(), chatUnread: false } : action === 'unread' ? { chatUnread: true } : { chatHiddenAt: null, chatUnread: false } });
+    const now = new Date();
+    return this.prisma.groupMember.update({ where: { groupId_userId: { groupId, userId: caller.id } }, data: action === 'delete' ? { chatHiddenAt: now, chatDeletedAt: now, chatUnread: false } : action === 'hide' ? { chatHiddenAt: now, chatUnread: false } : action === 'unread' ? { chatUnread: true } : { chatHiddenAt: null, chatUnread: false } });
   }
   async promoteGroupMember(caller: Caller, groupId: string, userId: string) {
     await this.member(groupId, caller.id, true);
