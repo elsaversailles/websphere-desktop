@@ -1,7 +1,8 @@
+import { ListFilters, ListPager, useListFilters, type ListPage } from './ListFilters';
+import { workspaceSubscription } from './workspaceSocket';
 import { TASK_TITLE_MAX_LENGTH } from '@websphere/shared';
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { io } from 'socket.io-client';
-import { getAccessToken, request, socketBaseUrl } from '../api';
+import { request } from '../api';
 import { ScheduleDateFields } from './ScheduleDateFields';
 import { dateOnlyKey, formatDateOnly } from './dates';
 import { deadlineHealth, taskPriorityHealth, taskStatusHealth } from './health';
@@ -9,16 +10,20 @@ import { dashboardProjectProgress } from './dashboardProjectProgress';
 import { useLocalDay } from './useLocalDay';
 import { ConfirmDialog } from './ConfirmDialog';
 
-type Project = { id: string; title: string; description: string; status: string; startDate?: string | null; deadline?: string | null; group: { name: string } | null; members?: Array<{ role: string }>; tasks: Array<{ id: string; status: string }> };
+type Project = { id: string; title: string; description: string; status: string; startDate?: string | null; deadline?: string | null; group: { name: string } | null; members?: Array<{ role: string }>; tasks?: Array<{ id: string; status: string }>; progressAverage?: number };
 type ProjectTask = { id: string; title: string; description: string; startDate?: string | null; deadline?: string | null; priority: string; status: string; completedAt?: string | null; assignments: Array<{ assigneeId: string }>; risk?: { level: 'high' | 'medium' | 'low' } };
 type Member = { userId: string; role: string; responsibility?: string | null; user: { id: string; fullName: string } };
 type ProjectDetail = { id: string; title: string; description: string; status: string; startDate?: string | null; deadline?: string | null; group: { members: Member[] } | null; members: Member[]; tasks: ProjectTask[] };
 type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
 
-export function ProjectsPage({ notify, focusedTask }: { notify: (message: string) => void; focusedTask?: { projectId: string; taskId: string } | null }) {
+export function ProjectsPage({ notify, userId, focusedTask, selectedProjectId, onSelectProject }: { notify: (message: string) => void; userId: string; selectedProjectId: string; onSelectProject: (id: string) => void; focusedTask?: { projectId: string; taskId: string } | null }) {
   const today = useLocalDay();
-  const [projects, setProjects] = useState<Project[] | null>(null);
-  const [selectedProjectId, setSelectedProjectId] = useState('');
+  const filters = useListFilters();
+  const [result, setResult] = useState<ListPage<Project> | null>(null);
+  const projects = result?.items ?? null;
+  const listRequest = useRef(0);
+  const detailRequest = useRef(0);
+  const { page, setPage, query } = filters;
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -26,30 +31,40 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
   const [editingTask, setEditingTask] = useState<{ task: ProjectTask; mode: 'edit' | 'reassign' } | null>(null);
   const [createFormKey, setCreateFormKey] = useState(0);
   const [confirmation, setConfirmation] = useState<ConfirmAction | null>(null);
-  const openedFocus = useRef<typeof focusedTask>(null);
-
-  const refreshProjects = useCallback(() => request<Project[]>('/projects').then(setProjects).catch((error: Error) => notify(error.message)), [notify]);
-  useEffect(() => { void refreshProjects(); }, [refreshProjects]);
+  const refreshProjects = useCallback(async () => {
+    const generation = ++listRequest.current;
+    try {
+      const next = await request<ListPage<Project>>(`/projects/list?${query}`);
+      if (generation !== listRequest.current) return;
+      if (page > next.totalPages) setPage(next.totalPages);
+      else setResult(next);
+    } catch (error) { if (generation === listRequest.current) notify(error instanceof Error ? error.message : 'Could not load projects.'); }
+  }, [query, page, setPage, notify]);
+  useEffect(() => {
+    void refreshProjects();
+    return () => { listRequest.current += 1; };
+  }, [refreshProjects]);
 
   const selectedProject = useMemo(() => projects?.find((project) => project.id === selectedProjectId), [projects, selectedProjectId]);
-  const leader = selectedProject?.members?.[0]?.role === 'Project_Leader';
+  const leader = (detail?.members.find((member) => member.userId === userId) ?? selectedProject?.members?.[0])?.role === 'Project_Leader';
 
-  const openTasks = useCallback(async (projectId: string) => {
-    if (projectId !== selectedProjectId) setEditing(false);
-    setSelectedProjectId(projectId);
-    setDetail(null);
+  const refreshTasks = useCallback(async () => {
+    if (!selectedProjectId) return;
+    const generation = ++detailRequest.current;
     setLoadingDetail(true);
-    try { setDetail(await request<ProjectDetail>(`/projects/${projectId}`)); }
-    catch (error) { notify(error instanceof Error ? error.message : 'Could not load project tasks.'); }
-    finally { setLoadingDetail(false); }
+    try {
+      const next = await request<ProjectDetail>(`/projects/${encodeURIComponent(selectedProjectId)}`);
+      if (generation === detailRequest.current) setDetail(next);
+    } catch (error) {
+      if (generation === detailRequest.current) notify(error instanceof Error ? error.message : 'Could not load project tasks.');
+    } finally { if (generation === detailRequest.current) setLoadingDetail(false); }
   }, [selectedProjectId, notify]);
 
   useEffect(() => {
-    if (focusedTask && openedFocus.current !== focusedTask) {
-      openedFocus.current = focusedTask;
-      void openTasks(focusedTask.projectId);
-    }
-  }, [focusedTask, openTasks]);
+    setDetail(null); setEditing(false);
+    void refreshTasks();
+    return () => { detailRequest.current += 1; };
+  }, [refreshTasks]);
 
   useEffect(() => {
     if (!focusedTask || detail?.id !== focusedTask.projectId || !detail.tasks.some((task) => task.id === focusedTask.taskId)) return;
@@ -57,25 +72,25 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
     return () => cancelAnimationFrame(frame);
   }, [detail, focusedTask]);
 
-  const refreshTasks = useCallback(async () => {
-    if (selectedProjectId) await openTasks(selectedProjectId);
-  }, [selectedProjectId, openTasks]);
-
   useEffect(() => {
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    socket.on('connect', () => {
-      void request<Project[]>('/projects').then((items) => {
-        setProjects(items);
-        items.forEach((project) => socket.emit('project:join', project.id, () => undefined));
-      }).catch((error: Error) => notify(error.message));
-      void refreshTasks();
+    const { on, join, dispose } = workspaceSubscription();
+    let connected = false;
+    projects?.forEach((project) => join('project', project.id));
+    if (selectedProjectId && !projects?.some((project) => project.id === selectedProjectId)) join('project', selectedProjectId);
+    on('connect', () => {
+      if (connected) void Promise.all([refreshProjects(), refreshTasks()]);
+      connected = true;
     });
-    socket.on('task:updated', () => { void Promise.all([refreshProjects(), refreshTasks()]); });
-    socket.on('notification:new', () => { void Promise.all([refreshProjects(), refreshTasks()]); });
-    return () => { socket.disconnect(); };
-  }, [refreshProjects, refreshTasks, notify]);
-
-  useEffect(() => { void refreshTasks(); }, [today, refreshTasks]);
+    on('task:updated', (event: { projectId: string }) => {
+      if (event.projectId === selectedProjectId) void Promise.all([refreshProjects(), refreshTasks()]);
+      else if (projects?.some((project) => project.id === event.projectId)) void refreshProjects();
+    });
+    on('notification:new', (event: { relatedType?: string }) => {
+      if (event.relatedType === 'project') void refreshProjects();
+    });
+    on('group:removed', () => void Promise.all([refreshProjects(), refreshTasks()]));
+    return dispose;
+  }, [selectedProjectId, refreshProjects, refreshTasks, projects]);
 
   async function createTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -137,7 +152,7 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
     setSaving(true);
     try {
       await request(`/projects/${project.id}`, { method: 'DELETE' });
-      if (selectedProjectId === project.id) { setSelectedProjectId(''); setDetail(null); setEditing(false); }
+      if (selectedProjectId === project.id) { onSelectProject(''); setDetail(null); setEditing(false); }
       await refreshProjects();
       notify('Project deleted.');
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not delete the project.'); }
@@ -160,23 +175,25 @@ export function ProjectsPage({ notify, focusedTask }: { notify: (message: string
     <div className="ph"><h2>My Projects</h2></div>
     <section className="cc">
       <div className="cc-head"><h3>Existing Projects</h3></div>
+      <ListFilters filters={filters} placeholder="Search projects…" statuses={[{ value: 'active', label: 'Active' }, { value: 'completed', label: 'Completed' }, { value: 'on_hold', label: 'On Hold' }, { value: 'archived', label: 'Archived' }]} />
       {projects === null ? <div className="legacy-empty">Loading projects…</div> : projects.length ? <div className="project-table-scroll" role="region" aria-label="Existing projects" tabIndex={0}><table className="tbl projects-table">
         <thead><tr><th>Project</th><th>Group</th><th>Role</th><th>Progress</th><th>Start Date</th><th>End Date</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>{projects.map((project) => {
-          const { progress, health } = dashboardProjectProgress(project.tasks, project.status);
+          const { progress, health } = dashboardProjectProgress(project.tasks ?? [], project.status, project.progressAverage);
           const isLeader = project.members?.[0]?.role === 'Project_Leader';
           return <tr key={project.id}>
             <td><strong>{project.title}</strong></td><td>{project.group?.name ?? 'Independent'}</td>
             <td><span className="bdg ac">{isLeader ? 'Leader' : 'Member'}</span></td>
             <td><div className="progress-cell"><div className="pb-wrap"><div className={`pb ${health.tone}`} style={{ width: `${progress}%` }} /></div><span className={`pb-val ${health.tone}`}>{progress}%</span></div></td>
             <td>{formatDateOnly(project.startDate)}</td><td>{formatDateOnly(project.deadline)}</td><td><span className={`bdg ${health.tone}`}>{health.label}</span></td>
-            <td><div className="task-actions"><button className="btn-o btn-sm" onClick={() => void openTasks(project.id)}>{selectedProjectId === project.id ? 'Refresh Tasks' : isLeader ? 'Manage Tasks' : 'View Tasks'}</button>{isLeader ? <button type="button" className="btn-o btn-sm btn-red" disabled={saving} onClick={() => setConfirmation({ title: 'Delete project?', description: `“${project.title}” and all of its tasks will be permanently deleted.`, confirmLabel: 'Delete project', destructive: true, action: () => void deleteProject(project) })}>Delete</button> : null}</div></td>
+            <td><div className="task-actions"><button className="btn-o btn-sm" onClick={() => selectedProjectId === project.id ? void refreshTasks() : onSelectProject(project.id)}>{selectedProjectId === project.id ? 'Refresh Tasks' : isLeader ? 'Manage Tasks' : 'View Tasks'}</button>{isLeader ? <button type="button" className="btn-o btn-sm btn-red" disabled={saving} onClick={() => setConfirmation({ title: 'Delete project?', description: `“${project.title}” and all of its tasks will be permanently deleted.`, confirmLabel: 'Delete project', destructive: true, action: () => void deleteProject(project) })}>Delete</button> : null}</div></td>
           </tr>;
         })}</tbody>
-      </table></div> : <div className="legacy-empty">Your projects will appear here. Create your first project from the dashboard.</div>}
+      </table></div> : <div className="legacy-empty">No projects match your filters. Create your first project from the dashboard.</div>}
     </section>
+    {result ? <ListPager page={page} totalPages={result.totalPages} setPage={setPage} /> : null}
     {selectedProjectId ? <section className="cc task-manager">
-      <div className="cc-head"><div><h3>{selectedProject?.title ?? 'Project'} Tasks</h3><span className="task-manager-subtitle">{leader ? 'Create and manage tasks for this project.' : 'View tasks assigned within this project.'}</span></div><div className="ph-acts">{leader ? <button className="btn-o btn-sm" onClick={() => setEditing((value) => !value)}>{editing ? 'Cancel Edit' : 'Edit Project'}</button> : null}<button className="btn-o btn-sm" onClick={() => { setSelectedProjectId(''); setDetail(null); setEditing(false); }}>Close</button></div></div>
+      <div className="cc-head"><div><h3>{detail?.title ?? selectedProject?.title ?? 'Project'} Tasks</h3><span className="task-manager-subtitle">{leader ? 'Create and manage tasks for this project.' : 'View tasks assigned within this project.'}</span></div><div className="ph-acts">{leader ? <button className="btn-o btn-sm" onClick={() => setEditing((value) => !value)}>{editing ? 'Cancel Edit' : 'Edit Project'}</button> : null}<button className="btn-o btn-sm" onClick={() => { onSelectProject(''); setDetail(null); setEditing(false); }}>Close</button></div></div>
       {loadingDetail ? <div className="legacy-empty">Loading project tasks…</div> : detail ? <>
         {editing && leader ? <form className="task-create-form project-edit-form" aria-label="Edit project" onSubmit={(event) => void saveEdit(event)}>
           <div className="task-form-field"><label className="lbl" htmlFor="project-edit-title">Project Title</label><input id="project-edit-title" className="ifield" name="title" required minLength={2} maxLength={180} defaultValue={detail.title} placeholder="Project title" /></div>

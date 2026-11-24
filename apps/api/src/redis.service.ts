@@ -33,6 +33,15 @@ export class RedisService implements OnModuleDestroy {
     return this.client.getdel(key);
   }
 
+  async replaceIfCurrent(key: string, expected: string, replacement?: string, expiresInSeconds?: number) {
+    await this.connected();
+    const result = await this.client.eval(
+      "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end if ARGV[2] == '' then redis.call('DEL', KEYS[1]) else redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3]) end return 1",
+      1, key, expected, replacement ?? '', expiresInSeconds ?? 1,
+    );
+    return result === 1;
+  }
+
   async get(key: string) {
     await this.connected();
     return this.client.get(key);

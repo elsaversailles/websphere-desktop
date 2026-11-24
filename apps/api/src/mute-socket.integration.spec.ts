@@ -25,10 +25,12 @@ describe('microphone state over Socket.IO', () => {
     gateway.server = server.of('/') as any;
     server.on('connection', (socket) => {
       socket.data.caller = { id: socket.handshake.auth.userId };
+      socket.on('disconnecting', () => { void (gateway as any).removeSocketFromCalls(socket); });
+      socket.on('call:host-action', (body, ack) => { void gateway.callHostAction(socket as any, body).then(ack); });
       socket.on('call:join', (body, ack) => { void gateway.callJoin(socket as any, body).then(ack); });
       socket.on('call:mute-state', (body, ack) => { void gateway.callMuteState(socket as any, body).then(ack); });
     });
-    await new Promise<void>((resolve) => http!.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve, reject) => { http!.once('error', reject); http!.listen(0, '127.0.0.1', resolve); });
     const port = (http.address() as { port: number }).port;
     const connect = async (userId: string) => {
       const socket = io(`http://127.0.0.1:${port}`, { auth: { userId }, transports: ['websocket'], forceNew: true });
@@ -39,7 +41,8 @@ describe('microphone state over Socket.IO', () => {
     const mobile = await connect('mobile');
     const web = await connect('web');
     expect(await mobile.emitWithAck('call:join', { groupId: 'group', kind: 'voice', muted: false })).toMatchObject({ ok: true });
-    expect(await web.emitWithAck('call:join', { groupId: 'group', kind: 'voice', muted: false })).toMatchObject({ ok: true, participants: [{ userId: 'mobile', muted: false }] });
+    const webJoin = await web.emitWithAck('call:join', { groupId: 'group', kind: 'voice', muted: false });
+    expect(webJoin).toMatchObject({ ok: true, participants: [{ userId: 'mobile', muted: false }] });
 
     const webSeesMute = new Promise<any>((resolve) => web.once('call:mute-state', resolve));
     expect(await mobile.emitWithAck('call:mute-state', { groupId: 'group', muted: true })).toMatchObject({ ok: true });
@@ -56,8 +59,10 @@ describe('microphone state over Socket.IO', () => {
     const seesRejoin = new Promise<any>((resolve) => mobile.once('call:participant-joined', resolve));
     web.disconnect();
     const rejoinedWeb = await connect('web');
-    const join = await rejoinedWeb.emitWithAck('call:join', { groupId: 'group', kind: 'voice', muted: true });
-    expect(join).toMatchObject({ ok: true, participants: expect.arrayContaining([expect.objectContaining({ userId: 'mobile', muted: true })]) });
+    const join = await rejoinedWeb.emitWithAck('call:join', { groupId: 'group', kind: 'voice', muted: true, resumeId: webJoin.callId });
+    expect(join).toMatchObject({ ok: true, callId: webJoin.callId, participants: expect.arrayContaining([expect.objectContaining({ userId: 'mobile', muted: true })]) });
     expect(await seesRejoin).toMatchObject({ participant: { socketId: rejoinedWeb.id, userId: 'web', muted: true } });
+    expect(await mobile.emitWithAck('call:host-action', { groupId: 'group', action: 'end-call' })).toMatchObject({ ok: true });
+    expect(await rejoinedWeb.emitWithAck('call:join', { groupId: 'group', kind: 'voice', resumeId: webJoin.callId })).toMatchObject({ ok: false, error: { code: 'CALL_ENDED' } });
   }, 10000);
 });

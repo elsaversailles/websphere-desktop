@@ -1,10 +1,11 @@
 const apiBase = import.meta.env.VITE_API_URL || '/api';
 export function apiUrl(path: string) { return `${apiBase}${path}`; }
 export const sessionInvalidatedEvent = 'websphere:session-invalidated';
+export const archivedAccountMessage = 'YOUR ACCOUNT IS ARCHIVED, PLEASE CONTACT OUR ADMIN';
 export const sessionExpiredMessage = 'Your session has expired. Please sign in again.';
 
 export type Role = 'Administrator' | 'Project_Leader' | 'Project_Member';
-export type User = { id: string; fullName: string; email: string; institution?: string | null; course?: string | null; avatarUrl?: string | null; role: Role };
+export type User = { id: string; fullName: string; email: string; institution?: string | null; course?: string | null; avatarUrl?: string | null; googleLinked?: boolean; passwordEnabled?: boolean; role: Role };
 export type Session = { access: string; refresh: string; role: Role; user: User };
 
 const sessionKeys = ['ws_access', 'ws_refresh', 'ws_role', 'ws_user'] as const;
@@ -39,6 +40,7 @@ const sessionStore: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> = (() =>
 })();
 
 let access = sessionStore.getItem('ws_access') ?? '';
+let sessionEpoch = 0;
 
 export function getAccessToken() { return access; }
 export function socketBaseUrl() { return apiBase.startsWith('http') ? apiBase.replace(/\/api\/?$/, '') : window.location.origin; }
@@ -52,6 +54,7 @@ export function loadSession(): Session | null {
 }
 
 export function saveSession(value: Session) {
+  if (value.refresh !== sessionStore.getItem('ws_refresh')) sessionEpoch += 1;
   access = value.access;
   sessionStore.setItem('ws_access', value.access);
   sessionStore.setItem('ws_refresh', value.refresh);
@@ -59,16 +62,25 @@ export function saveSession(value: Session) {
   sessionStore.setItem('ws_user', JSON.stringify(value.user));
 }
 
+export function saveSessionUser(user: User) {
+  const current = loadSession();
+  if (!current || current.user.id !== user.id) return null;
+  sessionStore.setItem('ws_user', JSON.stringify(user));
+  sessionStore.setItem('ws_role', user.role);
+  return { ...current, role: user.role, user };
+}
+
 export function clearSession() {
+  sessionEpoch += 1;
   access = '';
   sessionKeys.forEach((key) => sessionStore.removeItem(key));
 }
 
 type ApiRequestInit = RequestInit & { skipSessionInvalidation?: boolean; skipAuthRetry?: boolean };
 
-function invalidateSession() {
+export function invalidateSession(code = 'AUTH_UNAUTHENTICATED') {
   clearSession();
-  window.dispatchEvent(new CustomEvent(sessionInvalidatedEvent));
+  window.dispatchEvent(new CustomEvent(sessionInvalidatedEvent, { detail: code }));
 }
 
 /**
@@ -76,11 +88,18 @@ function invalidateSession() {
  * would otherwise start failing every request. Exchanging the refresh token here keeps the session
  * alive for its full lifetime instead of stranding the user mid-task.
  */
-let refreshInFlight: Promise<boolean> | null = null;
+type RefreshResult = 'refreshed' | 'expired' | 'unavailable';
+let refreshInFlight: Promise<RefreshResult> | null = null;
 
-async function exchangeRefreshToken(): Promise<boolean> {
+async function exchangeRefreshToken(epoch: number): Promise<RefreshResult> {
+  if (epoch !== sessionEpoch) return 'expired';
   const refresh = sessionStore.getItem('ws_refresh');
-  if (!refresh) return false;
+  if (!refresh) return 'expired';
+  const storedAccess = sessionStore.getItem('ws_access');
+  if (storedAccess && storedAccess !== access) {
+    access = storedAccess;
+    return 'refreshed';
+  }
   try {
     const next = await request<{ access: string; refresh: string; role: Role }>('/auth/refresh', {
       method: 'POST',
@@ -88,43 +107,56 @@ async function exchangeRefreshToken(): Promise<boolean> {
       skipSessionInvalidation: true,
       skipAuthRetry: true,
     });
+    if (!next.access || !next.refresh) return 'unavailable';
+    if (epoch !== sessionEpoch || refresh !== sessionStore.getItem('ws_refresh')) return 'expired';
     access = next.access;
     sessionStore.setItem('ws_access', next.access);
     sessionStore.setItem('ws_refresh', next.refresh);
     sessionStore.setItem('ws_role', next.role);
-    return true;
-  } catch {
-    return false;
+    return 'refreshed';
+  } catch (error) {
+    if (error instanceof ApiRequestError && ['AUTH_UNAUTHENTICATED', 'ACCOUNT_ARCHIVED'].includes(error.code ?? '')) return 'expired';
+    return 'unavailable';
   }
 }
 
-/**
- * Refresh tokens are single use and rotate on every exchange, and replaying a consumed one bumps
- * the account's token version, which signs every session out. Parallel 401s therefore have to share
- * one exchange rather than each redeeming the same token.
- */
-function refreshOnce(): Promise<boolean> {
-  refreshInFlight ??= exchangeRefreshToken().finally(() => { refreshInFlight = null; });
+/** Collapse refresh rotation in this tab and coordinate with other tabs where Web Locks is available. */
+function refreshOnce(epoch: number): Promise<RefreshResult> {
+  if (!refreshInFlight) {
+    const exchange = () => exchangeRefreshToken(epoch);
+    const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+    refreshInFlight = Promise.resolve(locks ? locks.request('websphere-session-refresh', exchange) : exchange())
+      .finally(() => { refreshInFlight = null; });
+  }
   return refreshInFlight;
 }
 
 export async function request<T>(path: string, init: ApiRequestInit = {}): Promise<T> {
   const { skipSessionInvalidation, skipAuthRetry, ...requestInit } = init;
   const formData = init.body instanceof FormData;
-  // Rebuilt per attempt so a retry picks up the token minted by the refresh.
-  const send = () => fetch(apiUrl(path), {
-    ...requestInit,
-    headers: { ...(!formData ? { 'content-type': 'application/json' } : {}), ...(access ? { authorization: `Bearer ${access}` } : {}), ...requestInit.headers },
-  });
+  const epoch = sessionEpoch;
+  let sentAccess = access;
+  const send = () => {
+    sentAccess = access;
+    return fetch(apiUrl(path), {
+      ...requestInit,
+      headers: { ...(!formData ? { 'content-type': 'application/json' } : {}), ...(sentAccess ? { authorization: `Bearer ${sentAccess}` } : {}), ...requestInit.headers },
+    });
+  };
   let response = await send();
   let body = await response.json().catch(() => ({}));
-  const expired = response.status === 401 && body.code === 'AUTH_UNAUTHENTICATED';
-  if (expired && !skipAuthRetry && await refreshOnce()) {
-    response = await send();
-    body = await response.json().catch(() => ({}));
+  const expired = () => response.status === 401 && body.code === 'AUTH_UNAUTHENTICATED';
+  if (expired() && !skipAuthRetry && epoch === sessionEpoch) {
+    const refreshed = sentAccess !== access ? 'refreshed' : await refreshOnce(epoch);
+    if (refreshed === 'unavailable') throw new ApiRequestError('Could not reconnect to WebSphere. Please try again.', 'AUTH_REFRESH_UNAVAILABLE');
+    if (refreshed === 'refreshed' && epoch === sessionEpoch) {
+      response = await send();
+      body = await response.json().catch(() => ({}));
+    }
   }
   if (!response.ok) {
-    if (!skipSessionInvalidation && response.status === 401 && body.code === 'AUTH_UNAUTHENTICATED') {
+    if (epoch === sessionEpoch && body.code === 'ACCOUNT_ARCHIVED' && sentAccess) invalidateSession('ACCOUNT_ARCHIVED');
+    if (!skipSessionInvalidation && expired() && epoch === sessionEpoch) {
       invalidateSession();
       throw new ApiRequestError(sessionExpiredMessage, body.code, body.fields);
     }
@@ -169,7 +201,8 @@ async function performRestore(): Promise<Session | null> {
     };
     saveSession(restored);
     return restored;
-  } catch {
+  } catch (error) {
+    if (!(error instanceof ApiRequestError) || !['AUTH_UNAUTHENTICATED', 'ACCOUNT_ARCHIVED'].includes(error.code ?? '')) return existing;
     clearSession();
     return null;
   }

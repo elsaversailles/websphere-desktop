@@ -67,6 +67,15 @@ export class EmailService {
     return true;
   }
 
+  async sendPasswordRecoveryCode(email: string, code: string) {
+    await this.send({
+      to: email,
+      subject: 'Your WebSphere password-reset code',
+      text: `Enter ${code} in WebSphere to reset your password. This code expires in 5 minutes. If you did not request this code, you can ignore this email.`,
+      html: `<p>Enter this code in WebSphere to reset your password:</p><p style="font-size:24px;font-weight:700;letter-spacing:4px">${code}</p><p>It expires in 5 minutes. If you did not request this code, you can ignore this email.</p>`,
+    }, 'Password-reset email could not be delivered. Please try again.');
+  }
+
   async sendRegistrationVerification(email: string, code: string) {
     await this.send({
       from: this.config.get('SES_FROM'),

@@ -1,6 +1,6 @@
+import { workspaceSubscription } from './workspaceSocket';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
-import { io } from 'socket.io-client';
-import { getAccessToken, request, socketBaseUrl } from '../api';
+import { request } from '../api';
 import { categoryLabel, statusLabel, type SupportTicketRecord } from './ticketStatus';
 
 /** The requester's view of their own tickets: current status, the admin's reply, and live updates when either changes. */
@@ -10,9 +10,9 @@ export function SupportRequestsPage({ notify, focusedTicketId }: { notify: (mess
 
   useEffect(() => { void refresh().catch((error: Error) => notify(error.message)); }, [refresh, notify]);
   useEffect(() => {
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    socket.on('notification:new', () => { void refresh().catch(() => undefined); });
-    return () => { socket.disconnect(); };
+    const { socket, on, dispose } = workspaceSubscription();
+    on('notification:new', (event: { relatedType?: string }) => { if (event.relatedType === 'ticket') void refresh().catch(() => undefined); });
+    return () => { dispose(); };
   }, [refresh]);
   useEffect(() => {
     if (!focusedTicketId || !tickets) return;

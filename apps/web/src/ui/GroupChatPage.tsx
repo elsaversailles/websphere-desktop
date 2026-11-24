@@ -1,9 +1,10 @@
+import { workspaceSubscription } from './workspaceSocket';
 import { avatarColor } from './health';
 import { type CSSProperties, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { io, type Socket } from 'socket.io-client';
+import type { Socket } from 'socket.io-client';
 import { CHAT_MESSAGE_MAX_LENGTH } from '@websphere/shared';
 import type { CallHostAction, CallKind, CallParticipant, CallSignal } from '@websphere/shared';
-import { getAccessToken, request, socketBaseUrl } from '../api';
+import { request } from '../api';
 import { GroupAvatar } from './GroupAvatar';
 import { GroupHub as GroupHubPanel } from './GroupHub';
 import { PollStatus } from './PollStatus';
@@ -11,7 +12,17 @@ import { ConfirmDialog } from './ConfirmDialog';
 import type { GroupHub, GroupSummary, Poll } from './types';
 
 type Props = { userId: string; selectedGroupId: string; onSelectGroup: (id: string) => void; onIdeas: () => void; notify: (message: string) => void; incomingCall: { groupId: string; kind: CallKind } | null; onIncomingCallHandled: () => void; onCallChange: (call: { groupId: string; startedAt: number } | null) => void };
-type ActiveCall = { groupId: string; kind: CallKind };
+type ActiveCall = { groupId: string; kind: CallKind; callId?: string };
+type SavedCall = { groupId: string; kind: CallKind; callId: string; startedAt: number; muted: boolean; cameraEnabled: boolean };
+const callStorageKey = (id: string) => `websphere:call:${id}`;
+export function loadSavedCall(id: string): SavedCall | null {
+  try {
+    const saved: SavedCall = JSON.parse(sessionStorage.getItem(callStorageKey(id)) ?? 'null');
+    return saved?.groupId && saved.callId && ['voice', 'video'].includes(saved.kind) ? saved : null;
+  } catch { return null; }
+}
+export function removeSavedCall(id: string) { try { sessionStorage.removeItem(callStorageKey(id)); } catch { /* storage unavailable */ } }
+
 type RemoteStream = { socketId: string; userId: string; fullName?: string; avatarUrl?: string | null; stream: MediaStream };
 type ChatSearchGroup = GroupSummary & { messageMatch?: string | null };
 type UpcomingEvent = { id: string; title: string; startAt: string; endAt?: string | null; type: string };
@@ -197,6 +208,12 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     return () => window.removeEventListener('keydown', close);
   }, [chatMenu]);
 
+  useEffect(() => {
+    const saved = loadSavedCall(userId);
+    if (!call?.callId || saved?.callId !== call.callId) return;
+    try { sessionStorage.setItem(callStorageKey(userId), JSON.stringify({ ...saved, muted, cameraEnabled })); } catch { /* storage unavailable */ }
+  }, [call, muted, cameraEnabled, userId]);
+
   function removePeer(socketId: string) {
     peersRef.current.get(socketId)?.close();
     peersRef.current.delete(socketId);
@@ -206,6 +223,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
   }
 
   function clearCall() {
+    removeSavedCall(userId);
     reconnectingRef.current = false;
     reconnectGenerationRef.current += 1;
     for (const socketId of [...peersRef.current.keys()]) removePeer(socketId);
@@ -313,15 +331,16 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     return !track || !track.enabled || track.muted || track.readyState === 'ended';
   }
 
-  async function joinCall(kind: CallKind) {
+  async function joinCall(kind: CallKind, saved?: SavedCall) {
     if (!selectedGroupId || !socketRef.current || callRef.current) return;
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('Calling is not supported by this browser. Use a current version of Chrome, Edge, Firefox, or Safari.');
       const relay = await request<{ iceServers: RTCIceServer[] }>(`/groups/${selectedGroupId}/realtime/ice-servers`);
       iceServersRef.current = relay.iceServers;
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: kind === 'video' });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: kind === 'video' && (saved?.cameraEnabled ?? true) });
+      if (saved?.muted) stream.getAudioTracks().forEach((track) => { track.enabled = false; });
       localStreamRef.current = stream;
-      const active = { groupId: selectedGroupId, kind };
+      const active: ActiveCall = { groupId: selectedGroupId, kind, callId: saved?.callId };
       callRef.current = active;
       const generation = ++reconnectGenerationRef.current;
       setCall(active);
@@ -338,14 +357,19 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       const initialMuted = microphoneMuted(stream);
       setMuted(initialMuted);
       setCameraEnabled(stream.getVideoTracks().some((track) => track.enabled));
-      const result = await new Promise<{ ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }>((resolve) => {
+      const result = await new Promise<{ ok: boolean; callId?: string; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }>((resolve) => {
         const socket = socketRef.current;
         if (!socket?.connected) { resolve({ ok: false }); return; }
-        socket.timeout(10000).emit('call:join', { ...active, muted: initialMuted, cameraEnabled: stream.getVideoTracks().some((track) => track.enabled) }, (error: Error | null, ack?: { ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }) => resolve(error ? { ok: false } : ack ?? { ok: false }));
+        socket.timeout(10000).emit('call:join', { groupId: active.groupId, kind, resumeId: saved?.callId, muted: initialMuted, cameraEnabled: stream.getVideoTracks().some((track) => track.enabled) }, (error: Error | null, ack?: { ok: boolean; callId?: string; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }) => resolve(error ? { ok: false } : ack ?? { ok: false }));
       });
       if (generation !== reconnectGenerationRef.current) { if (result.ok && callRef.current?.groupId !== active.groupId) socketRef.current?.emit('call:leave', { groupId: active.groupId }, () => undefined); return; }
       if (!result?.ok) throw new Error(result?.error?.message ?? 'Could not join the call.');
-      onCallChange({ groupId: active.groupId, startedAt: Date.now() });
+      active.callId = result.callId;
+      const startedAt = saved?.startedAt ?? Date.now();
+      if (active.callId) {
+        try { sessionStorage.setItem(callStorageKey(userId), JSON.stringify({ ...active, startedAt, muted: initialMuted, cameraEnabled: stream.getVideoTracks().some((track) => track.enabled) })); } catch { /* storage unavailable */ }
+      }
+      onCallChange({ groupId: active.groupId, startedAt });
       // A mute change may have occurred while the join acknowledgement was pending.
       publishMuteState(active.groupId, microphoneMuted(stream));
       setRemoteCameraStates((current) => ({ ...Object.fromEntries((result.participants ?? []).filter((participant) => participant.cameraEnabled !== undefined).map((participant) => [participant.socketId, participant.cameraEnabled!])), ...current }));
@@ -386,11 +410,24 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
     if (callRef.current) publishMuteState(callRef.current.groupId, actualMuted);
   }
 
-  function toggleCamera() {
+  async function toggleCamera() {
     const next = !cameraEnabled;
-    localStreamRef.current?.getVideoTracks().forEach((track) => { track.enabled = next; });
+    const stream = localStreamRef.current;
+    const active = callRef.current;
+    if (!stream || !active) return;
+    if (next && !stream.getVideoTracks().length) {
+      try {
+        const camera = await navigator.mediaDevices.getUserMedia({ video: true });
+        const track = camera.getVideoTracks()[0];
+        if (localStreamRef.current !== stream) { camera.getTracks().forEach((item) => item.stop()); return; }
+        if (!track) return;
+        stream.addTrack(track);
+        if (!presentationStreamRef.current) await Promise.allSettled([...peersRef.current.values()].map((peer) => peer.getTransceivers().find((item) => item.receiver.track.kind === 'video')?.sender.replaceTrack(track)));
+      } catch (error) { notify(mediaDeviceErrorMessage(error, 'video')); return; }
+    }
+    stream.getVideoTracks().forEach((track) => { track.enabled = next; });
     setCameraEnabled(next);
-    if (callRef.current) socketRef.current?.emit('call:camera-state', { groupId: callRef.current.groupId, enabled: next }, () => undefined);
+    socketRef.current?.emit('call:camera-state', { groupId: active.groupId, enabled: next }, () => undefined);
   }
 
   async function stopPresenting(notifyOthers = true) {
@@ -464,15 +501,19 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
 
   useEffect(() => {
     if (!selectedGroupId) return;
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
+    const { socket, on, join, dispose } = workspaceSubscription();
     socketRef.current = socket;
-    socket.on('connect', () => {
-      socket.emit('group:join', selectedGroupId, () => undefined);
+    join('group', selectedGroupId);
+    on('connect', () => {
       const active = callRef.current;
       const stream = localStreamRef.current;
-      if (!reconnectingRef.current || !active || !stream) return;
+      if (!reconnectingRef.current || !active || !stream) {
+        const saved = loadSavedCall(userId);
+        if (!active && saved?.groupId === selectedGroupId) void joinCall(saved.kind, saved);
+        return;
+      }
       const generation = ++reconnectGenerationRef.current;
-      socket.timeout(10000).emit('call:join', { ...active, muted: microphoneMuted(stream), cameraEnabled: !!stream.getVideoTracks()[0]?.enabled }, (error: Error | null, result?: { ok: boolean; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }) => {
+      socket.timeout(10000).emit('call:join', { groupId: active.groupId, kind: active.kind, resumeId: active.callId, muted: microphoneMuted(stream), cameraEnabled: !!stream.getVideoTracks()[0]?.enabled }, (error: Error | null, result?: { ok: boolean; callId?: string; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[]; error?: { message?: string } }) => {
         if (generation !== reconnectGenerationRef.current || callRef.current !== active) { if (result?.ok && callRef.current?.groupId !== active.groupId) socket.emit('call:leave', { groupId: active.groupId }, () => undefined); return; }
         if (error || !result?.ok) { socket.emit('call:leave', { groupId: active.groupId }, () => undefined); clearCall(); notify(result?.error?.message ?? 'Could not reconnect the call. Please rejoin.'); return; }
         reconnectingRef.current = false;
@@ -485,7 +526,7 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
         for (const participant of result.participants ?? []) void createPeer(participant, false);
       });
     });
-    socket.on('disconnect', () => {
+    on('disconnect', () => {
       if (!callRef.current || !localStreamRef.current) return;
       reconnectingRef.current = true;
       reconnectGenerationRef.current += 1;
@@ -495,22 +536,22 @@ export function GroupChatPage({ userId, selectedGroupId, onSelectGroup, onIdeas,
       presentationStreamRef.current?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
       presentationStreamRef.current = null; setPresentationStream(null); setPresenterSocketId(null);
     });
-    socket.on('notification:new', () => { void refreshHub(); });
-    socket.on('poll:tally', (tally: { groupId?: string }) => { if (tally.groupId === selectedGroupId) void refreshHub(); });
-    socket.on('chat:message', (message: GroupHub['messages'][number]) => setHub((current) => current ? { ...current, messages: [message, ...current.messages.filter((item) => item.id !== message.id)] } : current));
-    socket.on('group:removed', (event: { groupId: string }) => { if (event.groupId === selectedGroupId) { if (callRef.current?.groupId === selectedGroupId) clearCall(); setManageOpen(false); setHub(null); onSelectGroup(''); notify('You were removed from this group.'); } });
-    socket.on('call:participant-joined', (event: { groupId: string; participant: CallParticipant; hostSocketId: string }) => { if (event.groupId === callRef.current?.groupId) { if (presentationStreamRef.current) socket.emit('call:screen-share', { groupId: event.groupId, sharing: true }, () => undefined); setHostSocketId(event.hostSocketId); if (event.participant.muted !== undefined) setRemoteMuteStates((current) => ({ ...current, [event.participant.socketId]: current[event.participant.socketId] ?? event.participant.muted! })); if (event.participant.cameraEnabled !== undefined) setRemoteCameraStates((current) => ({ ...current, [event.participant.socketId]: event.participant.cameraEnabled! })); void createPeer(event.participant, true); } });
-    socket.on('call:participant-left', (event: { groupId: string; socketId: string }) => { if (event.groupId === callRef.current?.groupId) { removePeer(event.socketId); setPresenterSocketId((current) => current === event.socketId ? null : current); setRemoteCameraStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); setRemoteMuteStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); } });
-    socket.on('call:camera-state', (event: { groupId: string; socketId: string; enabled: boolean }) => { if (event.groupId === callRef.current?.groupId) setRemoteCameraStates((current) => ({ ...current, [event.socketId]: event.enabled })); });
-    socket.on('call:mute-state', (event: { groupId: string; socketId: string; muted: boolean }) => { if (event.groupId === callRef.current?.groupId) setRemoteMuteStates((current) => ({ ...current, [event.socketId]: event.muted })); });
-    socket.on('call:signal', (event: { groupId: string; fromSocketId: string; signal: CallSignal }) => { if (event.groupId === callRef.current?.groupId) void acceptSignal(event.fromSocketId, event.signal); });
-    socket.on('call:host-changed', (event: { groupId: string; hostSocketId: string | null }) => { if (event.groupId === callRef.current?.groupId) setHostSocketId(event.hostSocketId); });
-    socket.on('call:screen-share', (event: { groupId: string; socketId: string; sharing: boolean }) => { if (event.groupId === callRef.current?.groupId) setPresenterSocketId(event.sharing ? event.socketId : (current) => current === event.socketId ? null : current); });
-    socket.on('call:raise-hand', (event: { groupId: string; socketId: string; raised: boolean }) => { if (event.groupId === callRef.current?.groupId) setRaisedHandSocketIds((current) => event.raised ? [...new Set([...current, event.socketId])] : current.filter((id) => id !== event.socketId)); });
-    socket.on('call:mute-request', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { localStreamRef.current?.getAudioTracks().forEach((track) => { track.enabled = false; }); setMuted(true); publishMuteState(event.groupId, true); notify('The host asked everyone to mute.'); } });
-    socket.on('call:removed', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { clearCall(); notify('The host removed you from this meeting.'); } });
-    socket.on('call:ended', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { clearCall(); notify('The host ended the meeting.'); } });
-    return () => { if (callRef.current?.groupId === selectedGroupId) clearCall(); socketRef.current = null; socket.disconnect(); };
+    on('notification:new', (event: { relatedId?: string; relatedType?: string }) => { if (event.relatedId === selectedGroupId && event.relatedType !== 'chat') void refreshHub(); });
+    on('poll:tally', (tally: { groupId?: string }) => { if (tally.groupId === selectedGroupId) void refreshHub(); });
+    on('chat:message', (message: GroupHub['messages'][number]) => setHub((current) => current && message.groupId === selectedGroupId ? { ...current, messages: [message, ...current.messages.filter((item) => item.id !== message.id)] } : current));
+    on('group:removed', (event: { groupId: string }) => { if (event.groupId === selectedGroupId) { if (callRef.current?.groupId === selectedGroupId) clearCall(); setManageOpen(false); setHub(null); onSelectGroup(''); notify('You were removed from this group.'); } });
+    on('call:participant-joined', (event: { groupId: string; participant: CallParticipant; hostSocketId: string }) => { if (event.groupId === callRef.current?.groupId) { if (presentationStreamRef.current) socket.emit('call:screen-share', { groupId: event.groupId, sharing: true }, () => undefined); setHostSocketId(event.hostSocketId); if (event.participant.muted !== undefined) setRemoteMuteStates((current) => ({ ...current, [event.participant.socketId]: current[event.participant.socketId] ?? event.participant.muted! })); if (event.participant.cameraEnabled !== undefined) setRemoteCameraStates((current) => ({ ...current, [event.participant.socketId]: event.participant.cameraEnabled! })); void createPeer(event.participant, true); } });
+    on('call:participant-left', (event: { groupId: string; socketId: string }) => { if (event.groupId === callRef.current?.groupId) { removePeer(event.socketId); setPresenterSocketId((current) => current === event.socketId ? null : current); setRemoteCameraStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); setRemoteMuteStates((current) => { const next = { ...current }; delete next[event.socketId]; return next; }); } });
+    on('call:camera-state', (event: { groupId: string; socketId: string; enabled: boolean }) => { if (event.groupId === callRef.current?.groupId) setRemoteCameraStates((current) => ({ ...current, [event.socketId]: event.enabled })); });
+    on('call:mute-state', (event: { groupId: string; socketId: string; muted: boolean }) => { if (event.groupId === callRef.current?.groupId) setRemoteMuteStates((current) => ({ ...current, [event.socketId]: event.muted })); });
+    on('call:signal', (event: { groupId: string; fromSocketId: string; signal: CallSignal }) => { if (event.groupId === callRef.current?.groupId) void acceptSignal(event.fromSocketId, event.signal); });
+    on('call:host-changed', (event: { groupId: string; hostSocketId: string | null }) => { if (event.groupId === callRef.current?.groupId) setHostSocketId(event.hostSocketId); });
+    on('call:screen-share', (event: { groupId: string; socketId: string; sharing: boolean }) => { if (event.groupId === callRef.current?.groupId) setPresenterSocketId(event.sharing ? event.socketId : (current) => current === event.socketId ? null : current); });
+    on('call:raise-hand', (event: { groupId: string; socketId: string; raised: boolean }) => { if (event.groupId === callRef.current?.groupId) setRaisedHandSocketIds((current) => event.raised ? [...new Set([...current, event.socketId])] : current.filter((id) => id !== event.socketId)); });
+    on('call:mute-request', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { localStreamRef.current?.getAudioTracks().forEach((track) => { track.enabled = false; }); setMuted(true); publishMuteState(event.groupId, true); notify('The host asked everyone to mute.'); } });
+    on('call:removed', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { clearCall(); notify('The host removed you from this meeting.'); } });
+    on('call:ended', (event: { groupId: string }) => { if (event.groupId === callRef.current?.groupId) { clearCall(); notify('The host ended the meeting.'); } });
+    return () => { if (callRef.current?.groupId === selectedGroupId) leaveCall(); socketRef.current = null; dispose(); };
   }, [selectedGroupId]);
 
   function send(event: FormEvent<HTMLFormElement>) {

@@ -10,6 +10,14 @@ export class DomainEventsService extends EventEmitter {
    */
   private presenceProvider: (() => string[]) | null = null;
 
+  emitAccountArchived(userId: string) { this.emit('account-archived', userId); }
+  onAccountArchived(listener: (userId: string) => void) { this.on('account-archived', listener); }
+  emitAdminActivity(metric: 'users' | 'projects') { this.emit('admin-activity', metric); }
+  onAdminActivity(listener: (metric: 'users' | 'projects') => void) { this.on('admin-activity', listener); }
+
+  emitTaskDeleted(projectId: string, id: string) { this.emit('task-deleted', projectId, id); }
+  onTaskDeleted(listener: (projectId: string, id: string) => void) { this.on('task-deleted', listener); }
+
   emitNotification(userId: string, notification: unknown) {
     this.emit('notification', userId, notification);
   }

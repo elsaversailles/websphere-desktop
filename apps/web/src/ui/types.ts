@@ -31,6 +31,6 @@ export type GroupHub = {
     projects: Array<{ id: string; title: string }>;
   };
   ideas: Idea[];
-  messages: Array<{ id: string; senderId: string; body: string; createdAt: string }>;
+  messages: Array<{ id: string; groupId?: string; senderId: string; body: string; createdAt: string }>;
   poll: Poll | null;
 };

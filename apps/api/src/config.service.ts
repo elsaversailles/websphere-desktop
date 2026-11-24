@@ -7,6 +7,8 @@ const environmentSchema = z.object({
   WEB_ORIGIN: z.string().min(1).default('http://localhost:5173'),
   /** Public API base used by OAuth providers, e.g. https://websphere.example/api. */
   OAUTH_CALLBACK_BASE_URL: z.string().url().optional(),
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().url(),
   JWT_ACCESS_SECRET: z.string().min(32),
@@ -17,7 +19,6 @@ const environmentSchema = z.object({
   LOGIN_WINDOW_SECONDS: z.coerce.number().int().positive().default(900),
   PASSWORD_RESET_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
   EMAIL_CHANGE_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
-  REGISTRATION_OTP_TTL_SECONDS: z.coerce.number().int().min(60).max(1800).default(300),
   REGISTRATION_OTP_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
   REGISTRATION_OTP_MAX_SENDS: z.coerce.number().int().min(1).max(10).default(3),
   REGISTRATION_OTP_SEND_WINDOW_SECONDS: z.coerce.number().int().min(60).max(3600).default(900),

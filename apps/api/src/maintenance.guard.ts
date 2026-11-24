@@ -2,6 +2,7 @@ import { CanActivate, ExecutionContext, Injectable, ServiceUnavailableException 
 import { Reflector } from '@nestjs/core';
 import type { Role } from '@websphere/shared';
 import { PrismaService } from './prisma.service.js';
+import { maintenanceState } from './maintenance-state.js';
 import { IS_PUBLIC_KEY } from './auth.decorators.js';
 
 type AuthenticatedRequest = { user?: { role: Role } };
@@ -19,9 +20,7 @@ export class MaintenanceGuard implements CanActivate {
       (this.prisma as any).systemSetting.findUnique({ where: { key: 'maintenanceMode' } }).catch(() => null),
       (this.prisma as any).systemSetting.findUnique({ where: { key: 'maintenanceSchedule' } }).catch(() => null),
     ]);
-    const scheduledAt = schedule?.value?.startsAt ? new Date(schedule.value.startsAt) : null;
-    const enabled = setting?.value === true || setting?.value?.enabled === true || Boolean(scheduledAt && !Number.isNaN(scheduledAt.getTime()) && scheduledAt <= new Date());
-    if (enabled) throw new ServiceUnavailableException({ code: 'MAINTENANCE_MODE', message: 'WebSphere is temporarily unavailable for maintenance. Please try again shortly.' });
+    if (maintenanceState(setting?.value, schedule?.value).active) throw new ServiceUnavailableException({ code: 'MAINTENANCE_MODE', message: 'WebSphere is temporarily unavailable for maintenance. Please try again shortly.' });
     return true;
   }
 }

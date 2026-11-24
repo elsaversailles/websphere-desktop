@@ -1,6 +1,7 @@
-import { useEffect, useId, useRef } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { agendaCategory, agendaProject, editableAgendaEvent, type CalendarAgendaItem, type CalendarEvent } from './calendar';
-import { formatDateOnly } from './dates';
+import { request } from '../api';
+import { formatDateOnly, localDateKey } from './dates';
 
 export function CalendarAgendaModal({ day, items, loading, error, onClose, onEdit, onRetry }: {
   day: Date;
@@ -11,6 +12,27 @@ export function CalendarAgendaModal({ day, items, loading, error, onClose, onEdi
   onEdit: (event: CalendarEvent) => void;
   onRetry: () => void;
 }) {
+  const key = localDateKey(day);
+  const [note, setNote] = useState('');
+  const [noteReady, setNoteReady] = useState(false);
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [noteMessage, setNoteMessage] = useState('');
+  useEffect(() => {
+    let active = true;
+    void request<{ body: string }>(`/calendar/notes?date=${key}`).then((value) => {
+      if (active) { setNote(value.body); setNoteReady(true); }
+    }).catch(() => { if (active) setNoteMessage('Could not load this note.'); });
+    return () => { active = false; };
+  }, [key]);
+  async function saveNote() {
+    setNoteSaving(true);
+    setNoteMessage('');
+    try {
+      await request(`/calendar/notes/${key}`, { method: 'PUT', body: JSON.stringify({ body: note }) });
+      setNoteMessage('Note saved.');
+    } catch { setNoteMessage('Could not save your note.'); }
+    finally { setNoteSaving(false); }
+  }
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   useEffect(() => {
@@ -34,6 +56,12 @@ export function CalendarAgendaModal({ day, items, loading, error, onClose, onEdi
         })}
       </ul> : <p className="calendar-agenda-empty">You have no agenda for this date.</p>}
     </div>
+    <section className="calendar-agenda-body">
+      <label className="lbl" htmlFor={`${titleId}-note`}>Private note</label>
+      <textarea className="ifield" id={`${titleId}-note`} rows={3} maxLength={2000} value={note} onChange={(event) => setNote(event.target.value)} disabled={!noteReady || noteSaving} />
+      <button className="btn-o btn-sm" type="button" disabled={!noteReady || noteSaving} onClick={() => void saveNote()}>Save note</button>
+      <span role="status">{noteMessage}</span>
+    </section>
     <div className="modal-acts calendar-agenda-footer"><button className="btn-o" type="button" onClick={onClose}>Close</button></div>
   </dialog>;
 }

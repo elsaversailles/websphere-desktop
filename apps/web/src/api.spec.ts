@@ -147,3 +147,11 @@ describe('restoreSession', () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+it('preserves a stored session when access expired and the refresh service is temporarily unavailable', async () => {
+  const { api, store, dispatched } = await loadApi(seeded);
+  fetchStub([unauthorized, { status: 503, body: { code: 'SERVICE_UNAVAILABLE' } }]);
+  await expect(api.restoreSession()).resolves.toMatchObject({ user: { id: 'u1' } });
+  expect(store.get('ws_refresh')).toBe('refresh-1');
+  expect(dispatched).not.toContain(api.sessionInvalidatedEvent);
+});

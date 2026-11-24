@@ -1,7 +1,7 @@
-import { PROJECT_EXTERNAL_TOOLS, TASK_TITLE_MAX_LENGTH } from '@websphere/shared';
+import { workspaceSubscription } from './workspaceSocket';
+import { TASK_TITLE_MAX_LENGTH } from '@websphere/shared';
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { io } from 'socket.io-client';
-import { getAccessToken, request, socketBaseUrl } from '../api';
+import { request } from '../api';
 import type { GroupHub as GroupHubData, GroupSummary } from './types';
 import { ScheduleDateFields } from './ScheduleDateFields';
 import { dateOnlyKey, formatDateOnly, localDateFromKey } from './dates';
@@ -18,7 +18,7 @@ function DashboardAvatar({ name, id, avatarUrl, className }: { name: string; id:
   return <span className={classes} aria-hidden="true">{initials(name)}</span>;
 }
 
-type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string } | null; tasks: Array<{ status: string }>; _count?: { members: number } };
+type DashboardProject = { id: string; title: string; status: string; deadline?: string | null; group: { name: string } | null; tasks?: Array<{ status: string }>; progressAverage?: number; _count?: { members: number } };
 type DashboardTask = { id: string; title: string; status: string; priority?: string | null; deadline?: string | null; completedAt?: string | null; project?: { id: string; title: string } | null };
 type DashboardNotification = { id: string; message: string; read: boolean; type?: string; createdAt?: string; relatedId?: string | null; relatedType?: string | null };
 type DashboardActivity = { id: string; type: string; fromValue?: string | null; toValue?: string | null; createdAt: string; taskTitle?: string | null; projectTitle: string; actor?: { id: string; fullName: string; avatarUrl?: string | null } | null };
@@ -61,19 +61,23 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
     ? (createGroupHub?.group.members ?? []).filter((member) => selectedMemberIds.includes(member.userId)).map((member) => ({ id: member.userId, name: member.user.fullName }))
     : [{ id: userId, name }];
 
-  const refreshDashboard = useCallback(() => request<DashboardData>('/dashboard').then(setData).catch((error: Error) => notify(error.message)), [notify]);
+  const refreshDashboard = useCallback(() => request<DashboardData>('/dashboard?compact=1').then(setData).catch((error: Error) => notify(error.message)), [notify]);
   useEffect(() => { void refreshDashboard(); }, [refreshDashboard]);
   useEffect(() => { setUnread(data?.unreadNotifications ?? data?.notifications.filter((item) => !item.read).length ?? 0); }, [data]);
   useEffect(() => {
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    socket.on('connect', () => {
-      void request<Array<{ id: string }>>('/projects').then((projects) => projects.forEach((project) => socket.emit('project:join', project.id, () => undefined))).catch(() => undefined);
-      void refreshDashboard();
+    const { on, dispose } = workspaceSubscription();
+    on('notification:new', (event: DashboardNotification) => {
+      setData((current) => current ? {
+        ...current,
+        notifications: [event, ...current.notifications.filter((notification) => notification.id !== event.id)].slice(0, 8),
+        unreadNotifications: (current.unreadNotifications ?? 0) + Number(!event.read && !current.notifications.some((notification) => notification.id === event.id)),
+      } : current);
+      if (['task', 'project', 'group', 'announcement', 'system'].includes(event.relatedType ?? '')) void refreshDashboard();
     });
-    socket.on('notification:new', () => void refreshDashboard());
-    socket.on('task:updated', () => void refreshDashboard());
-    socket.on('group:removed', () => void refreshDashboard());
-    return () => { socket.disconnect(); };
+    on('group:removed', () => void refreshDashboard());
+    let wasConnected = false;
+    on('connect', () => { if (wasConnected) void refreshDashboard(); wasConnected = true; });
+    return dispose;
   }, [refreshDashboard]);
   useEffect(() => {
     if (!notificationsOpen) return;
@@ -113,7 +117,7 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
   }, [data, localDay]);
 
   /** Task-derived completion keeps the KPI and overview in sync with the project tables. */
-  const activeProjects = useMemo(() => (data?.projects ?? []).filter((project) => project.status !== 'archived' && project.status !== 'on_hold' && dashboardProjectProgress(project.tasks, project.status).progress < 100), [data]);
+  const activeProjects = useMemo(() => (data?.projects ?? []).filter((project) => project.status !== 'archived' && project.status !== 'on_hold'), [data]);
   const onlineCount = useMemo(() => (data?.online ?? []).filter((teammate) => teammate.online).length, [data]);
 
   async function openCreateDialog() {
@@ -143,7 +147,7 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
     });
     setSaving(true);
     try {
-      await request('/projects', { method: 'POST', body: JSON.stringify({ ...(createGroupId ? { groupId: createGroupId } : {}), title: values.get('title'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, memberIds, initialTasks, externalTools: values.getAll('externalTools') }) });
+      await request('/projects', { method: 'POST', body: JSON.stringify({ ...(createGroupId ? { groupId: createGroupId } : {}), title: values.get('title'), startDate: values.get('startDate') || undefined, deadline: values.get('deadline') || undefined, memberIds, initialTasks }) });
       setCreateOpen(false);
       await refreshDashboard();
       notify(initialTasks.length ? 'Project created and tasks assigned.' : 'Project created.');
@@ -183,7 +187,6 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
       <label className="lbl" htmlFor="project-group">Project Group</label><select className="ifield" id="project-group" value={createGroupId} onChange={(event) => void pickCreateGroup(event.target.value)}><option value="">No group — independent project</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select>
       <label className="lbl">Team Members</label><fieldset className="project-member-picker" disabled={!createGroupId || !createGroupHub}><legend className="sr-only">Team Members</legend>{!createGroupId ? <label className="project-member-option"><input type="checkbox" checked readOnly /><span>{name}</span></label> : createGroupHub ? createGroupHub.group.members.map((member) => <label className="project-member-option" key={member.userId}><input type="checkbox" checked={selectedMemberIds.includes(member.userId)} onChange={() => toggleProjectMember(member.userId)} /><span>{member.user.fullName}</span></label>) : <span>Group members are unavailable.</span>}</fieldset>
       <label className="lbl">Task Assignment Per Member</label><div className={`project-responsibilities ${projectMembers.length ? '' : 'empty'}`}>{projectMembers.length ? projectMembers.map((member) => <label key={member.id}><span>{member.name}</span><input className="ifield" name={`responsibility-${member.id}`} minLength={2} maxLength={TASK_TITLE_MAX_LENGTH} title={`Maximum ${TASK_TITLE_MAX_LENGTH} characters`} placeholder={`Assign ${member.name} a task`} /></label>) : <span>Add members first, then assign tasks here.</span>}</div>
-      <fieldset className="project-tools-picker" disabled={saving}><legend className="lbl">External Tools Will Be Used</legend><p>Select all tools you plan to use.</p><div>{Object.entries(PROJECT_EXTERNAL_TOOLS).map(([value, label]) => <label className="project-tool-option" key={value}><input type="checkbox" name="externalTools" value={value} /><span>{label}</span></label>)}</div></fieldset>
       <div className="project-date-grid"><ScheduleDateFields idPrefix="new-project" endLabel="End Date" /></div>
       <div className="modal-acts project-modal-actions"><button type="button" className="btn-o" onClick={() => setCreateOpen(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Creating…' : 'Create Project'}</button></div>
     </form></div></div> : null}
@@ -198,7 +201,7 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
       <div className="g2 dashboard-tables">
         <DataCard title="Recent Projects" action="View All" onAction={() => onPage('projects')}>
           {data.projects.length ? <div className="dashboard-table-scroll" role="region" aria-label="Recent projects" tabIndex={0}><table className="tbl"><thead><tr><th>Project</th><th>Progress</th><th>Status</th></tr></thead><tbody>{data.projects.slice(0, 8).map((project) => {
-            const { progress, health } = dashboardProjectProgress(project.tasks, project.status);
+            const { progress, health } = dashboardProjectProgress(project.tasks ?? [], project.status, project.progressAverage);
             return <tr key={project.id}>
               <td className="table-title">{project.title}</td>
               <td><div className="progress-cell"><div className="pb-wrap"><div className={`pb ${health.tone}`} style={{ width: `${progress}%` }} /></div><span className={`pb-val ${health.tone}`}>{progress}%</span></div></td>
@@ -258,7 +261,7 @@ export function Dashboard({ userId, name, notify, onPage, onNotificationClick }:
     <div className="g2">
       <DataCard title="Project Progress Overview" note="All active projects">
         {activeProjects.length ? activeProjects.slice(0, 4).map((project) => {
-          const { progress, health } = dashboardProjectProgress(project.tasks, project.status);
+          const { progress, health } = dashboardProjectProgress(project.tasks ?? [], project.status, project.progressAverage);
           const members = project._count?.members ?? 0;
           return <div className="progress-item" key={project.id}>
             <div className="progress-item-head">
