@@ -686,8 +686,11 @@ fieldset.tracker-platform-options{border:0;padding:0;min-width:0}fieldset.tracke
 .gc-txt { white-space: pre-wrap; overflow-wrap: anywhere; }
 .toast { max-width: min(420px, calc(100vw - 32px)); }
 
-.auth-name-fields .lbl small { text-transform: none; font-weight: 400; letter-spacing: normal; }
 .auth-name-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.auth-name-fields > .auth-field { display: flex; flex-direction: column; }
+.auth-name-fields .lbl { letter-spacing: .2px; }
+.auth-name-fields .lbl small { font-size: .85em; text-transform: none; font-weight: 400; letter-spacing: normal; white-space: nowrap; }
+.auth-name-fields .auth-input-wrap { margin-top: auto; }
 .auth-divider { display: flex; align-items: center; gap: 10px; margin: 14px 0; font-size: .8rem; }
 .auth-divider::before, .auth-divider::after { content: ""; height: 1px; flex: 1; background: currentColor; opacity: .25; }
 .auth-google { margin-bottom: 14px; display: flex; gap: 10px; justify-content: center; align-items: center; width: 100%; min-height: 42px; border: 1px solid currentColor; border-radius: 8px; color: inherit; background: transparent; cursor: pointer; font: inherit; font-weight: 700; }
