@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { basename, extname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ConfigService } from './config.service.js';
@@ -38,6 +38,21 @@ export class LocalStorageService {
     if (basename(fileName) !== fileName || !/^[a-f0-9-]+\.(jpg|jpeg|png|webp)$/i.test(fileName)) throw new BadRequestException({ code: 'VALIDATION_FAILED', message: 'Invalid upload path' });
     return readFile(join(this.uploadDir, fileName));
   }
+  async saveTaskFile(buffer: Buffer) {
+    if (!buffer.length || buffer.length > 5 * 1024 * 1024) throw new BadRequestException({ code: 'VALIDATION_FAILED', message: 'Choose a file between 1 byte and 5 MB.' });
+    const directory = join(this.uploadDir, 'task-files');
+    await mkdir(directory, { recursive: true, mode: 0o750 });
+    const key = randomUUID();
+    await writeFile(join(directory, key), buffer, { flag: 'wx', mode: 0o600 });
+    return key;
+  }
+  private taskFilePath(key: string) {
+    if (!/^[a-f0-9-]{36}$/i.test(key)) throw new BadRequestException({ code: 'VALIDATION_FAILED', message: 'Invalid file identifier' });
+    return join(this.uploadDir, 'task-files', key);
+  }
+  readTaskFile(key: string) { return readFile(this.taskFilePath(key)); }
+  removeTaskFile(key: string) { return unlink(this.taskFilePath(key)); }
+
   async saveBackup(fileName: string, content: string) {
     if (!/^websphere-backup-[a-z0-9-]+\.json$/i.test(fileName)) throw new BadRequestException({ code: 'VALIDATION_FAILED', message: 'Invalid backup file name' });
     await mkdir(this.backupDir, { recursive: true });

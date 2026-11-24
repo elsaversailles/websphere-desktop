@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { RealtimeGateway } from './realtime.gateway.js';
 
 const socket = (caller?: { id: string }) => ({
-  id: caller?.id.replace('user-', 'socket-') ?? 'socket-1', data: { caller }, handshake: { auth: {} }, join: vi.fn(), leave: vi.fn(), to: vi.fn(() => ({ emit: vi.fn() })), rooms: new Set<string>(['socket-1']), disconnect: vi.fn(),
+  id: caller?.id.replace('user-', 'socket-') ?? 'socket-1', data: { caller }, handshake: { auth: {} }, connected: true, on: vi.fn(), use: vi.fn(), emit: vi.fn(), join: vi.fn(), leave: vi.fn(), to: vi.fn(() => ({ emit: vi.fn() })), rooms: new Set<string>(['socket-1']), disconnect: vi.fn(),
 }) as any;
 
 const events = { onNotification: vi.fn(), onPollTally: vi.fn(), onGroupMembershipRevoked: vi.fn(), registerPresenceProvider: vi.fn() } as any;
@@ -65,18 +65,40 @@ describe('RealtimeGateway room authorization', () => {
     expect(result).toEqual({ ok: false, error: { code: 'RBAC_FORBIDDEN', message: 'Denied' } });
   });
 
-  it('creates an authorized group call and notifies the group without exposing a media stream to the server', async () => {
-    const groupEmit = vi.fn();
-    const gateway = new RealtimeGateway({ member: vi.fn().mockResolvedValue({}) } as any, {} as any, events);
-    gateway.server = { in: vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) })), to: vi.fn(() => ({ emit: groupEmit })) } as any;
+  it('creates a call and delivers invitations once through authorized user rooms', async () => {
+    const emit = vi.fn();
+    const app = {
+      member: vi.fn().mockResolvedValue({}),
+      notify: vi.fn().mockResolvedValue({}),
+      prisma: {
+        group: { findUnique: vi.fn().mockResolvedValue({ name: 'Team' }) },
+        groupMember: { findMany: vi.fn().mockResolvedValue([{ userId: 'user-2' }]) },
+      },
+    };
+    const gateway = new RealtimeGateway(app as any, {} as any, events);
+    gateway.server = { in: vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) })), to: vi.fn(() => ({ emit })) } as any;
     const client = socket({ id: 'user-1' });
-
     const result = await gateway.callJoin(client, { groupId: 'group-1', kind: 'video' });
 
-    expect(result).toEqual({ ok: true, participants: [], hostSocketId: 'socket-1', raisedHandSocketIds: [] });
+    expect(result).toEqual({ ok: true, callId: expect.any(String), participants: [], hostSocketId: 'socket-1', raisedHandSocketIds: [] });
     expect(client.join).toHaveBeenCalledWith('call:group-1');
-    expect(gateway.server.to).toHaveBeenCalledWith('group:group-1');
-    expect(groupEmit).toHaveBeenCalledWith('call:invite', expect.objectContaining({ groupId: 'group-1', kind: 'video' }));
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledOnce());
+    expect(gateway.server.to).toHaveBeenCalledWith('user:user-2');
+    expect(emit).toHaveBeenCalledWith('call:invite', expect.objectContaining({ groupId: 'group-1', kind: 'video' }));
+  });
+
+  it('delivers the archive signal and disconnects only the affected user room', () => {
+    const typedEvents = { ...events, onAccountArchived: vi.fn() };
+    const gateway = new RealtimeGateway({} as any, {} as any, typedEvents);
+    const emit = vi.fn();
+    const disconnectSockets = vi.fn();
+    gateway.server = { to: vi.fn(() => ({ emit, disconnectSockets })) } as any;
+    const archived = typedEvents.onAccountArchived.mock.calls[0][0];
+    archived('archived-user');
+    expect(gateway.server.to).toHaveBeenCalledOnce();
+    expect(gateway.server.to).toHaveBeenCalledWith('user:archived-user');
+    expect(emit).toHaveBeenCalledWith('account:archived');
+    expect(disconnectSockets).toHaveBeenCalledWith(true);
   });
 
   it('shares microphone state with the call and includes it for later joiners', async () => {

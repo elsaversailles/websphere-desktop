@@ -1,21 +1,22 @@
+import { AdminActivityChart } from './AdminActivityChart';
+import { workspaceSubscription, closeWorkspaceSocket } from './workspaceSocket';
 import { startIncomingRingtone } from './ringtone';
-import { useEffect, useRef, useState } from 'react';
-import { io } from 'socket.io-client';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CallKind, TicketStatus } from '@websphere/shared';
-import { clearSession, getAccessToken, request, saveSession, socketBaseUrl, type Session, type User } from '../api';
+import { clearSession, invalidateSession, request, saveSessionUser, type Session, type User } from '../api';
 import { AiAssistantModal, useAiAssistant } from './AiAssistantModal';
 import { Dashboard } from './Dashboard';
 import { avatarTone } from './health';
-import { GroupChatPage } from './GroupChatPage';
+import { GroupChatPage, loadSavedCall, removeSavedCall } from './GroupChatPage';
 import { GroupsPage } from './GroupsPage';
 import { IdeasPage } from './IdeasPage';
 import { ProjectsPage } from './ProjectsPage';
 import { taskNotificationDestination } from './taskNotificationDestination';
 import { SupportRequestsPage, FeedbackPage } from './SupportRequestsPage';
 import { categoryLabel, statusLabel, ticketStatusOptions, type SupportTicketRecord } from './ticketStatus';
-import { AdminSettingsPage, AnnouncementsPage, CalendarPage, IntegrationsPage, NotificationsPage, ProfilePage, ProjectsAnalyticsPage, TasksPage, TrackerPage } from './LegacyPages';
+import { AdminSettingsPage, AnnouncementsPage, CalendarPage, NotificationsPage, ProfilePage, ProjectsAnalyticsPage, TasksPage, TrackerPage } from './LegacyPages';
 
-type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tools' | 'tracker' | 'notifications' | 'announcements' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'archive' | 'settings' | 'support' | 'feedback';
+type Page = 'dashboard' | 'groups' | 'chat' | 'ideas' | 'projects' | 'tasks' | 'workflow' | 'predictive' | 'calendar' | 'tracker' | 'notifications' | 'announcements' | 'profile' | 'assistant' | 'admin' | 'accounts' | 'archive' | 'settings' | 'support' | 'feedback';
 type WorkspaceProps = { session: Session; onSessionChange: (session: Session) => void; onLogout: () => void; notify: (message: string) => void };
 type Link = { id: Page; label: string; icon: string };
 type NotificationEntry = { id: string; read: boolean; type?: string; relatedId?: string | null; relatedType?: string | null };
@@ -25,7 +26,7 @@ const userSections: Array<{ title: string; links: Link[] }> = [
   { title: 'Main', links: [{ id: 'dashboard', label: 'Dashboard', icon: '⌂' }, { id: 'announcements', label: 'Announcements', icon: '◉' }] },
   { title: 'Groups & Projects', links: [{ id: 'groups', label: 'My Groups', icon: '♧' }, { id: 'chat', label: 'Group Chat', icon: '□' }, { id: 'ideas', label: 'Idea Management', icon: '◇' }, { id: 'projects', label: 'My Projects', icon: '▱' }, { id: 'tasks', label: 'My Tasks', icon: '✓' }] },
   { title: 'Analytics', links: [{ id: 'workflow', label: 'Workflow Analytics', icon: '▥' }, { id: 'predictive', label: 'Predictive Monitoring', icon: '◉' }] },
-  { title: 'Tools', links: [{ id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'tools', label: 'Apps/External Tools', icon: '▦' }, { id: 'tracker', label: 'Task Progress Tracker', icon: '▤' }] },
+  { title: 'Tools', links: [{ id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'tracker', label: 'Task Progress Tracker', icon: '▤' }] },
   { title: 'Account', links: [{ id: 'profile', label: 'Profile & Settings', icon: '♙' }, { id: 'support', label: 'My Support Requests', icon: '?' }, { id: 'feedback', label: 'Feedback', icon: '☆' }] },
 ];
 const adminSections: Array<{ title: string; links: Link[] }> = [
@@ -34,48 +35,67 @@ const adminSections: Array<{ title: string; links: Link[] }> = [
 
 // The sidebar sections are the source of truth for which pages a role may land on, so a restored
 // page can never put a user somewhere their role has no nav entry for.
-const allowedPagesFor = (admin: boolean): Set<Page> => new Set((admin ? adminSections : userSections).flatMap((section) => section.links.map((link) => link.id)));
+const allowedPagesFor = (admin: boolean): Set<Page> => new Set([...(admin ? adminSections : userSections).flatMap((section) => section.links.map((link) => link.id)), 'notifications'] as Page[]);
 const defaultPageFor = (admin: boolean): Page => (admin ? 'admin' : 'dashboard');
 
-type NavState = { page: Page; selectedGroupId: string; selectedTaskId: string; selectedTicketId: string };
-const navStorageKey = (userId: string) => `ws_nav:${userId}`;
+type NavState = { page: Page; selectedGroupId?: string; selectedProjectId?: string; selectedTaskId?: string; selectedTicketId?: string };
 
-/**
- * Restores the page the user was last on (per account), falling back to the role's default when the
- * stored page is missing, malformed, or not one this role is allowed to open. Authentication is
- * handled upstream in App/restoreSession; this only decides which in-app page to show once signed in.
- */
-function loadNavState(userId: string, admin: boolean): NavState {
-  const fallback: NavState = { page: defaultPageFor(admin), selectedGroupId: '', selectedTaskId: '', selectedTicketId: '' };
-  try {
-    const raw = window.localStorage.getItem(navStorageKey(userId));
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw) as Partial<NavState>;
-    const page = typeof parsed.page === 'string' && allowedPagesFor(admin).has(parsed.page as Page) ? (parsed.page as Page) : fallback.page;
-    return {
-      page,
-      selectedGroupId: typeof parsed.selectedGroupId === 'string' ? parsed.selectedGroupId : '',
-      selectedTaskId: typeof parsed.selectedTaskId === 'string' ? parsed.selectedTaskId : '',
-      selectedTicketId: typeof parsed.selectedTicketId === 'string' ? parsed.selectedTicketId : '',
-    };
-  } catch { return fallback; }
+function readNavState(admin: boolean): NavState {
+  const url = new URL(window.location.href);
+  const [, segment, id] = url.pathname.split('/');
+  const path = segment === 'tools' ? 'tracker' : segment;
+  const page = allowedPagesFor(admin).has(path as Page) ? path as Page : defaultPageFor(admin);
+  const groupId = ['groups', 'chat', 'ideas'].includes(page) ? id : undefined;
+  return {
+    page,
+    selectedGroupId: groupId,
+    selectedProjectId: page === 'projects' ? id : undefined,
+    selectedTaskId: page === 'tasks' ? id : url.searchParams.get('task') ?? undefined,
+    selectedTicketId: ['accounts', 'support'].includes(page) ? id : undefined,
+  };
+}
+
+function navPath(nav: NavState) {
+  const selection = ({ projects: nav.selectedProjectId, chat: nav.selectedGroupId, groups: nav.selectedGroupId, ideas: nav.selectedGroupId, tasks: nav.selectedTaskId, accounts: nav.selectedTicketId, support: nav.selectedTicketId } as Partial<Record<Page, string>>)[nav.page];
+  const query = nav.page === 'projects' && nav.selectedTaskId ? `?task=${encodeURIComponent(nav.selectedTaskId)}` : '';
+  return `/${nav.page}${selection ? `/${encodeURIComponent(selection)}` : ''}${query}`;
 }
 
 export function Workspace({ session, onSessionChange, onLogout, notify }: WorkspaceProps) {
   const administrator = session.role === 'Administrator';
   const drawerName = administrator ? 'Admin Administrator' : session.user.fullName;
   const userId = session.user.id;
-  // Restore where this account left off so a refresh (or reopening a tab) returns to the same page
-  // and selection instead of bouncing to the Dashboard.
-  const initialNav = useState(() => loadNavState(userId, administrator))[0];
-  const [page, setPage] = useState<Page>(initialNav.page);
-  const [selectedGroupId, setSelectedGroupId] = useState(initialNav.selectedGroupId);
-  const [selectedTaskId, setSelectedTaskId] = useState(initialNav.selectedTaskId);
-  const [projectTaskFocus, setProjectTaskFocus] = useState<{ projectId: string; taskId: string } | null>(null);
+  const [nav, setNav] = useState(() => readNavState(administrator));
+  const { page, selectedGroupId = '', selectedProjectId = '', selectedTaskId = '', selectedTicketId = '' } = nav;
+  const projectTaskFocus = useMemo(() => selectedProjectId && selectedTaskId ? { projectId: selectedProjectId, taskId: selectedTaskId } : null, [selectedProjectId, selectedTaskId]);
   const notificationRequestRef = useRef(0);
-  const [selectedTicketId, setSelectedTicketId] = useState(initialNav.selectedTicketId);
+
+  function go(next: NavState, replace = false) {
+    if (!allowedPagesFor(administrator).has(next.page)) return;
+    const path = navPath(next);
+    if (path !== window.location.pathname + window.location.search) {
+      window.history[replace ? 'replaceState' : 'pushState'](null, '', path);
+    }
+    setNav(next);
+  }
+
+  function setPage(target: Page) {
+    if (target === page) return;
+    notificationRequestRef.current += 1;
+    go({ page: target, selectedGroupId });
+  }
+
+  function setSelectedGroupId(groupId: string) {
+    go({ ...nav, selectedGroupId: groupId }, !selectedGroupId);
+  }
+
+  useEffect(() => {
+    const pop = () => { notificationRequestRef.current += 1; setNav(readNavState(administrator)); };
+    window.addEventListener('popstate', pop);
+    return () => window.removeEventListener('popstate', pop);
+  }, [administrator]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [activeCall, setActiveCall] = useState<{ groupId: string; startedAt: number } | null>(null);
+  const [activeCall, setActiveCall] = useState<{ groupId: string; startedAt: number } | null>(() => administrator ? null : loadSavedCall(userId));
   const [callTime, setCallTime] = useState(0);
   useEffect(() => {
     if (!activeCall) return;
@@ -104,11 +124,6 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     return () => { cancelled = true; };
   }, []);
 
-  // Persist the current page + selections per account so a refresh resumes exactly here.
-  useEffect(() => {
-    try { window.localStorage.setItem(navStorageKey(userId), JSON.stringify({ page, selectedGroupId, selectedTaskId, selectedTicketId })); } catch { /* storage unavailable; navigation still works in-session */ }
-  }, [userId, page, selectedGroupId, selectedTaskId, selectedTicketId]);
-
   useEffect(() => {
     if (!logoutOpen) return;
     function closeOnEscape(event: KeyboardEvent) { if (event.key === 'Escape' && !loggingOut) setLogoutOpen(false); }
@@ -128,8 +143,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       case 'group':
       case 'group_chat':
       case 'chat':
-        if (notification.relatedId) setSelectedGroupId(notification.relatedId);
-        setPage('chat');
+        go({ page: 'chat', selectedGroupId: notification.relatedId ?? selectedGroupId });
         break;
       case 'project': setPage(administrator ? 'notifications' : 'projects'); break;
       case 'task':
@@ -139,22 +153,18 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
           void request<{ projectId: string; assignments: Array<{ assigneeId: string }> }>(`/tasks/${encodeURIComponent(taskId)}`).then((task) => {
             if (notificationRequestRef.current !== requestId) return;
             if (taskNotificationDestination(task, userId) === 'tasks') {
-              setSelectedTaskId(taskId);
-              setPage('tasks');
+              go({ page: 'tasks', selectedTaskId: taskId });
             } else {
-              setProjectTaskFocus({ projectId: task.projectId, taskId });
-              setPage('projects');
+              go({ page: 'projects', selectedProjectId: task.projectId, selectedTaskId: taskId });
             }
           }).catch((error: Error) => { if (notificationRequestRef.current === requestId) notify(error.message || 'Could not open this task.'); });
           break;
         }
-        setSelectedTaskId(notification.relatedId ?? '');
-        setPage('tasks');
+        go({ page: 'tasks', selectedTaskId: notification.relatedId ?? '' });
         break;
       case 'idea': setPage('ideas'); break;
       case 'ticket':
-        setSelectedTicketId(notification.relatedId ?? '');
-        setPage(administrator ? 'accounts' : 'support');
+        go({ page: administrator ? 'accounts' : 'support', selectedTicketId: notification.relatedId ?? '' });
         break;
       case 'calendar':
       case 'event': setPage('calendar'); break;
@@ -163,29 +173,27 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   }
 
   useEffect(() => {
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    const refreshGroups = () => {
-      void request<Array<{ id: string; members: Array<{ role: string }> }>>('/groups').then((groups) => { groups.forEach((group) => socket.emit('group:join', group.id, () => undefined)); }).catch(() => undefined);
-    };
-    socket.on('connect', refreshGroups);
-    socket.on('group:removed', (event: { groupId: string }) => { refreshGroups(); setIncomingCall((current) => current?.groupId === event.groupId ? null : current); });
-    socket.on('call:invite', (event: { groupId: string; kind: CallKind; initiatorUserId: string }) => {
-      if (event.initiatorUserId !== session.user.id) setIncomingCall({ groupId: event.groupId, kind: event.kind });
+    const { on, dispose } = workspaceSubscription();
+    on('account:archived', () => invalidateSession('ACCOUNT_ARCHIVED'));
+    on('group:removed', (event: { groupId: string }) => setIncomingCall((current) => current?.groupId === event.groupId ? null : current));
+    on('call:invite', (event: { groupId: string; kind: CallKind; initiatorUserId: string }) => {
+      if (event.initiatorUserId !== userId) setIncomingCall({ groupId: event.groupId, kind: event.kind });
     });
-    socket.on('call:ended', (event: { groupId: string }) => setIncomingCall((current) => current?.groupId === event.groupId ? null : current));
-    socket.on('notification:new', (notification: { message?: string; relatedType?: string | null }) => {
-      refreshGroups();
+    on('call:ended', (event: { groupId: string }) => setIncomingCall((current) => current?.groupId === event.groupId ? null : current));
+    on('notification:new', (notification: { message?: string; relatedType?: string | null }) => {
       if (notification?.message && notification.relatedType?.trim().toLowerCase() !== 'chat') notify(notification.message);
     });
-    return () => { socket.disconnect(); };
-  }, [session.access, session.user.id, notify]);
+    return () => { dispose(); closeWorkspaceSocket(); };
+  }, [userId, notify]);
 
   // A login on another device increments the account token version immediately. Poll without
   // touching the idle timer so an open previous session is returned to the landing page promptly.
   useEffect(() => {
     const verifyCurrentSession = () => { void request('/auth/session-valid').catch(() => undefined); };
     const interval = window.setInterval(verifyCurrentSession, 15_000);
-    return () => window.clearInterval(interval);
+    window.addEventListener('focus', verifyCurrentSession);
+    window.addEventListener('online', verifyCurrentSession);
+    return () => { window.clearInterval(interval); window.removeEventListener('focus', verifyCurrentSession); window.removeEventListener('online', verifyCurrentSession); };
   }, [session.access]);
 
   // The API enforces the same policy on every authenticated request. This timer gives an idle user
@@ -232,17 +240,16 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     setLoggingOut(true);
     try { await request('/auth/logout', { method: 'POST' }); } catch { /* local session is always cleared */ }
     // Explicit sign-out starts fresh next time; a plain refresh keeps the saved page.
-    try { window.localStorage.removeItem(navStorageKey(userId)); } catch { /* ignore */ }
+    removeSavedCall(userId);
     clearSession(); onLogout();
   }
 
   function updateUser(user: User) {
-    const next = { ...session, user };
-    saveSession(next);
-    onSessionChange(next);
+    const next = saveSessionUser(user);
+    if (next) onSessionChange(next);
   }
 
-  return <main className="page on">{activeCall && (page !== 'chat' || selectedGroupId !== activeCall.groupId) ? <button type="button" className="workspace-active-call" onClick={() => { setSelectedGroupId(activeCall.groupId); setPage('chat'); }}>● Return to call · {formatCallDuration(callTime - activeCall.startedAt)}</button> : null}{incomingCall && (page !== 'chat' || incomingCall.groupId !== selectedGroupId) ? <div className="workspace-call-invite call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => { setSelectedGroupId(incomingCall.groupId); setPage('chat'); }}>Join call</button><button className="btn-o btn-sm" onClick={() => setIncomingCall(null)}>Dismiss</button></div> : null}<div className="layout">
+  return <main className="page on">{activeCall && (page !== 'chat' || selectedGroupId !== activeCall.groupId) ? <button type="button" className="workspace-active-call" onClick={() => go({ page: 'chat', selectedGroupId: activeCall.groupId })}>● Return to call · {formatCallDuration(callTime - activeCall.startedAt)}</button> : null}{incomingCall && (page !== 'chat' || incomingCall.groupId !== selectedGroupId) ? <div className="workspace-call-invite call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => go({ page: 'chat', selectedGroupId: incomingCall.groupId })}>Join call</button><button className="btn-o btn-sm" onClick={() => setIncomingCall(null)}>Dismiss</button></div> : null}<div className="layout">
     <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
       <div className="sb-head"><button className="sb-brand" onClick={() => setPage(administrator ? 'admin' : 'dashboard')}><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">{systemName}</span></button><button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'} title={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'}><BurgerIcon /></button></div>
       <nav aria-label="Main navigation">{sections.map((section) => <div className="sb-inline-sec" key={section.title}><div className="sb-sec-label">{section.title}</div>{section.links.map((link) => <button type="button" className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => setPage(link.id)}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>)}</nav>
@@ -253,7 +260,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'dashboard' ? <Dashboard userId={session.user.id} name={session.user.fullName} notify={notify} onPage={navigate} onNotificationClick={openNotification} /> : null}
       {page === 'groups' ? <GroupsPage selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onChat={() => setPage('chat')} notify={notify} /> : null}
       {page === 'ideas' ? <IdeasPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} /> : null}
-      {page === 'projects' ? <ProjectsPage notify={notify} focusedTask={projectTaskFocus} /> : null}
+      {page === 'projects' ? <ProjectsPage notify={notify} userId={userId} focusedTask={projectTaskFocus} selectedProjectId={selectedProjectId} onSelectProject={(id) => go({ page: 'projects', selectedProjectId: id })} /> : null}
       {page === 'admin' ? <AdminPage notify={notify} /> : null}
       {page === 'accounts' ? <AdminAccounts notify={notify} focusedTicketId={selectedTicketId} /> : null}
       {page === 'archive' ? <AdminArchive notify={notify} /> : null}
@@ -262,7 +269,6 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'workflow' ? <ProjectsAnalyticsPage kind="workflow" notify={notify} /> : null}
       {page === 'predictive' ? <ProjectsAnalyticsPage kind="predictive" notify={notify} /> : null}
       {page === 'calendar' ? <CalendarPage notify={notify} /> : null}
-      {page === 'tools' ? <IntegrationsPage notify={notify} /> : null}
       {page === 'tracker' ? <TrackerPage notify={notify} /> : null}
       {page === 'notifications' ? <NotificationsPage notify={notify} onNotificationClick={openNotification} /> : null}
       {page === 'announcements' ? <AnnouncementsPage notify={notify} /> : null}
@@ -297,7 +303,8 @@ function AdminPage({ notify }: { notify: (message: string) => void }) {
   useEffect(() => { void refresh(); }, [notify]);
   return <section className="sp on">
     <div className="ph"><div><h2>User Activity</h2></div></div>
-    <div className="krow">{data ? <><Kpi label="Active Projects" value={data.projects.active} /><Kpi label="Active Users" value={data.users.active} /><Kpi label="Flagged Inactive" value={data.users.locked + data.users.suspended} tone="yel" /><Kpi label="System Status" value={data.health.overall === 'up' ? 'Online' : 'Degraded'} tone={data.health.overall === 'up' ? 'grn' : 'red'} /></> : <div className="cc">Loading system activity…</div>}</div>
+    <div className="g2 admin-activity-grid"><AdminActivityChart metric="projects" initialPeriod="six-months" /><AdminActivityChart metric="users" /></div>
+    <div className="krow">{data ? <><Kpi label="Flagged Inactive" value={data.users.locked + data.users.suspended} tone="yel" /><Kpi label="System Status" value={data.health.overall === 'up' ? 'Online' : 'Degraded'} tone={data.health.overall === 'up' ? 'grn' : 'red'} /></> : <div className="cc">Loading system activity…</div>}</div>
     <div className="g2"><div className="cc"><div className="cc-head"><h3>System Health</h3></div><Health label="Database" detail="Connected to the WebSphere database" ok={data?.health.database === 'up'} /><Health label="Redis" detail="Session and job queue store" ok={data?.health.redis === 'up'} /><Health label="File Storage" detail="Linux instance storage" ok /></div><div className="cc"><div className="cc-head"><h3>Recent User Activity</h3></div>{data ? <><Health label="New signups (7 days)" detail={`${data.users.newSignups7d} accounts created`} ok /><Health label="Tasks completed (24h)" detail={`${data.activity.tasksCompleted24h} tasks marked complete`} ok /><Health label="Open support tickets" detail={`${data.activity.openSupportTickets} awaiting response`} ok={data.activity.openSupportTickets === 0} /><Health label="Completed projects" detail={`${data.projects.completed} projects completed`} ok /></> : <div className="empty-message">Live audit activity will appear here.</div>}</div></div>
   </section>;
 }
@@ -351,6 +358,11 @@ function AdminAccounts({ notify, focusedTicketId }: { notify: (message: string) 
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not load support requests.'); }
   }
   // Debounce the typed search so we don't fire a request on every keystroke; reset to page 1 whenever the term changes.
+  useEffect(() => {
+    const { on, dispose } = workspaceSubscription();
+    on('admin:activity', (metric: string) => { if (metric === 'users') setReloadToken((value) => value + 1); });
+    return dispose;
+  }, []);
   useEffect(() => {
     const handle = setTimeout(() => { setTerm(search.trim()); setPage(1); }, 300);
     return () => clearTimeout(handle);
@@ -406,6 +418,11 @@ function AdminArchive({ notify }: { notify: (message: string) => void }) {
   const [reloadToken, setReloadToken] = useState(0);
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const refresh = () => setReloadToken((token) => token + 1);
+  useEffect(() => {
+    const { on, dispose } = workspaceSubscription();
+    on('admin:activity', (metric: string) => { if (metric === 'users') setReloadToken((value) => value + 1); });
+    return dispose;
+  }, []);
   useEffect(() => {
     const handle = setTimeout(() => { setTerm(search.trim()); setPage(1); }, 300);
     return () => clearTimeout(handle);
@@ -488,7 +505,6 @@ function NavIcon({ page }: { page: Page }) {
   if (page === 'workflow') return <svg {...common}><path d="M18 20V10M12 20V4M6 20v-6"/></svg>;
   if (page === 'predictive' || page === 'settings') return <svg {...common}><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>;
   if (page === 'calendar') return <svg {...common}><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>;
-  if (page === 'tools') return <svg {...common}><rect x="2" y="3" width="7" height="7" rx="1"/><rect x="15" y="3" width="7" height="7" rx="1"/><rect x="2" y="14" width="7" height="7" rx="1"/><rect x="15" y="14" width="7" height="7" rx="1"/></svg>;
   if (page === 'tracker') return <svg {...common}><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M13 2v7h7"/></svg>;
   if (page === 'notifications') return <svg {...common}><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></svg>;
   if (page === 'profile') return <svg {...common}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>;

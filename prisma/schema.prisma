@@ -114,7 +114,10 @@ model User {
   id String @id @default(cuid())
   email String @unique
   passwordHash String
+  passwordEnabled Boolean @default(true)
+  googleSubject String? @unique
   fullName String
+  middleName String?
   institution String?
   course String?
   avatarUrl String?
@@ -126,6 +129,7 @@ model User {
   lastLoginAt DateTime?
   archivedAt DateTime?
   createdAt DateTime @default(now())
+  calendarNotes CalendarNote[]
   groupMembers GroupMember[]
   groupRoleHistory GroupRoleHistory[]
   projectMembers ProjectMember[]
@@ -355,6 +359,15 @@ model Vote {
   voter User @relation(fields: [voterId], references: [id])
   @@unique([pollId, voterId])
 }
+model CalendarNote {
+  ownerId String
+  date String @db.VarChar(10)
+  body String @db.Text
+  updatedAt DateTime @updatedAt
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  @@id([ownerId, date])
+}
+
 model CalendarEvent {
   id String @id @default(cuid())
   ownerId String
@@ -448,6 +461,9 @@ model ToolConnection {
 model LinkedResource {
   id String @id @default(cuid())
   toolKind String?
+  storageKey String?
+  fileSize Int?
+  academicUseConfirmed Boolean?
   connectionId String?
   provider ProviderId?
   projectId String?
@@ -552,4 +568,11 @@ model SystemSetting {
   value Json
   updatedBy String?
   updatedAt DateTime @updatedAt
+}
+
+model AdminActivitySample {
+  metric String @db.VarChar(16)
+  date String @db.VarChar(10)
+  count Int
+  @@id([metric, date])
 }

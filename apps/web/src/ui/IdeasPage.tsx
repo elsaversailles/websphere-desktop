@@ -1,6 +1,6 @@
+import { workspaceSubscription } from './workspaceSocket';
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
-import { io } from 'socket.io-client';
-import { getAccessToken, request, socketBaseUrl } from '../api';
+import { request } from '../api';
 import { PollStatus, votingDurations } from './PollStatus';
 import { ConfirmDialog } from './ConfirmDialog';
 import type { GroupHub, GroupSummary, Idea } from './types';
@@ -41,10 +41,10 @@ export function IdeasPage({ userId, selectedGroupId, onSelectGroup, notify }: Id
   useEffect(() => { void request<{ maxIdeasPerSearch: number }>('/settings/general').then((settings) => setIdeaLimit(settings.maxIdeasPerSearch)).catch(() => undefined); }, []);
   useEffect(() => {
     if (!selectedGroupId) return;
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    socket.on('connect', () => socket.emit('group:join', selectedGroupId, () => undefined));
-    socket.on('poll:tally', (tally: { groupId?: string }) => { if (tally.groupId === selectedGroupId) void refreshHub().catch(() => undefined); });
-    return () => { socket.disconnect(); };
+    const { on, join, dispose } = workspaceSubscription();
+    join('group', selectedGroupId);
+    on('poll:tally', (tally: { groupId?: string }) => { if (tally.groupId === selectedGroupId) void refreshHub().catch(() => undefined); });
+    return () => { dispose(); };
   }, [selectedGroupId, refreshHub]);
 
   const membership = useMemo(() => hub?.group.members.find((member) => member.userId === userId), [hub, userId]);

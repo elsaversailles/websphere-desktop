@@ -1,7 +1,9 @@
-import { resourceLinkError } from '@websphere/shared';
+import { ListFilters, ListPager, useListFilters, type ListPage } from './ListFilters';
+import { startGoogle } from '../googleAuth';
+import { workspaceSubscription } from './workspaceSocket';
+import { identifyResourceLink } from '@websphere/shared';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { io } from 'socket.io-client';
-import { ApiRequestError, apiUrl, getAccessToken, request, socketBaseUrl, type User } from '../api';
+import { ApiRequestError, apiUrl, getAccessToken, request, type User } from '../api';
 import { disablePush, enablePush, pushStatus as getPushStatus, type PushStatus } from '../push';
 import { ChartCanvas } from './ChartCanvas';
 import { EventAnnouncementCard, type EventAnnouncement } from './EventAnnouncement';
@@ -21,11 +23,17 @@ type ConfirmAction = { title: string; description: string; confirmLabel: string;
 type Task = { id: string; title: string; projectId: string; deadline?: string | null; completedAt?: string | null; assignedAt?: string; priority: string; status: string; project?: { id: string; title: string }; assignedBy?: string; progress?: number };
 type Project = { id: string; title: string; status: string; deadline?: string | null; group: { name: string }; members?: Array<{ role: string }>; tasks: Array<{ status: string }> };
 
-type TeamMemberWeek = { id: string; fullName: string; role: string; contributions: number; tasksCompleted: number; performance: number; active: boolean };
-type TeamPerformanceWeek = { periodStart: string; periodEnd: string; label: string; members: TeamMemberWeek[]; activeCount: number; inactiveCount: number };
-type TeamMemberSummary = { id: string; fullName: string; role: string; totalContributions: number; totalCompleted: number; activeWeeks: number; performance: number; active: boolean };
-type TeamPerformance = { weeks: TeamPerformanceWeek[]; members: TeamMemberSummary[]; activeMembers: number; inactiveMembers: number };
-type AnalyticsProject = { members: Array<{ role: string; user: { id: string; fullName: string } }>; tasks: Array<{ status: string; assignments: Array<{ assigneeId: string }> }> };
+const workflowPeriods = ['daily', 'weekly', 'monthly'] as const;
+type WorkflowPeriod = (typeof workflowPeriods)[number];
+type WorkflowMember = { id: string; fullName: string; role: string; totalContributions: number; performance: number; completions: number[] };
+type WorkflowReport = { labels: string[]; members: WorkflowMember[] };
+const periodLabel = (value: WorkflowPeriod) => value[0].toUpperCase() + value.slice(1);
+const memberPalette = ['#436dc3', '#248457', '#a96618', '#7657c9', '#087e9e', '#b85260', '#58672b'];
+function memberChartColor(id: string) {
+  let hash = 0;
+  for (const letter of id) hash = (hash * 31 + letter.charCodeAt(0)) >>> 0;
+  return memberPalette[hash % memberPalette.length];
+}
 type WorkflowSummary = { summary: string; recommendations: string[]; insights: Array<{ tone: 'great' | 'notice' | 'action'; label: string; text: string }> };
 type TaskRisk = { taskId: string; title: string; status: string; deadline?: string | null; projectTitle: string; assignees: string[]; score: number; level: 'high' | 'medium' | 'low'; predictedCompletion: string; delayDays: number };
 
@@ -35,23 +43,49 @@ const Badge = ({ value }: { value: string }) => <span className={`bdg ${badgeTon
 
 export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTaskId?: string }) {
   const today = useLocalDay();
-  const [tasks, setTasks] = useState<Task[] | null>(null);
+  const filters = useListFilters('deadline');
+  const { query, page, setPage } = filters;
+  const [result, setResult] = useState<ListPage<Task> | null>(null);
+  const [focusedTask, setFocusedTask] = useState<Task | null>(null);
+  const generation = useRef(0);
   const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null);
-  const refreshTasks = useCallback(() => request<Task[]>('/tasks/mine').then(setTasks), []);
-  useEffect(() => { void refreshTasks().catch((error: Error) => notify(error.message)); }, [notify, refreshTasks]);
+  const refreshTasks = useCallback(async () => {
+    const current = ++generation.current;
+    const next = await request<ListPage<Task>>(`/tasks/mine/list?${query}`);
+    if (current !== generation.current) return;
+    if (page > next.totalPages) setPage(next.totalPages);
+    else setResult(next);
+  }, [query, page, setPage]);
   useEffect(() => {
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    socket.on('notification:new', () => { void refreshTasks().catch(() => undefined); });
-    socket.on('group:removed', () => { setTasks(null); void refreshTasks().catch(() => undefined); });
-    return () => { socket.disconnect(); };
-  }, [refreshTasks]);
-  const taskProjectIds = [...new Set((tasks ?? []).map((task) => task.project?.id).filter((id): id is string => Boolean(id)))].sort().join(',');
+    void refreshTasks().catch((error: Error) => notify(error.message));
+    return () => { generation.current += 1; };
+  }, [notify, refreshTasks]);
   useEffect(() => {
-    if (!taskProjectIds) return;
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    socket.on('connect', () => taskProjectIds.split(',').forEach((id) => socket.emit('project:join', id, () => undefined)));
-    socket.on('task:updated', () => { void refreshTasks().catch(() => undefined); });
-    return () => { socket.disconnect(); };
+    if (!focusedTaskId) { setFocusedTask(null); return; }
+    let active = true;
+    void request<Task>(`/tasks/mine/${encodeURIComponent(focusedTaskId)}`).then((task) => {
+      if (active) setFocusedTask({ ...task, progress: ({ pending: 0, ongoing: 50, for_review: 75, completed: 100 } as Record<string, number>)[task.status] });
+    }).catch((error: Error) => { if (active) notify(error.message); });
+    return () => { active = false; };
+  }, [focusedTaskId, notify]);
+  const tasks = focusedTask && !result?.items.some((task) => task.id === focusedTask.id) ? [focusedTask, ...(result?.items ?? [])] : result?.items ?? null;
+  const taskProjectIds = [...new Set((tasks ?? []).map((task) => task.projectId))].sort().join(',');
+  useEffect(() => {
+    const { on, join, dispose } = workspaceSubscription();
+    const reload = () => void refreshTasks().catch(() => undefined);
+    let connected = false;
+    taskProjectIds.split(',').filter(Boolean).forEach((id) => join('project', id));
+    on('connect', () => {
+      if (connected) reload();
+      connected = true;
+    });
+    on('task:updated', (event: { projectId: string; id: string; status: string }) => {
+      if (taskProjectIds.split(',').includes(event.projectId)) reload();
+      setFocusedTask((task) => task?.id === event.id ? { ...task, status: event.status, progress: ({ pending: 0, ongoing: 50, for_review: 75, completed: 100 } as Record<string, number>)[event.status] } : task);
+    });
+    on('notification:new', (event: { type?: string }) => { if (event.type === 'task_assignment' || event.type === 'task_update') reload(); });
+    on('group:removed', reload);
+    return dispose;
   }, [taskProjectIds, refreshTasks]);
   useEffect(() => {
     if (!focusedTaskId || !tasks?.some((task) => task.id === focusedTaskId)) return;
@@ -60,7 +94,7 @@ export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTa
   }, [focusedTaskId, tasks]);
   async function updateStatus(task: Task, status: 'pending' | 'ongoing' | 'for_review' | 'completed') {
     if (task.status === status) return;
-    if (status === 'completed') { notify('Attach your task file link and mark it completed in Task Progress Tracker.'); return; }
+    if (status === 'completed') { notify('Add an attachment and mark the task completed in Task Progress Tracker.'); return; }
     setUpdatingTaskId(task.id);
     try {
       await request(`/tasks/${task.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
@@ -73,6 +107,7 @@ export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTa
     <Head title="My Tasks" />
     <section className="cc" aria-labelledby="assigned-tasks-title">
       <div className="cc-head"><h3 id="assigned-tasks-title">Assigned Tasks</h3></div>
+      <ListFilters filters={filters} placeholder="Search tasks…" statuses={[{ value: 'pending', label: 'Not Started' }, { value: 'ongoing', label: 'In Progress' }, { value: 'for_review', label: 'For Review' }, { value: 'completed', label: 'Completed' }]} />
       {tasks === null ? <Empty>Loading tasks…</Empty> : tasks.length ? <div className="tasks-table-scroll" role="region" aria-label="Assigned tasks" tabIndex={0}><table className="tbl tasks-table">
         <thead><tr><th>Task</th><th>Project</th><th>Assigned By</th><th>Date Assigned</th><th>Due Date</th><th>Priority</th><th>Auto-Progress</th><th>Status</th></tr></thead>
         <tbody>{tasks.map((task) => {
@@ -91,12 +126,32 @@ export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTa
             </select></td>
           </tr>;
         })}</tbody>
-      </table></div> : <Empty>Tasks assigned to you will appear here.</Empty>}
+      </table></div> : <Empty>No tasks match your filters.</Empty>}
+      {result ? <ListPager page={page} totalPages={result.totalPages} setPage={setPage} /> : null}
     </section>
   </section>;
 }
 
 export function CalendarPage({ notify }: { notify: Notice }) {
+  const [connectingOutlook, setConnectingOutlook] = useState(false);
+  async function connectOutlook() {
+    setConnectingOutlook(true);
+    try {
+      const returnUrl = new URL('/calendar', window.location.origin);
+      const { authorizeUrl } = await request<{ authorizeUrl: string }>(`/integrations/microsoft/authorize?redirectUri=${encodeURIComponent(returnUrl.href)}`);
+      window.location.assign(authorizeUrl);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Outlook could not be connected.');
+      setConnectingOutlook(false);
+    }
+  }
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get('connected') !== 'microsoft') return;
+    url.searchParams.delete('connected');
+    window.history.replaceState(null, '', url);
+    notify('Outlook connected. Calendar events will sync through your Microsoft connection.');
+  }, [notify]);
   const [cursor, setCursor] = useState(() => new Date());
   const [data, setData] = useState<CalendarData>({ events: [], hints: [] });
   const [projects, setProjects] = useState<Project[]>([]);
@@ -107,27 +162,38 @@ export function CalendarPage({ notify }: { notify: Notice }) {
   const [saving, setSaving] = useState(false);
   const [loadingCalendar, setLoadingCalendar] = useState(true);
   const [calendarError, setCalendarError] = useState<string | null>(null);
-  const refresh = useCallback(async () => {
-    try { setData(await request<CalendarData>('/calendar')); setCalendarError(null); }
-    catch (error) { setCalendarError(error instanceof Error ? error.message : 'Could not load calendar events.'); throw error; }
-    finally { setLoadingCalendar(false); }
-  }, []);
-  useEffect(() => { void refresh().catch((error: Error) => notify(error.message)); }, [notify, refresh]);
-  useEffect(() => { void request<Project[]>('/projects').then(setProjects).catch(() => undefined); }, []);
-  useEffect(() => {
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    socket.on('connect', () => {
-      projects.forEach((project) => socket.emit('project:join', project.id, () => undefined));
-      void refresh().catch(() => undefined);
-    });
-    socket.on('notification:new', () => { void refresh().catch(() => undefined); });
-    socket.on('task:updated', () => { void refresh().catch(() => undefined); });
-    socket.on('group:removed', () => { void refresh().catch(() => undefined); });
-    // Also reconcile task creation/deletion and changes made while this tab was disconnected.
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh().catch(() => undefined); }, 30_000);
-    return () => { socket.disconnect(); window.clearInterval(timer); };
-  }, [projects, refresh]);
   const cells = useMemo(() => monthCells(cursor), [cursor]);
+  const rangeStart = new Date(cursor.getFullYear(), cursor.getMonth(), -6).toISOString();
+  const rangeEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 8).toISOString();
+  const generation = useRef(0);
+  const refresh = useCallback(async () => {
+    const current = ++generation.current;
+    try {
+      const query = new URLSearchParams({ from: rangeStart, to: rangeEnd });
+      const next = await request<CalendarData>(`/calendar?${query}`);
+      if (current === generation.current) { setData(next); setCalendarError(null); }
+    } catch (error) {
+      if (current === generation.current) setCalendarError(error instanceof Error ? error.message : 'Could not load calendar events.');
+      throw error;
+    } finally { if (current === generation.current) setLoadingCalendar(false); }
+  }, [rangeStart, rangeEnd]);
+  useEffect(() => {
+    setLoadingCalendar(true);
+    void refresh().catch((error: Error) => notify(error.message));
+    return () => { generation.current += 1; };
+  }, [notify, refresh]);
+  useEffect(() => { void request<Project[]>('/projects/options').then(setProjects).catch(() => undefined); }, []);
+  useEffect(() => {
+    const { on, dispose } = workspaceSubscription();
+    const reload = () => void refresh().catch(() => undefined);
+    let connected = false;
+    on('connect', () => { if (connected) reload(); connected = true; });
+    on('notification:new', (event: { relatedType?: string }) => {
+      if (['event', 'calendar', 'outlook', 'task', 'project'].includes(event.relatedType ?? '')) reload();
+    });
+    on('group:removed', reload);
+    return dispose;
+  }, [refresh]);
   const items = useMemo(() => calendarItems(data), [data]);
 
   function openCreate(day?: Date) { setEditingEvent(null); setNewEventStart(day ? toLocalInput(new Date(day.getFullYear(), day.getMonth(), day.getDate(), 9)) : ''); setDialogOpen(true); }
@@ -169,6 +235,7 @@ export function CalendarPage({ notify }: { notify: Notice }) {
         <span className="cal-month-label" aria-live="polite">{cursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span>
         <button className="cal-nav-btn" onClick={() => setCursor(shiftMonth(cursor, 1))} aria-label="Next month">›</button>
         <button className="cal-today-btn" onClick={() => setCursor(new Date())}>Today</button>
+        <button className="btn-o btn-sm" disabled={connectingOutlook} onClick={() => void connectOutlook()}>Connect Outlook</button>
         <button className="btn btn-sm" onClick={() => openCreate()}>+ New Event</button>
       </div>
     </div>
@@ -216,29 +283,51 @@ export function ProjectsAnalyticsPage({ kind, notify }: { kind: 'workflow' | 'pr
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [selected, setSelected] = useState('');
   const [analytics, setAnalytics] = useState<any>(null);
-  const [trends, setTrends] = useState<{ periods: Array<{ periodStart: string; tasksCompleted: number; progress: number }>; trend: string } | null>(null);
+  const [period, setPeriod] = useState<WorkflowPeriod>('weekly');
+  const [report, setReport] = useState<WorkflowReport | null>(null);
   const [summary, setSummary] = useState<WorkflowSummary | null>(null);
-  const [team, setTeam] = useState<TeamPerformance | null>(null);
-  const [analyticsProject, setAnalyticsProject] = useState<AnalyticsProject | null>(null);
-  useEffect(() => { void request<Project[]>('/projects').then((next) => { setProjects(next); setSelected((current) => current || next[0]?.id || ''); }).catch((error: Error) => notify(error.message)); }, [notify]);
+  const [revision, setRevision] = useState(0);
   useEffect(() => {
-    setAnalyticsProject(null); setTeam(null);
-    if (!selected) { setAnalytics(null); setTrends(null); setSummary(null); return; }
-    let current = true;
-    void request<AnalyticsProject>(`/projects/${selected}`).then((project) => { if (current) setAnalyticsProject(project); }).catch((error: Error) => { if (current) notify(error.message); });
-    void request(`/projects/${selected}/analytics`).then(setAnalytics).catch((error: Error) => notify(error.message));
-    void request<{ periods: Array<{ periodStart: string; tasksCompleted: number; progress: number }>; trend: string }>(`/projects/${selected}/analytics/trends`).then(setTrends).catch(() => setTrends(null));
-    void request<WorkflowSummary>(`/projects/${selected}/analytics/summary`).then(setSummary).catch(() => setSummary(null));
-    void request<TeamPerformance>(`/projects/${selected}/analytics/team`).then((result) => { if (current) setTeam(result); }).catch(() => { if (current) setTeam(null); });
-    return () => { current = false; };
-  }, [selected, notify]);
-  const performanceMembers = analyticsProject?.members.map(({ user, role }) => {
-    const assigned = analyticsProject.tasks.filter((task) => task.assignments.some((assignment) => assignment.assigneeId === user.id));
-    const activity = team?.members.find((member) => member.id === user.id);
-    return { id: user.id, fullName: user.fullName, role, performance: assigned.length ? Math.round(assigned.filter((task) => task.status === 'completed').length / assigned.length * 100) : 0, totalContributions: activity?.totalContributions ?? 0 };
-  }) ?? null;
-  const picker = <select className="legacy-select" value={selected} onChange={(event) => setSelected(event.target.value)}><option value="">Select a project</option>{projects?.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select>;
-  if (kind === 'workflow') return <section className="sp on workflow-analytics"><Head title="Workflow Analytics" action={picker} /><div className="krow c3 workflow-kpis"><Kpi value={analytics ? `${Math.round((analytics.overallEfficiency ?? 0) * 100)}%` : '—'} label="Overall Efficiency" /><Kpi value={analytics?.bottlenecks?.length ?? '—'} label="Bottlenecks Detected" tone="yel" /><Kpi value={analytics?.tasksCompleted ?? '—'} label="Tasks Completed" tone="grn" /></div><div className="g2 workflow-top-grid"><TrendChartCard trends={trends} /><TeamPerformanceCard members={performanceMembers} /></div><BottleneckAnalysis stages={analytics?.stages ?? null} /><div className="workflow-bottom-grid"><WorkflowSummaryCard summary={summary} /></div></section>;
+    void request<Project[]>('/projects/options').then((next) => { setProjects(next); setSelected((current) => current || next[0]?.id || ''); }).catch((error: Error) => notify(error.message));
+  }, [notify]);
+  useEffect(() => {
+    if (!selected) return;
+    const { on, join, dispose } = workspaceSubscription();
+    let connected = false;
+    join('project', selected);
+    on('connect', () => {
+      if (connected) setRevision((value) => value + 1);
+      connected = true;
+    });
+    on('task:updated', (event: { projectId: string }) => { if (event.projectId === selected) setRevision((value) => value + 1); });
+    return dispose;
+  }, [selected]);
+  useEffect(() => {
+    if (!selected) { setAnalytics(null); setSummary(null); return; }
+    const abort = new AbortController();
+    void request(`/projects/${selected}/analytics`, { signal: abort.signal }).then((result) => {
+      if (!abort.signal.aborted) setAnalytics(result);
+    }).catch((error: Error) => { if (!abort.signal.aborted) notify(error.message); });
+    if (kind === 'workflow') void request<WorkflowSummary>(`/projects/${selected}/analytics/summary`, { signal: abort.signal }).then((result) => {
+      if (!abort.signal.aborted) setSummary(result);
+    }).catch(() => undefined);
+    return () => abort.abort();
+  }, [selected, kind, revision, notify]);
+  useEffect(() => {
+    if (!selected || kind !== 'workflow') return;
+    const abort = new AbortController();
+    void request<WorkflowReport>(`/projects/${selected}/analytics/workflow?period=${period}`, { signal: abort.signal }).then((result) => {
+      if (!abort.signal.aborted) setReport(result);
+    }).catch((error: Error) => { if (!abort.signal.aborted) notify(error.message); });
+    return () => abort.abort();
+  }, [selected, period, kind, revision, notify]);
+  const changePeriod = (next: WorkflowPeriod) => { if (period !== next) setReport(null); setPeriod(next); };
+  const periodControls = <div className="workflow-periods">
+    <div className="admin-periods" aria-label="Reporting period">{workflowPeriods.map((option) => <button key={option} type="button" aria-pressed={period === option} onClick={() => changePeriod(option)}>{periodLabel(option)}</button>)}</div>
+    <select className="legacy-select" aria-label="Reporting period" value={period} onChange={(event) => changePeriod(event.target.value as WorkflowPeriod)}>{workflowPeriods.map((option) => <option key={option} value={option}>{periodLabel(option)}</option>)}</select>
+  </div>;
+  const picker = <select className="legacy-select" value={selected} onChange={(event) => { setReport(null); setAnalytics(null); setSummary(null); setSelected(event.target.value); }}><option value="">Select a project</option>{projects?.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select>;
+  if (kind === 'workflow') return <section className="sp on workflow-analytics"><Head title="Workflow Analytics" action={picker} /><div className="krow c3 workflow-kpis"><Kpi value={analytics ? `${Math.round((analytics.overallEfficiency ?? 0) * 100)}%` : '—'} label="Overall Efficiency" /><Kpi value={analytics?.bottlenecks?.length ?? '—'} label="Bottlenecks Detected" tone="yel" /><Kpi value={analytics?.tasksCompleted ?? '—'} label="Tasks Completed" tone="grn" /></div><div className="g2 workflow-top-grid"><TrendChartCard report={report} period={period} controls={periodControls} /><TeamPerformanceCard members={report?.members ?? null} /></div><BottleneckAnalysis stages={analytics?.stages ?? null} /><div className="workflow-bottom-grid"><WorkflowSummaryCard summary={summary} /></div></section>;
   const taskRisks: TaskRisk[] = analytics?.taskRisks ?? [];
   const highRiskTasks = taskRisks.filter((task) => task.level === 'high');
   const delayedTasks = taskRisks.filter((task) => task.delayDays > 0);
@@ -256,9 +345,9 @@ export function AnnouncementsPage({ notify }: { notify: Notice }) {
   }, [notify]);
   useEffect(() => {
     void refresh();
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    socket.on('notification:new', () => void refresh());
-    return () => { socket.disconnect(); };
+    const { on, join, dispose } = workspaceSubscription();
+    on('notification:new', () => void refresh());
+    return () => { dispose(); };
   }, [refresh]);
   return <section className="sp on"><Head title="Announcements" /><div className="cc no-bottom announcements-page">
     {items === null ? <Empty>{failed ? 'Could not load announcements.' : 'Loading announcements…'}</Empty> : !items.length && !system.length ? <Empty>No announcements yet.</Empty> : <div className="announce-list">
@@ -277,10 +366,10 @@ export function NotificationsPage({ notify, onNotificationClick }: { notify: Not
   async function refresh() { setItems(await request('/notifications')); }
   useEffect(() => { void refresh().catch((error: Error) => notify(error.message)); }, [notify]);
   useEffect(() => {
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    socket.on('notification:new', () => { void refresh().catch(() => undefined); });
+    const { on, join, dispose } = workspaceSubscription();
+    on('notification:new', () => { void refresh().catch(() => undefined); });
     const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh().catch(() => undefined); }, 15_000);
-    return () => { socket.disconnect(); window.clearInterval(timer); };
+    return () => { dispose(); window.clearInterval(timer); };
   }, []);
   async function markAll() { if (!items) return; try { await Promise.all(items.filter((item) => !item.read).map((item) => request(`/notifications/${item.id}/read`, { method: 'PATCH' }))); await refresh(); notify('Notifications marked as read.'); } catch (error) { notify(error instanceof Error ? error.message : 'Could not mark notifications as read.'); } }
   function activateNotification(item: NonNullable<typeof items>[number]) {
@@ -357,7 +446,10 @@ export function ProfilePage({ user, onUserUpdated, onSessionInvalidated, notify 
     if (!editingProfile) return;
     if (Object.values(errors).some(Boolean)) return notify('Fix the highlighted profile fields before saving.');
     setSaving(true); setErrors({});
-    try { const updated = await request<User & { emailChangePending?: boolean }>('/users/me', { method: 'PATCH', body: JSON.stringify(profile) }); onUserUpdated(updated); setEditingProfile(false); notify(updated.emailChangePending ? 'Check your new email address and open the confirmation link to finish changing it.' : 'Profile updated.'); }
+    const original = { fullName: user.fullName, email: user.email, institution: user.institution ?? '', course: user.course ?? '' };
+    const changes = Object.fromEntries(Object.entries(profile).filter(([key, value]) => value.trim() !== original[key as keyof typeof original]));
+    if (!Object.keys(changes).length) { setSaving(false); setEditingProfile(false); return; }
+    try { const updated = await request<User & { emailChangePending?: boolean }>('/users/me', { method: 'PATCH', body: JSON.stringify(changes) }); onUserUpdated(updated); setEditingProfile(false); notify(updated.emailChangePending ? 'Check your new email address and open the confirmation link to finish changing it.' : 'Profile updated.'); }
     catch (error) { if (error instanceof ApiRequestError && error.fields) setErrors(error.fields); notify(error instanceof Error ? error.message : 'Profile could not be updated.'); }
     finally { setSaving(false); }
   }
@@ -394,56 +486,68 @@ export function ProfilePage({ user, onUserUpdated, onSessionInvalidated, notify 
     finally { setDeleting(false); }
   }
   const browserPushDescription = browserPush === 'enabled' ? 'Browser notifications are enabled for this device.' : browserPush === 'blocked' ? 'Browser permission is blocked. Enable notifications in your browser settings.' : browserPush === 'unsupported' ? 'This browser does not support push notifications.' : 'Get alerts even when WebSphere is closed.';
-  return <section className="sp on"><Head title="Profile & Settings" /><div className="profile-grid"><form className="cc no-bottom" onSubmit={(event) => void saveProfile(event)}><div className="profile-hero">{user.avatarUrl ? <img className="profile-avatar profile-avatar-image" src={user.avatarUrl} alt="Profile" /> : <div className={`profile-avatar tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</div>}<div className="profile-identity"><div className="profile-name-row"><strong>{user.fullName}</strong><div className="profile-photo-menu" ref={photoMenu}><button type="button" className="profile-photo-menu-trigger" aria-label="Profile photo options" aria-expanded={photoMenuOpen} disabled={uploading} onClick={() => setPhotoMenuOpen((open) => !open)}>⋯</button>{photoMenuOpen ? <div className="profile-photo-menu-list"><button type="button" onClick={() => { setPhotoMenuOpen(false); photoInput.current?.click(); }}>Change photo</button><button type="button" disabled={!user.avatarUrl} onClick={() => void removeAvatar()}>Remove photo</button></div> : null}</div></div>{uploading ? <span>Updating photo…</span> : null}<input ref={photoInput} className="sr-only" type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} aria-label="Choose profile photo" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; void uploadAvatar(file); }} /></div></div><div className="profile-edit-heading"><span className="lbl">Profile details</span>{editingProfile ? <button type="button" className="btn-o btn-sm" onClick={cancelProfileEdit}>Cancel</button> : <button type="button" className="btn-o btn-sm" onClick={() => setEditingProfile(true)}>Edit</button>}</div>{([['fullName', 'Full Name'], ['email', 'Email'], ['institution', 'School'], ['course', 'Course']] as const).map(([field, label]) => <label className="profile-field" key={field}><span className="lbl">{label}</span><input value={profile[field]} type={field === 'email' ? 'email' : 'text'} disabled={!editingProfile} aria-invalid={Boolean(errors[field])} onChange={(event) => setField(field, event.target.value)} placeholder={`Your ${label.toLowerCase()}`} /><span className="profile-error">{errors[field]}</span></label>)}{editingProfile ? <button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save Profile'}</button> : null}</form><div className="cc no-bottom"><div className="cc-head"><h3>Settings</h3></div><SettingsTitle>Notifications</SettingsTitle><Toggle title="Task Reminders" description="Get assignment, update, and task-deadline alerts" checked={prefs.tasks} onChange={() => toggle('tasks')} /><Toggle title="Group Chat Alerts" description="Notify me when someone messages the group" checked={prefs.groupActivity} onChange={() => toggle('groupActivity')} /><Toggle title="Deadline Alerts" description="Notify me 24 hours before project deadlines" checked={prefs.deadlines} onChange={() => toggle('deadlines')} /><Toggle title="AI Suggestions" description="Receive AI-generated project recommendations" checked={prefs.aiSuggestions} onChange={() => toggle('aiSuggestions')} /><Toggle title="Email Notifications" description="Send notification alerts to your email" checked={prefs.emailEnabled} onChange={() => toggle('emailEnabled')} /><Toggle title="Browser Push Notifications" description={browserPushDescription} checked={browserPush === 'enabled'} disabled={changingBrowserPush || browserPush === 'unsupported'} onChange={() => void toggleBrowserPush()} /><SettingsTitle>Privacy</SettingsTitle><Toggle title="Profile Photo Visibility" description="Allow group members to see your profile photo" checked={prefs.profileVisibility} onChange={() => toggle('profileVisibility')} /><Toggle title="Activity Status" description="Show others when you are online" checked={prefs.activityStatus} onChange={() => toggle('activityStatus')} /><SettingsTitle>Security</SettingsTitle><Security title="Change Password" description="Update your account password" action="Change" onClick={() => setChangingPassword(true)} /><Security danger title="Delete Account" description="Permanently erase your account and personal data" action="Delete" onClick={() => setDeleteOpen(true)} /></div></div>{changingPassword ? <SecurityModal title="Change Password" onClose={() => { if (!saving) setChangingPassword(false); }}><form onSubmit={(event) => void changePassword(event)}><p className="security-modal-help">Changing your password signs you out of your active sessions.</p><label className="lbl" htmlFor="profile-current-password">Current password</label><input id="profile-current-password" className="ifield" name="oldPassword" type="password" autoComplete="current-password" required autoFocus /><label className="lbl" htmlFor="profile-new-password">New password</label><input id="profile-new-password" className="ifield" name="password" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><label className="lbl" htmlFor="profile-confirm-password">Confirm new password</label><input id="profile-confirm-password" className="ifield" name="confirm" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><div className="modal-acts"><button type="button" className="btn-o" disabled={saving} onClick={() => setChangingPassword(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Changing…' : 'Change Password'}</button></div></form></SecurityModal> : null}{deleteOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleting) setDeleteOpen(false); }}><div className="modal-box" role="dialog" aria-modal="true" aria-labelledby="delete-account-title"><div className="modal-ttl"><span id="delete-account-title">Delete account</span><button type="button" className="modal-close" aria-label="Close account deletion" disabled={deleting} onClick={() => setDeleteOpen(false)}>×</button></div><form onSubmit={(event) => void deleteAccount(event)}><p className="security-modal-help">This permanently erases your personal account data. Shared project history will be kept under an anonymous author.</p><label className="lbl">Current password</label><input className="ifield" name="password" type="password" autoComplete="current-password" required /><label className="lbl">Type DELETE to confirm</label><input className="ifield" name="confirmation" autoComplete="off" required /><div className="modal-acts"><button type="button" className="btn-o" disabled={deleting} onClick={() => setDeleteOpen(false)}>Cancel</button><button className="btn danger" disabled={deleting}>{deleting ? 'Deleting…' : 'Delete account'}</button></div></form></div></div> : null}</section>;
+  return <section className="sp on"><Head title="Profile & Settings" /><div className="profile-grid"><form className="cc no-bottom" onSubmit={(event) => void saveProfile(event)}><div className="profile-hero">{user.avatarUrl ? <img className="profile-avatar profile-avatar-image" src={user.avatarUrl} alt="Profile" /> : <div className={`profile-avatar tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</div>}<div className="profile-identity"><div className="profile-name-row"><strong>{user.fullName}</strong><div className="profile-photo-menu" ref={photoMenu}><button type="button" className="profile-photo-menu-trigger" aria-label="Profile photo options" aria-expanded={photoMenuOpen} disabled={uploading} onClick={() => setPhotoMenuOpen((open) => !open)}>⋯</button>{photoMenuOpen ? <div className="profile-photo-menu-list"><button type="button" onClick={() => { setPhotoMenuOpen(false); photoInput.current?.click(); }}>Change photo</button><button type="button" disabled={!user.avatarUrl} onClick={() => void removeAvatar()}>Remove photo</button></div> : null}</div></div>{uploading ? <span>Updating photo…</span> : null}<input ref={photoInput} className="sr-only" type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} aria-label="Choose profile photo" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; void uploadAvatar(file); }} /></div></div><div className="profile-edit-heading"><span className="lbl">Profile details</span>{editingProfile ? <button type="button" className="btn-o btn-sm" onClick={cancelProfileEdit}>Cancel</button> : <button type="button" className="btn-o btn-sm" onClick={() => setEditingProfile(true)}>Edit</button>}</div>{([['fullName', 'Full Name'], ['email', 'Email'], ['institution', 'School'], ['course', 'Course']] as const).map(([field, label]) => <label className="profile-field" key={field}><span className="lbl">{label}</span><input value={profile[field]} type={field === 'email' ? 'email' : 'text'} disabled={!editingProfile} aria-invalid={Boolean(errors[field])} onChange={(event) => setField(field, event.target.value)} placeholder={`Your ${label.toLowerCase()}`} /><span className="profile-error">{errors[field]}</span></label>)}{editingProfile ? <button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save Profile'}</button> : null}</form><div className="cc no-bottom"><div className="cc-head"><h3>Settings</h3></div><SettingsTitle>Notifications</SettingsTitle><Toggle title="Task Reminders" description="Get assignment, update, and task-deadline alerts" checked={prefs.tasks} onChange={() => toggle('tasks')} /><Toggle title="Group Chat Alerts" description="Notify me when someone messages the group" checked={prefs.groupActivity} onChange={() => toggle('groupActivity')} /><Toggle title="Deadline Alerts" description="Notify me 24 hours before project deadlines" checked={prefs.deadlines} onChange={() => toggle('deadlines')} /><Toggle title="AI Suggestions" description="Receive AI-generated project recommendations" checked={prefs.aiSuggestions} onChange={() => toggle('aiSuggestions')} /><Toggle title="Email Notifications" description="Send notification alerts to your email" checked={prefs.emailEnabled} onChange={() => toggle('emailEnabled')} /><Toggle title="Browser Push Notifications" description={browserPushDescription} checked={browserPush === 'enabled'} disabled={changingBrowserPush || browserPush === 'unsupported'} onChange={() => void toggleBrowserPush()} /><SettingsTitle>Privacy</SettingsTitle><Toggle title="Profile Photo Visibility" description="Allow group members to see your profile photo" checked={prefs.profileVisibility} onChange={() => toggle('profileVisibility')} /><Toggle title="Activity Status" description="Show others when you are online" checked={prefs.activityStatus} onChange={() => toggle('activityStatus')} /><SettingsTitle>Security</SettingsTitle>{user.googleLinked ? <p>Google account linked</p> : <Security title="Google sign-in" description="Link a Google account to sign in with it" action="Link Google" onClick={() => void startGoogle('link').catch((error: Error) => notify(error.message))} />}{user.passwordEnabled !== false ? <Security title="Change Password" description="Update your account password" action="Change" onClick={() => setChangingPassword(true)} /> : null}<Security danger title="Delete Account" description="Permanently erase your account and personal data" action="Delete" onClick={() => setDeleteOpen(true)} /></div></div>{changingPassword ? <SecurityModal title="Change Password" onClose={() => { if (!saving) setChangingPassword(false); }}><form onSubmit={(event) => void changePassword(event)}><p className="security-modal-help">Changing your password signs you out of your active sessions.</p><label className="lbl" htmlFor="profile-current-password">Current password</label><input id="profile-current-password" className="ifield" name="oldPassword" type="password" autoComplete="current-password" required autoFocus /><label className="lbl" htmlFor="profile-new-password">New password</label><input id="profile-new-password" className="ifield" name="password" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><label className="lbl" htmlFor="profile-confirm-password">Confirm new password</label><input id="profile-confirm-password" className="ifield" name="confirm" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><div className="modal-acts"><button type="button" className="btn-o" disabled={saving} onClick={() => setChangingPassword(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Changing…' : 'Change Password'}</button></div></form></SecurityModal> : null}{deleteOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleting) setDeleteOpen(false); }}><div className="modal-box" role="dialog" aria-modal="true" aria-labelledby="delete-account-title"><div className="modal-ttl"><span id="delete-account-title">Delete account</span><button type="button" className="modal-close" aria-label="Close account deletion" disabled={deleting} onClick={() => setDeleteOpen(false)}>×</button></div><form onSubmit={(event) => void deleteAccount(event)}><p className="security-modal-help">This permanently erases your personal account data. Shared project history will be kept under an anonymous author.</p><label className="lbl">Current password</label><input className="ifield" name="password" type="password" autoComplete="current-password" required /><label className="lbl">Type DELETE to confirm</label><input className="ifield" name="confirmation" autoComplete="off" required /><div className="modal-acts"><button type="button" className="btn-o" disabled={deleting} onClick={() => setDeleteOpen(false)}>Cancel</button><button className="btn danger" disabled={deleting}>{deleting ? 'Deleting…' : 'Delete account'}</button></div></form></div></div> : null}</section>;
 }
 
 const trackerFilters = ['all', 'pending', 'ongoing', 'for_review', 'completed'] as const;
 type TrackerFilter = (typeof trackerFilters)[number];
 const trackerFilterLabel: Record<TrackerFilter, string> = { all: 'All Files', pending: 'Not Started', ongoing: 'In Progress', for_review: 'For Review', completed: 'Completed' };
-type TrackerResource = { toolKind?: string | null; id: string; connectionId: string; title: string; externalUrl: string; provider: string; platform: string; category: string; createdAt: string };
+type TrackerResource = { upload?: boolean; fileSize?: number; toolKind?: string | null; id: string; connectionId: string; title: string; externalUrl: string; provider: string | null; platform: string; category: string; createdAt: string };
 type TrackerMember = { id: string; fullName: string; avatarUrl?: string | null };
 type TrackerTask = { id: string; title: string; description: string; deadline?: string | null; priority: string; status: 'pending' | 'ongoing' | 'for_review' | 'completed'; progress: number; createdAt: string; latestActivityAt: string; project: { id: string; title: string }; resources: TrackerResource[]; assignees: TrackerMember[]; canUpdateStatus: boolean; canAssign: boolean; canEditResource: boolean; collaborators: TrackerMember[] };
 type TrackerConnection = { id: string; provider: string; platform: string; category: string; status: string; syncState?: string | null; lastSyncedAt?: string | null };
 type TrackerActivity = { id: string; kind: 'workflow' | 'integration'; createdAt: string; type?: string; taskTitle?: string | null; projectId?: string; projectTitle?: string; actor?: { id: string; fullName: string; avatarUrl?: string | null } | null; fromValue?: string | null; toValue?: string | null; action?: string; platform?: string; provider?: string };
-type TrackerData = { tasks: TrackerTask[]; projects: Array<{ id: string; title: string; collaborators: TrackerMember[] }>; connections: TrackerConnection[]; activity: TrackerActivity[] };
+type TrackerData = { page: number; totalPages: number; stats: { fileCount: number; taskCount: number; statuses: Record<string, number>; average: number }; platforms: Array<{ id: string; label: string }>; tasks: TrackerTask[]; projects: Array<{ id: string; title: string; collaborators: TrackerMember[] }>; connections: TrackerConnection[]; activity: TrackerActivity[] };
 type TrackerCard = { task: TrackerTask; resource: TrackerResource | null };
-const trackerPlatforms = [
-  { provider: 'google', name: 'Google Drive & Docs' },
-  { provider: 'microsoft', name: 'Microsoft 365' },
-  { provider: 'trello', name: 'Trello' },
-  { provider: 'asana', name: 'Asana' },
-];
+function LinkFields({ resource }: { resource?: TrackerResource }) {
+  const [url, setUrl] = useState(resource?.externalUrl ?? '');
+  const detected = url ? identifyResourceLink(url) : null;
+  return <>
+    <label className="lbl" htmlFor="tracker-link-title">Link name</label>
+    <input className="ifield" id="tracker-link-title" name="title" required minLength={2} maxLength={180} defaultValue={resource?.title} />
+    <label className="lbl" htmlFor="tracker-link-url">External URL</label>
+    <input className="ifield" id="tracker-link-url" name="externalUrl" type="url" required value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://…" />
+    {detected ? <p className="tracker-auto-progress-note"><ToolLogo provider={detected.provider} name={detected.name} size="xs" /> {detected.name}</p> : null}
+    <label className="auth-consent"><input name="academicUse" type="checkbox" required /> This link is for academic project work.</label>
+  </>;
+}
 
-const trackerLinkTools = [
-  { id: 'google-docs', provider: 'google', name: 'Google Docs' },
-  { id: 'google-forms', provider: 'google', name: 'Google Forms' },
-  { id: 'microsoft-word', provider: 'microsoft', name: 'Microsoft Word' },
-  { id: 'microsoft-excel', provider: 'microsoft', name: 'Microsoft Excel' },
-  { id: 'trello', provider: 'trello', name: 'Trello' },
-  { id: 'asana', provider: 'asana', name: 'Asana' },
-  { id: 'microsoft-legacy', provider: 'microsoft', name: 'Microsoft 365 (existing link)' },
-];
-function selectedLinkTool(value: FormDataEntryValue | null, url: FormDataEntryValue | null) {
-  const selected = trackerLinkTools.find((tool) => tool.id === value);
-  if (!selected) throw new Error('Choose a tool for this file link.');
-  const error = resourceLinkError(String(url ?? ''), selected.provider, ['trello', 'asana', 'microsoft-legacy'].includes(selected.id) ? null : selected.id);
-  if (error) throw new Error(error);
-  return { provider: selected.provider, toolKind: selected.id === 'trello' || selected.id === 'asana' || selected.id === 'microsoft-legacy' ? null : selected.id };
+function academicLink(form: FormData) {
+  const externalUrl = String(form.get('externalUrl') ?? '').trim();
+  if (!identifyResourceLink(externalUrl)) throw new Error('Use an HTTPS link without embedded credentials.');
+  if (!form.has('academicUse')) throw new Error('Confirm the link is for academic project work.');
+  return { title: form.get('title'), externalUrl, academicUse: true };
 }
 
 export function TrackerPage({ notify }: { notify: Notice }) {
   const [data, setData] = useState<TrackerData | null>(null);
-  const [filter, setFilter] = useState<TrackerFilter>('all');
-  const [platform, setPlatform] = useState('all');
-  const [projectId, setProjectId] = useState('all');
+  const [filter, changeFilter] = useState<TrackerFilter>('all');
+  const [trackerPage, setTrackerPage] = useState(1);
+  const setFilter = (next: TrackerFilter) => { changeFilter(next); setTrackerPage(1); };
+  const [platform, changePlatform] = useState('all');
+  const [projectId, changeProjectId] = useState('all');
+  const setPlatform = (next: string) => { changePlatform(next); setTrackerPage(1); };
+  const setProjectId = (next: string) => { changeProjectId(next); changePlatform('all'); setTrackerPage(1); };
+  const [attachmentMode, setAttachmentMode] = useState<'link' | 'file'>('link');
   const [linkingTaskId, setLinkingTaskId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [editingResourceId, setEditingResourceId] = useState<string | null>(null);
   const [editStatus, setEditStatus] = useState<TrackerTask['status']>('pending');
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  async function refresh() { setData(await request<TrackerData>('/tasks/tracker')); }
-  useEffect(() => { void refresh().catch((error: Error) => notify(error.message)); }, [notify]);
+  const trackerGeneration = useRef(0);
+  const refresh = useCallback(async () => {
+    const generation = ++trackerGeneration.current;
+    const query = new URLSearchParams({ page: String(trackerPage), ...(projectId !== 'all' ? { projectId } : {}), ...(filter !== 'all' ? { status: filter } : {}), ...(platform !== 'all' ? { platform } : {}) });
+    const next = await request<TrackerData>(`/tasks/tracker/page?${query}`);
+    if (generation !== trackerGeneration.current) return;
+    if (trackerPage > next.totalPages) setTrackerPage(next.totalPages);
+    else setData(next);
+  }, [trackerPage, projectId, filter, platform]);
+  useEffect(() => {
+    void refresh().catch((error: Error) => notify(error.message));
+    return () => { trackerGeneration.current += 1; };
+  }, [notify, refresh]);
   const tasks = data?.tasks ?? [];
   const projectTasks = projectId === 'all' ? tasks : tasks.filter((task) => task.project.id === projectId);
   const ownTasks = projectTasks.filter((task) => task.canUpdateStatus);
@@ -451,21 +555,22 @@ export function TrackerPage({ notify }: { notify: Notice }) {
   const projectRoomIds = useMemo(() => [...new Set(tasks.map((task) => task.project.id))], [data]);
   useEffect(() => {
     if (!projectRoomIds.length) return;
-    const socket = io(socketBaseUrl(), { path: '/socket.io', auth: { token: getAccessToken() } });
-    socket.on('connect', () => projectRoomIds.forEach((projectId) => socket.emit('project:join', projectId, () => undefined)));
-    socket.on('task:updated', () => { void refresh().catch(() => undefined); });
-    socket.on('group:removed', () => { void refresh().catch(() => undefined); });
-    return () => { socket.disconnect(); };
-  }, [projectRoomIds.join(',')]);
+    const { on, join, dispose } = workspaceSubscription();
+    projectRoomIds.forEach((id) => join('project', id));
+    on('task:updated', (event: { projectId: string }) => { if (projectRoomIds.includes(event.projectId)) void refresh().catch(() => undefined); });
+    on('group:removed', () => { void refresh().catch(() => undefined); });
+    return () => { dispose(); };
+  }, [projectRoomIds.join(','), refresh]);
+  const trackerPlatforms = (data?.platforms ?? []).map(({ id, label }) => [id, label]);
   const connections = data?.connections ?? [];
   const connectedConnections = connections.filter((connection) => connection.status === 'connected');
-  const complete = projectTasks.filter((task) => task.status === 'completed').length;
-  const average = projectTasks.length ? Math.round(projectTasks.reduce((total, task) => total + task.progress, 0) / projectTasks.length) : 0;
+  const complete = data?.stats.statuses.completed ?? 0;
+  const average = data?.stats.average ?? 0;
   const visibleTasks = (filter === 'all' ? projectTasks : projectTasks.filter((task) => task.status === filter));
-  const cards: TrackerCard[] = visibleTasks.flatMap<TrackerCard>((task) => task.resources.length ? task.resources.map((resource) => ({ task, resource })) : [{ task, resource: null }]).filter((card) => platform === 'all' || card.resource?.provider === platform);
+  const cards: TrackerCard[] = visibleTasks.flatMap<TrackerCard>((task) => task.resources.length ? task.resources.map((resource) => ({ task, resource })) : [{ task, resource: null }]).filter((card) => platform === 'all' || (card.resource ? card.resource.provider ?? (card.resource.upload ? 'upload' : 'link') : '') === platform);
   const projectSections = Object.values(cards.reduce<Record<string, { title: string; cards: TrackerCard[] }>>((sections, card) => { (sections[card.task.project.id] ||= { title: card.task.project.title, cards: [] }).cards.push(card); return sections; }, {}));
   const selectedProjects = data?.projects.filter((project) => projectId === 'all' || project.id === projectId) ?? [];
-  const collaborators = [...new Map(selectedProjects.flatMap((project) => project.collaborators).map((member) => [member.id, member])).values()];
+  const collaborators = [...new Map((projectId === 'all' ? tasks.flatMap((task) => task.collaborators) : selectedProjects.flatMap((project) => project.collaborators)).map((member) => [member.id, member])).values()];
   const activity = data?.activity.filter((item) => projectId === 'all' || item.projectId === projectId) ?? [];
   const linkingTask = ownTasks.find((task) => task.id === linkingTaskId) ?? null;
   const editingTask = tasks.find((task) => task.id === editingTaskId) ?? null;
@@ -483,7 +588,7 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     const form = new FormData(event.currentTarget);
     setSaving(true);
     try {
-      await request(`/resources/${editingResource.id}`, { method: 'PATCH', body: JSON.stringify({ ...selectedLinkTool(form.get('tool'), form.get('externalUrl')), title: form.get('title'), externalUrl: form.get('externalUrl'), ...(editingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
+      await request(`/resources/${editingResource.id}`, { method: 'PATCH', body: JSON.stringify({ ...academicLink(form), ...(editingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
       await refresh();
       setEditingTaskId(null); setEditingResourceId(null);
       notify('External file link updated.');
@@ -496,10 +601,17 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     const form = new FormData(event.currentTarget);
     setSaving(true);
     try {
-      await request(`/tasks/${linkingTask.id}/resources`, { method: 'POST', body: JSON.stringify({ ...selectedLinkTool(form.get('tool'), form.get('externalUrl')), title: form.get('title'), externalUrl: form.get('externalUrl'), ...(linkingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
+      if (attachmentMode === 'file') {
+        const file = form.get('file');
+        if (!(file instanceof File) || file.size < 1 || file.size > 5 * 1024 * 1024) throw new Error('Choose a file between 1 byte and 5 MB.');
+        if (linkingTask.canUpdateStatus) form.set('status', editStatus);
+        await request(`/tasks/${linkingTask.id}/files`, { method: 'POST', body: form });
+      } else {
+        await request(`/tasks/${linkingTask.id}/resources`, { method: 'POST', body: JSON.stringify({ ...academicLink(form), ...(linkingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
+      }
       setLinkingTaskId(null);
       await refresh();
-      notify('File link attached to the task.');
+      notify('Attachment added to the task.');
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not attach this file link.'); }
     finally { setSaving(false); }
   }
@@ -511,6 +623,18 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     finally { setSyncing(false); }
   }
   async function openResource(resource: TrackerResource) {
+    if (resource.upload) {
+      try {
+        await request('/auth/session-valid');
+        const response = await fetch(apiUrl(`/resources/${encodeURIComponent(resource.id)}/download`), { headers: { authorization: `Bearer ${getAccessToken()}` } });
+        if (!response.ok) throw new Error('Could not download this file.');
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement('a');
+        link.href = url; link.download = resource.title; link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (error) { notify(error instanceof Error ? error.message : 'Could not download this file.'); }
+      return;
+    }
     // Open while the click still has browser activation; opening after the request can be blocked as a popup.
     const tab = window.open('about:blank', '_blank');
     if (!tab) { notify('Allow pop-ups to open this file.'); return; }
@@ -524,86 +648,29 @@ export function TrackerPage({ notify }: { notify: Notice }) {
 
   return <section className="sp on tracker-page"><Head title="Task Progress Tracker" action={<div className="tracker-head-actions"><button className="btn-o btn-sm" onClick={() => { if (!ownTasks.length) notify('You need an assigned task before attaching a file.'); else beginLink(ownTasks[0].id); }}>⌕ Attach File Link</button><button className="btn btn-sm" disabled={syncing} onClick={() => void syncFiles()}>{syncing ? 'Syncing…' : '↻ Sync Files'}</button></div>} />
     <label className="tracker-project-picker"><span>Task progress for</span><select className="legacy-select" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="all">All projects</option>{data?.projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
-    <div className="tracker-kpis"><TrackerKpi icon="▤" value={projectTasks.reduce((total, task) => total + task.resources.length, 0)} label="Total Files" /><TrackerKpi icon="◷" value={projectTasks.filter((task) => task.status === 'ongoing').length} label="In Progress" tone="yel" /><TrackerKpi icon="✓" value={complete} label="Completed" tone="grn" /><TrackerKpi icon="▥" value={`${average}%`} label="Avg. Progress" /></div>
-    <div className="tracker-toolbar"><div className="tracker-filter"><span>Filter:</span><div>{trackerFilters.map((value) => <button type="button" className={filter === value ? 'on' : ''} key={value} onClick={() => setFilter(value)}>{trackerFilterLabel[value]}</button>)}</div></div><label className="tracker-platform">Platform:<span className="tracker-selected-platform">{platform !== 'all' ? <ToolLogo provider={platform} size="xs" /> : null}<select value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">All Platforms</option>{trackerPlatforms.map((item) => <option key={item.provider} value={item.provider}>{item.name}</option>)}</select></span></label></div>
+    <div className="tracker-kpis"><TrackerKpi icon="▤" value={data?.stats.fileCount ?? 0} label="Total Files" /><TrackerKpi icon="◷" value={data?.stats.statuses.ongoing ?? 0} label="In Progress" tone="yel" /><TrackerKpi icon="✓" value={complete} label="Completed" tone="grn" /><TrackerKpi icon="▥" value={`${average}%`} label="Avg. Progress" /></div>
+    <div className="tracker-toolbar"><div className="tracker-filter"><span>Filter:</span><div>{trackerFilters.map((value) => <button type="button" className={filter === value ? 'on' : ''} key={value} onClick={() => setFilter(value)}>{trackerFilterLabel[value]}</button>)}</div></div><label className="tracker-platform">Platform:<span className="tracker-selected-platform">{platform !== 'all' ? <ToolLogo provider={platform} size="xs" /> : null}<select value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">All Platforms</option>{trackerPlatforms.map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></span></label></div>
     {data === null ? <div className="cc"><Empty>Loading your tracker…</Empty></div> : projectSections.length ? <div className="tracker-project-sections">{projectSections.map((section) => <section className="tracker-project-section" key={section.title}><div className="tracker-project-heading"><span>Project</span><h3>{section.title}</h3></div><div className="tracker-resource-grid">{section.cards.map(({ task, resource }) => <TrackerResourceCard key={resource?.id ?? task.id} task={task} resource={resource} onEdit={() => { if (!resource) return; setEditingTaskId(task.id); setEditingResourceId(resource.id); setEditStatus(task.status); }} onOpen={() => resource && void openResource(resource)} onAttach={() => beginLink(task.id)} />)}</div></section>)}</div> : <div className="cc"><Empty>{projectTasks.length ? 'No linked files match the selected filters.' : 'No tasks are available for the selected project.'}</Empty></div>}
+    {data ? <ListPager page={trackerPage} totalPages={data.totalPages} setPage={setTrackerPage} /> : null}
     <div className="tracker-lower-grid"><section className="cc tracker-activity"><div className="cc-head"><h3>Recent File Activity</h3><span>Latest updates</span></div>{activity.length ? <div className="tracker-activity-list">{activity.slice(0, 8).map((activity) => <div className="tracker-activity-row" key={activity.id}><TrackerActivityIcon activity={activity} /><div><strong>{activityLabel(activity)}</strong><span>{relativeDate(activity.createdAt)}</span></div></div>)}</div> : <Empty>Linked-file and task updates will appear here.</Empty>}</section><section className="cc tracker-collaborators"><div className="cc-head"><h3>Project Collaborators</h3><span>{collaborators.length || '—'} members</span></div>{collaborators.length ? <div className="tracker-collaborator-list">{collaborators.map((member) => <div className="tracker-collaborator" key={member.id}><span className={`tracker-collaborator-avatar tone-${avatarTone(member.id)}`}>{member.avatarUrl ? <img src={member.avatarUrl} alt="" /> : initials(member.fullName)}</span><strong>{member.fullName}</strong></div>)}</div> : <Empty>Collaborators appear when you have assigned project tasks.</Empty>}</section></div>
-    {linkingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLinkingTaskId(null); }}><div className="modal-box tracker-link-modal" role="dialog" aria-modal="true" aria-label="Attach file link"><div className="modal-ttl"><span>Attach External File Link</span><button type="button" className="modal-close" aria-label="Close" onClick={() => setLinkingTaskId(null)}>×</button></div><form onSubmit={linkFile}>
+    {linkingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLinkingTaskId(null); }}><div className="modal-box tracker-link-modal" role="dialog" aria-modal="true" aria-label="Attach file link"><div className="modal-ttl"><span>Add Attachment</span><button type="button" className="modal-close" aria-label="Close" onClick={() => setLinkingTaskId(null)}>×</button></div><form onSubmit={linkFile}>
       <label className="lbl" htmlFor="tracker-link-task">Task</label><select className="ifield" id="tracker-link-task" value={linkingTask.id} onChange={(event) => beginLink(event.target.value)}>{ownTasks.map((task) => <option key={task.id} value={task.id}>{task.project.title} — {task.title}</option>)}</select>
-      <label className="lbl" htmlFor="tracker-file-name">File name</label><input className="ifield" id="tracker-file-name" name="title" required minLength={2} maxLength={180} placeholder="e.g. Research presentation slides" />
-      <label className="lbl" htmlFor="tracker-file-url">External file URL</label><input className="ifield" id="tracker-file-url" name="externalUrl" type="url" required placeholder="https://…" />
-      <fieldset className="tracker-platform-options"><legend className="lbl">Platform</legend>{trackerLinkTools.filter((item) => item.id !== 'microsoft-legacy').map((item) => <label className="tracker-platform-option" key={item.id}><input type="radio" name="tool" value={item.id} required /><ToolLogo provider={item.provider} name={item.name} size="xs" /><span>{item.name}</span></label>)}</fieldset>
+      <label className="lbl" htmlFor="tracker-attachment-mode">Attachment type</label>
+      <select className="ifield" id="tracker-attachment-mode" value={attachmentMode} onChange={(event) => setAttachmentMode(event.target.value as 'link' | 'file')}><option value="link">External link</option><option value="file">Upload file</option></select>
+      {attachmentMode === 'link' ? <LinkFields /> : <label className="lbl">Choose file (up to 5 MB)<input className="ifield" name="file" type="file" required /></label>}
       <label className="lbl">Assigned member</label><div className="tracker-auto-progress-note">{linkingTask.assignees.map((member) => member.fullName).join(', ') || 'Unassigned'}</div>
       <label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!linkingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div>
-      <div className="modal-acts"><button type="button" className="btn-o" onClick={() => setLinkingTaskId(null)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Attaching…' : 'Attach Link'}</button></div></form></div></div> : null}
-    {editingTask && editingResource ? <div className="modal-ov open tracker-edit-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) { setEditingTaskId(null); setEditingResourceId(null); } }}><div className="modal-box tracker-edit-modal" role="dialog" aria-modal="true" aria-label="Edit external file link"><div className="modal-ttl"><span>Edit External File Link</span><button type="button" className="modal-close" aria-label="Close" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>×</button></div><form onSubmit={(event) => void saveExternalFile(event)}><label className="lbl" htmlFor="tracker-edit-name">File name</label><input className="ifield" id="tracker-edit-name" name="title" required minLength={2} maxLength={180} defaultValue={editingResource.title} /><label className="lbl" htmlFor="tracker-edit-url">External file URL</label><input className="ifield" id="tracker-edit-url" name="externalUrl" type="url" required defaultValue={editingResource.externalUrl} /><fieldset className="tracker-platform-options"><legend className="lbl">Platform</legend>{trackerLinkTools.filter((item) => item.id !== 'microsoft-legacy' || (!editingResource.toolKind && editingResource.provider === 'microsoft')).map((item) => <label className="tracker-platform-option" key={item.id}><input type="radio" name="tool" value={item.id} defaultChecked={item.id === (editingResource.toolKind ?? (editingResource.provider === 'google' ? 'google-docs' : editingResource.provider === 'microsoft' ? 'microsoft-legacy' : editingResource.provider))} required /><ToolLogo provider={item.provider} name={item.name} size="xs" /><span>{item.name}</span></label>)}</fieldset><label className="lbl">Assigned member</label><div className="tracker-auto-progress-note">{editingTask.assignees.map((member) => member.fullName).join(', ') || 'Unassigned'}</div><label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!editingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div><div className="modal-acts"><button type="button" className="btn-o" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save Changes'}</button></div></form></div></div> : null}
+      <div className="modal-acts"><button type="button" className="btn-o" onClick={() => setLinkingTaskId(null)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Attaching…' : 'Attach'}</button></div></form></div></div> : null}
+    {editingTask && editingResource ? <div className="modal-ov open tracker-edit-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) { setEditingTaskId(null); setEditingResourceId(null); } }}><div className="modal-box tracker-edit-modal" role="dialog" aria-modal="true" aria-label="Edit external file link"><div className="modal-ttl"><span>Edit External File Link</span><button type="button" className="modal-close" aria-label="Close" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>×</button></div><form onSubmit={(event) => void saveExternalFile(event)}><LinkFields resource={editingResource} /><label className="lbl">Assigned member</label><div className="tracker-auto-progress-note">{editingTask.assignees.map((member) => member.fullName).join(', ') || 'Unassigned'}</div><label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!editingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div><div className="modal-acts"><button type="button" className="btn-o" onClick={() => { setEditingTaskId(null); setEditingResourceId(null); }}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save Changes'}</button></div></form></div></div> : null}
   </section>;
 }
 
 function TrackerKpi({ icon, value, label, tone }: { icon: string; value: string | number; label: string; tone?: 'yel' | 'grn' }) { return <div className={`tracker-kpi ${tone ?? ''}`}><i>{icon}</i><div><strong>{value}</strong><span>{label}</span></div></div>; }
 function TrackerResourceCard({ task, resource, onEdit, onOpen, onAttach }: { task: TrackerTask; resource: TrackerResource | null; onEdit: () => void; onOpen: () => void; onAttach: () => void }) {
   const assignee = task.assignees[0];
-  return <article className="tracker-resource-card"><div className="tracker-resource-top"><div className="tracker-file-icon"><ToolLogo provider={resource?.provider} name={resource?.platform} size="md" /></div><div className="tracker-resource-copy"><strong>{resource?.title ?? task.title}</strong><span>{resource ? `${resource.platform} · ${task.title}` : 'No file linked'}</span></div><Badge value={task.status} /></div><div className="tracker-owner"><span className={`tracker-owner-avatar${assignee ? ` tone-${avatarTone(assignee.id)}` : ''}`}>{assignee?.avatarUrl ? <img src={assignee.avatarUrl} alt="" /> : initials(assignee?.fullName ?? 'Unassigned')}</span><span>{assignee ? assignee.fullName : 'Unassigned'}</span></div><div className="tracker-progress-row"><span>Progress <small>Automatic from status</small></span><strong>{task.progress}%</strong></div><div className="tracker-progress-track"><i style={{ width: `${task.progress}%` }} /></div><div className="tracker-resource-footer"><span>Updated {relativeDate(task.latestActivityAt)}</span><div>{resource ? <>{task.canEditResource ? <button className="btn-o btn-sm tracker-edit-button" onClick={onEdit}>⌑ Edit</button> : null}<button className="btn btn-sm" onClick={onOpen}>{task.canEditResource ? 'Open File' : 'View'}</button></> : task.canUpdateStatus ? <button className="btn-o btn-sm" onClick={onAttach}>Attach</button> : null}</div></div></article>;
+  return <article className="tracker-resource-card"><div className="tracker-resource-top"><div className="tracker-file-icon"><ToolLogo provider={resource?.provider} name={resource?.platform} size="md" /></div><div className="tracker-resource-copy"><strong>{resource?.title ?? task.title}</strong><span>{resource ? `${resource.platform}${resource.fileSize ? ` · ${Math.ceil(resource.fileSize / 1024)} KB` : ''} · ${task.title}` : 'No file linked'}</span></div><Badge value={task.status} /></div><div className="tracker-owner"><span className={`tracker-owner-avatar${assignee ? ` tone-${avatarTone(assignee.id)}` : ''}`}>{assignee?.avatarUrl ? <img src={assignee.avatarUrl} alt="" /> : initials(assignee?.fullName ?? 'Unassigned')}</span><span>{assignee ? assignee.fullName : 'Unassigned'}</span></div><div className="tracker-progress-row"><span>Progress <small>Automatic from status</small></span><strong>{task.progress}%</strong></div><div className="tracker-progress-track"><i style={{ width: `${task.progress}%` }} /></div><div className="tracker-resource-footer"><span>Updated {relativeDate(task.latestActivityAt)}</span><div>{resource ? <>{task.canEditResource && !resource.upload ? <button className="btn-o btn-sm tracker-edit-button" onClick={onEdit}>⌑ Edit</button> : null}<button className="btn btn-sm" onClick={onOpen}>{resource.upload ? 'Download' : 'Open link'}</button></> : task.canUpdateStatus ? <button className="btn-o btn-sm" onClick={onAttach}>Attach</button> : null}</div></div></article>;
 }
 function activityLabel(activity: TrackerActivity) { if (activity.kind === 'integration') return activity.action ?? `${activity.platform ?? 'Integration'} activity`; const actor = activity.actor?.fullName ?? 'A project member'; if (activity.type === 'task_completed') return `${actor} completed ${activity.taskTitle ?? 'a task'}`; if (activity.type === 'progress_activity') return activity.toValue ? `${actor} linked ${activity.toValue}` : `${actor} updated task progress`; if (activity.type === 'assignment_change') return `${actor} assigned ${activity.taskTitle ?? 'a task'}`; return `${actor} changed ${activity.taskTitle ?? 'a task'} to ${(activity.toValue ?? 'a new status').replaceAll('_', ' ')}`; }
-
-export function IntegrationsPage({ notify }: { notify: Notice }) {
-  const [tools, setTools] = useState<Array<{ id: string; provider: string; name: string; category: string; connections: Array<{ id: string; status: string; lastSyncedAt?: string | null; _count: { linkedResources: number; usage: number } }> }> | null>(null);
-  const [connecting, setConnecting] = useState<string | null>(null);
-  const [disconnecting, setDisconnecting] = useState<string | null>(null);
-  const [launching, setLaunching] = useState<string | null>(null);
-  const [confirmation, setConfirmation] = useState<ConfirmAction | null>(null);
-  async function loadCatalog() {
-    const catalog = await request<NonNullable<typeof tools>>('/integrations/catalog');
-    setTools(catalog.filter((tool) => !['notion', 'canva'].includes(tool.provider)));
-  }
-  useEffect(() => {
-    void loadCatalog().catch((error: Error) => notify(error.message));
-    const provider = new URLSearchParams(window.location.search).get('connected');
-    if (provider) { notify(`${provider === 'microsoft' ? 'Microsoft 365' : provider[0].toUpperCase() + provider.slice(1)} connected successfully.`); window.history.replaceState({}, '', `${window.location.pathname}${window.location.hash}`); }
-  }, [notify]);
-  async function disconnect(tool: { provider: string; name: string; connections: Array<{ id: string }> }) {
-    const connectionId = tool.connections[0]?.id;
-    if (!connectionId) return;
-    setDisconnecting(tool.provider);
-    try { await request(`/integrations/connections/${connectionId}`, { method: 'DELETE' }); await loadCatalog(); notify(`${tool.name} disconnected.`); }
-    catch (error) { notify(error instanceof Error ? error.message : `Could not disconnect ${tool.name}.`); }
-    finally { setDisconnecting(null); }
-  }
-  async function connect(tool: { provider: string; name: string }) {
-    if (!['google', 'microsoft', 'trello', 'asana'].includes(tool.provider)) { notify(`${tool.name} is not available yet.`); return; }
-    setConnecting(tool.provider);
-    try {
-      const returnUrl = new URL('/integrations', window.location.origin).toString();
-      const { authorizeUrl } = await request<{ authorizeUrl: string }>(`/integrations/${tool.provider}/authorize?redirectUri=${encodeURIComponent(returnUrl)}`);
-      window.location.assign(authorizeUrl);
-    } catch (error) { notify(error instanceof Error ? error.message : `Could not connect ${tool.name}.`); setConnecting(null); }
-  }
-  async function launch(tool: { provider: string; name: string; launchUrl?: string; connections: Array<{ id: string; status: string }> }) {
-    const connection = tool.connections.find((item) => item.status === 'connected');
-    if (!connection) return notify(`${tool.name} is not connected.`);
-    setLaunching(tool.provider);
-    try {
-      const { externalUrl } = await request<{ externalUrl: string }>(`/integrations/connections/${connection.id}/launch`, { method: 'POST' });
-      const link = document.createElement('a'); link.href = tool.launchUrl ?? externalUrl; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.click();
-      notify(`${tool.name} opened in a new tab.`);
-    } catch (error) { notify(error instanceof Error ? error.message : `Could not open ${tool.name}.`); }
-    finally { setLaunching(null); }
-  }
-  const connections = tools?.flatMap((tool) => tool.connections.map((connection) => ({ ...connection, tool }))) ?? [];
-  const connected = connections.filter((connection) => connection.status === 'connected');
-  const linkedResources = connected.reduce((total, connection) => total + connection._count.linkedResources, 0);
-  const lastSyncedAt = connected.map((connection) => connection.lastSyncedAt).filter((value): value is string => Boolean(value)).sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
-  const sections = useMemo(() => {
-    const entries = (tools ?? []).flatMap((tool) => {
-      if (tool.provider === 'microsoft') return [{ name: 'Microsoft Word', launchUrl: 'https://www.office.com/launch/word' }, { name: 'Microsoft Excel', launchUrl: 'https://www.office.com/launch/excel' }].map((app) => ({ ...tool, ...app, id: `${tool.id}-${app.name}`, sharedName: tool.name }));
-      if (tool.provider === 'google') return [tool, { ...tool, id: `${tool.id}-forms`, name: 'Google Forms', launchUrl: 'https://forms.google.com/', sharedName: tool.name }];
-      return [tool];
-    });
-    return groupBy(entries, (tool) => tool.category || 'Other');
-  }, [tools]);
-  return <section className="sp on"><div className="ext-workspace-header"><div><div className="ext-workspace-title">Apps & External Tools</div><div className="ext-workspace-sub" /></div></div><div className="ext-status-bar"><span className="ext-status-pill"><i className="dot-pulse connected" />{connected.length} Connected</span><i className="ext-divider" /><span className="ext-status-pill">{linkedResources} Linked File{linkedResources === 1 ? '' : 's'}</span><span className="ext-last-sync">Last synced: {lastSyncedAt ? new Date(lastSyncedAt).toLocaleString() : 'not yet'}</span></div>{tools === null ? <div className="cc"><Empty>Loading apps…</Empty></div> : tools.length ? Object.entries(sections).map(([category, values]) => <div key={category}><div className="ext-section-label">{category}</div><div className="ext-app-grid">{values.map((tool) => { const activeConnection = tool.connections.find((connection) => connection.status === 'connected'); const resourceCount = tool.connections.reduce((total, connection) => total + connection._count.linkedResources, 0); return <article className={`ext-app-card ${activeConnection ? 'connected' : ''}`} key={tool.id}><div className="ext-card-top"><div className="ext-app-icon"><ToolLogo provider={tool.provider} name={tool.name} size="lg" /></div><span className={`ext-conn-badge ${activeConnection ? 'connected' : 'not-connected'}`}>{activeConnection ? '● Connected' : 'Not Connected'}</span></div><div className="ext-app-name">{tool.name}</div><div className="ext-app-category">{'sharedName' in tool ? `Uses ${tool.sharedName} connection` : tool.category}</div><div className="ext-recent-activity">{activeConnection ? `${resourceCount} linked resource${resourceCount === 1 ? '' : 's'}${activeConnection.lastSyncedAt ? ` · synced ${new Date(activeConnection.lastSyncedAt).toLocaleString()}` : ''}` : `Connect ${tool.name} when your project needs it.`}</div><div className="ext-card-footer"><span className="ext-task-link">{activeConnection ? `${resourceCount} task-linked file${resourceCount === 1 ? '' : 's'}` : 'No connection yet'}</span><div className="ext-card-actions">{activeConnection ? <button className="ext-action-btn disconnect" disabled={disconnecting === tool.provider} onClick={() => setConfirmation({ title: `Disconnect ${'sharedName' in tool ? tool.sharedName : tool.name}?`, description: `This disconnects ${tool.provider === 'microsoft' ? 'Microsoft 365, Word, and Excel' : tool.provider === 'google' ? 'Google Drive and Google Forms' : tool.name}. Linked resources will be removed${tool.provider === 'microsoft' ? ', and synced Outlook events will be cleared from your calendar' : ''}. You can reconnect anytime.`, confirmLabel: 'Disconnect', destructive: true, action: () => void disconnect(tool) })}>{disconnecting === tool.provider ? 'Removing…' : 'Disconnect'}</button> : null}<button className={`ext-action-btn ${activeConnection ? 'launch' : 'connect'}`} disabled={connecting === tool.provider || launching === tool.provider} onClick={() => activeConnection ? void launch(tool) : void connect(tool)}>{activeConnection ? launching === tool.provider ? 'Opening…' : 'Launch' : connecting === tool.provider ? 'Opening…' : 'Connect'}</button></div></div></article>; })}</div></div>) : <div className="cc"><Empty>Connect a tool when your project needs one.</Empty></div>}{confirmation ? <ConfirmDialog {...confirmation} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation.action; setConfirmation(null); action(); }} /> : null}</section>;
-}
 
 type AuditLogEntry = { id: string; actorId: string | null; module: string; activity: string; severity: string; description: string; createdAt: string };
 type InactiveAccountAlerts = { enabled: boolean; recipientEmail: string; inactivityDays: number };
@@ -739,7 +806,7 @@ export function AdminSettingsPage({ notify, onSessionInvalidated }: { notify: No
       const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = backup.fileName; link.click(); URL.revokeObjectURL(url);
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not download this backup.'); }
   }
-  return <section className="sp on"><Head title="System Settings" /><div className="g2 settings-top"><form className="cc" onSubmit={(event) => void saveGeneral(event)}><div className="cc-head"><h3>General Configuration</h3></div><label className="lbl" htmlFor="system-name">System Name</label><input id="system-name" className="ifield" value={general.systemName} maxLength={80} required onChange={(event) => setGeneral((current) => ({ ...current, systemName: event.target.value }))} /><label className="lbl" htmlFor="max-ideas">Maximum ideas shown per group</label><input id="max-ideas" className="ifield" type="number" min="2" max="50" required value={general.maxIdeasPerSearch} onChange={(event) => setGeneral((current) => ({ ...current, maxIdeasPerSearch: Number(event.target.value) }))} /><button className="btn" disabled={generalSaving}>{generalSaving ? 'Saving…' : 'Save Settings'}</button></form><div className="cc"><div className="cc-head"><h3>Security & Access</h3></div><Security title="Admin Password" description="Change this administrator account's password" action="Change" onClick={() => openSecurityDialog('password')} /><Security title="Session Timeout" description={`Currently: ${security.sessionTimeoutMinutes} minutes`} action="Edit" onClick={() => openSecurityDialog('timeout')} /><Security title="Email Notifications" description={security.inactiveAccountAlerts.enabled ? `Inactive account alerts every ${security.inactiveAccountAlerts.inactivityDays} days` : 'Inactive account alerts are disabled'} action="Configure" onClick={() => openSecurityDialog('email')} /><Security title="System Logs" description="View recent activity" action="View Logs" onClick={() => void openLogs()} /></div></div><div className="cc maintenance-card"><div className="cc-head"><h3>Maintenance</h3></div><div className="g2"><Security title="Backup Database" description={backups?.[0] ? `Latest: ${new Date(backups[0].createdAt).toLocaleString()}` : 'Create a private application-data snapshot'} action={backupSaving ? 'Backing up…' : 'Backup Now'} onClick={() => void createBackup()} /><MaintenanceModeControl active={maintenanceActive} busy={saving || maintenanceAnnouncementSaving} description={maintenanceActive ? 'Enabled — only administrators can access WebSphere' : maintenanceSchedule ? `Scheduled for ${new Date(maintenanceSchedule.startsAt).toLocaleString()}` : 'Disabled — WebSphere is available to everyone'} onToggle={() => void toggleMaintenance()} onSchedule={() => setMaintenanceDialog(true)} /></div>{maintenanceSchedule && !maintenanceActive ? <button type="button" className="btn-o btn-sm maintenance-cancel" disabled={saving} onClick={() => void cancelScheduledMaintenance()}>Cancel Scheduled Maintenance</button> : null}{backups?.length ? <div className="logs-list">{backups.slice(0, 3).map((backup) => <div className="log-row" key={backup.id}><span className="log-time">{new Date(backup.createdAt).toLocaleString()}</span><span className="log-desc">{backup.fileName} · {(backup.bytes / 1024).toFixed(1)} KB</span><button type="button" className="btn-o btn-sm" onClick={() => void downloadBackup(backup)}>Download</button></div>)}</div> : null}</div>
+  return <section className="sp on"><Head title="System Settings" /><div className="cc"><strong>System URL</strong> <span>websphere.cloud</span></div><div className="g2 settings-top"><form className="cc" onSubmit={(event) => void saveGeneral(event)}><div className="cc-head"><h3>General Configuration</h3></div><label className="lbl" htmlFor="system-name">System Name</label><input id="system-name" className="ifield" value={general.systemName} maxLength={80} required onChange={(event) => setGeneral((current) => ({ ...current, systemName: event.target.value }))} /><label className="lbl" htmlFor="max-ideas">Maximum ideas shown per group</label><input id="max-ideas" className="ifield" type="number" min="2" max="50" required value={general.maxIdeasPerSearch} onChange={(event) => setGeneral((current) => ({ ...current, maxIdeasPerSearch: Number(event.target.value) }))} /><button className="btn" disabled={generalSaving}>{generalSaving ? 'Saving…' : 'Save Settings'}</button></form><div className="cc"><div className="cc-head"><h3>Security & Access</h3></div><Security title="Admin Password" description="Change this administrator account's password" action="Change" onClick={() => openSecurityDialog('password')} /><Security title="Session Timeout" description={`Currently: ${security.sessionTimeoutMinutes} minutes`} action="Edit" onClick={() => openSecurityDialog('timeout')} /><Security title="Email Notifications" description={security.inactiveAccountAlerts.enabled ? `Inactive account alerts every ${security.inactiveAccountAlerts.inactivityDays} days` : 'Inactive account alerts are disabled'} action="Configure" onClick={() => openSecurityDialog('email')} /><Security title="System Logs" description="View recent activity" action="View Logs" onClick={() => void openLogs()} /></div></div><div className="cc maintenance-card"><div className="cc-head"><h3>Maintenance</h3></div><div className="g2"><Security title="Backup Database" description={backups?.[0] ? `Latest: ${new Date(backups[0].createdAt).toLocaleString()}` : 'Create a private application-data snapshot'} action={backupSaving ? 'Backing up…' : 'Backup Now'} onClick={() => void createBackup()} /><MaintenanceModeControl active={maintenanceActive} busy={saving || maintenanceAnnouncementSaving} description={maintenanceActive ? 'Enabled — only administrators can access WebSphere' : maintenanceSchedule ? `Scheduled for ${new Date(maintenanceSchedule.startsAt).toLocaleString()}` : 'Disabled — WebSphere is available to everyone'} onToggle={() => void toggleMaintenance()} onSchedule={() => setMaintenanceDialog(true)} /></div>{maintenanceSchedule && !maintenanceActive ? <button type="button" className="btn-o btn-sm maintenance-cancel" disabled={saving} onClick={() => void cancelScheduledMaintenance()}>Cancel Scheduled Maintenance</button> : null}{backups?.length ? <div className="logs-list">{backups.slice(0, 3).map((backup) => <div className="log-row" key={backup.id}><span className="log-time">{new Date(backup.createdAt).toLocaleString()}</span><span className="log-desc">{backup.fileName} · {(backup.bytes / 1024).toFixed(1)} KB</span><button type="button" className="btn-o btn-sm" onClick={() => void downloadBackup(backup)}>Download</button></div>)}</div> : null}</div>
     {maintenanceDialog ? <SecurityModal title="Announce Upcoming Maintenance" onClose={() => setMaintenanceDialog(false)}><form onSubmit={(event) => void announceMaintenance(event)}><p className="security-modal-help">All active users will receive an in-app announcement now. Email and push follow their delivery settings. Maintenance starts automatically at the chosen time.</p><label className="lbl" htmlFor="maintenance-start">Maintenance starts</label><input className="ifield" id="maintenance-start" type="datetime-local" autoFocus required value={maintenanceStartDraft} onChange={(event) => setMaintenanceStartDraft(event.target.value)} /><label className="lbl" htmlFor="maintenance-message">Announcement message (optional)</label><textarea className="ifield" id="maintenance-message" maxLength={350} rows={4} value={maintenanceMessageDraft} onChange={(event) => setMaintenanceMessageDraft(event.target.value)} placeholder="Scheduled maintenance begins at the selected time. WebSphere will be unavailable until maintenance is complete." /><div className="modal-acts"><button type="button" className="btn-o" disabled={maintenanceAnnouncementSaving} onClick={() => setMaintenanceDialog(false)}>Cancel</button><button className="btn" disabled={maintenanceAnnouncementSaving}>{maintenanceAnnouncementSaving ? 'Announcing…' : 'Schedule & Announce'}</button></div></form></SecurityModal> : null}
     {securityDialog === 'password' ? <SecurityModal title="Change Admin Password" onClose={() => setSecurityDialog(null)}><form onSubmit={(event) => void changeAdminPassword(event)}><p className="security-modal-help">Changing your password signs this administrator account out of every active session.</p><label className="lbl">Current password</label><input className="ifield" name="oldPassword" type="password" autoComplete="current-password" required /><label className="lbl">New password</label><input className="ifield" name="password" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><label className="lbl">Confirm new password</label><input className="ifield" name="confirm" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><div className="modal-acts"><button type="button" className="btn-o" disabled={securitySaving} onClick={() => setSecurityDialog(null)}>Cancel</button><button className="btn" disabled={securitySaving}>{securitySaving ? 'Changing…' : 'Change Password'}</button></div></form></SecurityModal> : null}
     {securityDialog === 'timeout' ? <SecurityModal title="Edit Session Timeout" onClose={() => setSecurityDialog(null)}><form onSubmit={(event) => void saveTimeout(event)}><p className="security-modal-help">Users are signed out after this amount of inactivity. Choose 5 to 480 minutes.</p><label className="lbl" htmlFor="session-timeout-minutes">Inactivity timeout (minutes)</label><input className="ifield" id="session-timeout-minutes" type="number" min="5" max="480" step="1" required value={timeoutDraft} onChange={(event) => setTimeoutDraft(event.target.value)} /><div className="modal-acts"><button type="button" className="btn-o" disabled={securitySaving} onClick={() => setSecurityDialog(null)}>Cancel</button><button className="btn" disabled={securitySaving}>{securitySaving ? 'Saving…' : 'Save Timeout'}</button></div></form></SecurityModal> : null}
@@ -758,26 +825,25 @@ export function AdminSettingsPage({ notify, onSessionInvalidated }: { notify: No
 }
 
 function Kpi({ value, label, tone }: { value: string | number; label: string; tone?: string }) { return <div className="kpi"><div className={`kval ${tone ?? ''}`}>{value}</div><div className="klbl">{label}</div></div>; }
-function TrendChartCard({ trends }: { trends: { periods: Array<{ periodStart: string; tasksCompleted: number; progress: number }>; trend: string } | null }) {
-  const colors = ['#436dc3', '#48ad7c', '#d49a48', '#7c63df', '#50abd0', '#209d60', '#dc6c6e'];
-  return <div className="cc workflow-chart"><div className="cc-head"><h3>Task Completion Rate — Weekly</h3></div>{trends?.periods.length ? <ChartCanvas height={200} config={{
-    type: 'bar',
-    data: {
-      labels: trends.periods.map((period) => new Date(period.periodStart).toLocaleDateString(undefined, { weekday: 'short' })),
-      datasets: [{ label: 'Tasks Completed', data: trends.periods.map((period) => period.tasksCompleted), backgroundColor: colors, borderRadius: 5, borderSkipped: false }],
-    },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { display: false }, title: { display: true, text: 'Weekly Task Completion', color: '#3789ad', font: { weight: 600 } } }, y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: 'rgba(168,216,240,.45)' } } } },
-  }} /> : <Empty>Your project activity will appear here.</Empty>}</div>;
+function TrendChartCard({ report, period, controls }: { report: WorkflowReport | null; period: WorkflowPeriod; controls: React.ReactNode }) {
+  return <div className="cc workflow-chart">
+    <div className="cc-head"><h3>Task Completion — {periodLabel(period)}</h3></div>{controls}
+    {report?.members.length ? <ChartCanvas height={200} config={{
+      type: 'line',
+      data: { labels: report.labels, datasets: report.members.map((member) => ({ label: member.fullName, data: member.completions, borderColor: memberChartColor(member.id), backgroundColor: memberChartColor(member.id), tension: .2 })) },
+      options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { maxTicksLimit: 8 } }, y: { beginAtZero: true, ticks: { precision: 0 } } } },
+    }} /> : <Empty>Project completions will appear here.</Empty>}
+  </div>;
 }
-function TeamPerformanceCard({ members }: { members: Array<Pick<TeamMemberSummary, 'id' | 'fullName' | 'role' | 'performance' | 'totalContributions'>> | null }) {
+function TeamPerformanceCard({ members }: { members: WorkflowMember[] | null }) {
   const hasData = !!members?.length;
   const sortedMembers = members ? [...members].sort((a, b) => b.performance - a.performance || b.totalContributions - a.totalContributions || a.fullName.localeCompare(b.fullName)) : [];
   return <div className="cc team-performance">
     <div className="cc-head"><h3>Team Member Performance</h3></div>
     {!hasData ? <Empty>{members ? 'No project members found.' : 'Project members will appear here when a project is selected.'}</Empty> : <>
-      <div className="performance-list">{sortedMembers.map((member, index) => <div className={`performance-row tone-${index % 4}`} key={member.id}>
+      <div className="performance-list">{sortedMembers.map((member) => <div className="performance-row" key={member.id}>
         <div className="performance-label"><span>{member.fullName}{member.role === 'Project_Leader' ? ' (Leader)' : ''}</span><strong>{member.performance}%</strong></div>
-        <div className="performance-track"><i style={{ '--performance-progress': member.performance / 100 } as React.CSSProperties} /></div>
+        <div className="performance-track"><i style={{ '--performance-progress': member.performance / 100, background: memberChartColor(member.id) } as React.CSSProperties} /></div>
       </div>)}</div>
     </>}
   </div>;

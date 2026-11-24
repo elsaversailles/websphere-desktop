@@ -84,14 +84,14 @@ describe('guided and locked password reset lifecycle', () => {
     const service = serviceWith({ prisma });
     const result = await service.forgot('member@example.edu');
     expect(result.ok).toBe(true);
-    expect(result.resetToken).toHaveLength(64);
+    expect(result).toEqual({ ok: true });
     expect(service.redis.set).toHaveBeenCalledTimes(2);
-    expect(service.email.sendPasswordReset).toHaveBeenCalledWith('member@example.edu', result.resetToken);
+    expect(service.email.sendPasswordReset).toHaveBeenCalledWith('member@example.edu', expect.stringMatching(/^[a-f0-9]{64}$/));
   });
 
   it('consumes the emailed token, unlocks the account, and clears lockout state', async () => {
     const update = vi.fn().mockResolvedValue({});
-    const prisma = { user: { update } };
+    const prisma = { user: { findUnique: vi.fn().mockResolvedValue({ id: 'user-1', status: 'locked', passwordEnabled: true, tokenVersion: 0 }), update } };
     const service = serviceWith({ prisma });
     service.redis.take.mockResolvedValue('user-1');
     await expect(service.resetPassword('a'.repeat(64), 'Valid!Pass9', 'Valid!Pass9')).resolves.toEqual({ ok: true });
@@ -115,7 +115,7 @@ describe('guided and locked password reset lifecycle', () => {
 
     expect(result.verificationId).toMatch(/^[a-f0-9]{64}$/);
     expect(sendRegistrationVerification).toHaveBeenCalledWith('new.member@example.edu', expect.stringMatching(/^\d{6}$/));
-    expect(set).toHaveBeenCalledWith(expect.stringContaining(result.verificationId), expect.any(String), 600);
+    expect(set).toHaveBeenCalledWith(expect.stringContaining('auth:registration:otp:'), expect.stringContaining(result.verificationId), 300);
   });
 
   it('creates an account only after a matching one-time registration code', async () => {
@@ -125,15 +125,17 @@ describe('guided and locked password reset lifecycle', () => {
     const create = vi.fn().mockResolvedValue({ id: 'user-1', email: 'new@example.edu', passwordHash: 'secret', tokenVersion: 0, role: 'Project_Member' });
     const service = serviceWith({
       prisma: { user: { findUnique: vi.fn().mockResolvedValue(null), create } },
-      redis: { get: vi.fn().mockResolvedValue(JSON.stringify({ email: 'new@example.edu', codeHash })), take: vi.fn().mockResolvedValue(JSON.stringify({ email: 'new@example.edu', codeHash })), delete: vi.fn().mockResolvedValue(1) },
+      redis: { get: vi.fn().mockResolvedValue(JSON.stringify({ verificationId, codeHash })), replaceIfCurrent: vi.fn().mockResolvedValue(true), incrementWithExpiry: vi.fn().mockResolvedValue(1) },
       audit: { log: vi.fn().mockResolvedValue(undefined) },
     });
     service.issue = vi.fn().mockResolvedValue({ access: 'access', refresh: 'refresh', role: 'Project_Member' });
 
-    await expect(service.register({ fullName: 'New Member', email: 'new@example.edu', password: 'Valid!Pass9', institution: 'STI College', course: 'BSIT', verificationId, verificationCode: code })).resolves.toMatchObject({ user: { email: 'new@example.edu' } });
+    await expect(service.register({ fullName: 'New Member', email: 'new@example.edu', password: 'Valid!Pass9', institution: 'STI College', course: 'BSIT', middleName: 'Lee', clientType: 'mobile', verificationId, verificationCode: code })).resolves.toMatchObject({ user: { email: 'new@example.edu' } });
 
     const data = create.mock.calls[0]![0].data;
     await expect(verify(data.passwordHash, 'Valid!Pass9')).resolves.toBe(true);
+    expect(data.middleName).toBe('Lee');
+    expect(service.issue).toHaveBeenCalledWith(expect.objectContaining({ id: 'user-1' }), undefined, undefined, 'mobile');
     expect(data).not.toHaveProperty('verificationCode');
     expect(data).not.toHaveProperty('verificationId');
   });

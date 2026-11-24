@@ -1,6 +1,8 @@
+import { maintenanceState } from './maintenance-state.js';
+import { activityPoints, activityRanges, reportingDate, type ActivityMetric, type ActivityPeriod } from './admin-activity.js';
 import { Injectable, Logger, HttpException, HttpStatus, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { hash, verify } from 'argon2';
-import { SignJWT, jwtVerify } from 'jose';
+import { createRemoteJWKSet, SignJWT, jwtVerify } from 'jose';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { completionRate, projectAnalytics, recommendations, taskScheduleMetrics } from './analytics.js';
 import { CryptoService } from './security.js';
@@ -14,7 +16,7 @@ import { DomainEventsService } from './domain-events.service.js';
 import { AuditLogService } from './audit-log.service.js';
 import { PushService } from './push.service.js';
 import { LocalStorageService } from './local-storage.service.js';
-import { resourceLinkError, passwordRequirements, sameScheduleDate, scheduleDateErrors, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
+import { identifyResourceLink, registerSchema, resourceLinkError, passwordRequirements, sameScheduleDate, scheduleDateErrors, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
@@ -37,8 +39,27 @@ const OUTLOOK_EVENT_TYPE = 'meeting' as const;
 const fail = (code: string, message: string, status: number = HttpStatus.BAD_REQUEST, fields?: Record<string, string>): never => { throw new HttpException({ code, message, ...(fields ? { fields } : {}) }, status); };
 const PASSWORD_REASON_LABEL = Object.fromEntries(passwordRequirements('').map((requirement) => [requirement.id, requirement.label]));
 const passwordPolicyFailed = (reason: PasswordRequirementId) => fail('VALIDATION_FAILED', `Password does not meet the required policy: ${PASSWORD_REASON_LABEL[reason]}`, 400, { password: reason });
-type Caller = { id: string; role: Role; tv: number; sessionId?: string };
+type Caller = { id: string; role: Role; tv: number; sessionId?: string; clientType?: SessionClient };
 type SessionClient = 'web' | 'mobile';
+type GoogleFlow = {
+  clientType: SessionClient;
+  mode: 'login' | 'register' | 'link';
+  challenge: string;
+  nonce: string;
+  userId?: string;
+  tokenVersion?: number;
+};
+type GoogleIdentity = { subject: string; email: string; fullName: string };
+const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
+type OtpPurpose = 'registration' | 'password-recovery';
+const OTP_TTL_SECONDS = 300;
+type OtpRecord = { verificationId: string; codeHash: string; userId?: string; tokenVersion?: number };
+const archivedMessage = 'YOUR ACCOUNT IS ARCHIVED, PLEASE CONTACT OUR ADMIN';
+type ListFilter = { page: number; pageSize: number; q?: string; status?: string; sort?: string; projectId?: string; taskId?: string };
+function pageWindow({ page, pageSize }: ListFilter) { return { skip: (page - 1) * pageSize, take: pageSize }; }
+function listResult<T>(items: T[], total: number, { page, pageSize }: ListFilter) {
+  return { items, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
+}
 const taskProgress = (status: string) => status === 'completed' ? 100 : status === 'for_review' ? 75 : status === 'ongoing' ? 50 : 0;
 const averageTaskProgress = (tasks: Array<{ status: string }>) => { const average = tasks.length ? tasks.reduce((sum, task) => sum + taskProgress(task.status), 0) / tasks.length : 0; return average < 100 ? Math.min(99, Math.round(average)) : 100; };
 const ideaContentHash = (idea: { title: string; body?: string | null; category?: string | null }) =>
@@ -72,7 +93,7 @@ type AdminAccountStatus = 'active' | 'suspended' | 'deactivated' | 'removed' | '
 const ADMIN_EDITABLE_ROLES: Role[] = [Role.Administrator, Role.Project_Leader, Role.Project_Member];
 // 'archived' is intentionally absent: archiving goes through the dedicated archive endpoint so it
 // also stamps archivedAt and invalidates sessions, rather than being set via the free-form editor.
-const ADMIN_EDITABLE_STATUSES: AdminAccountStatus[] = ['active', 'suspended', 'deactivated', 'removed', 'locked'];
+const ADMIN_EDITABLE_STATUSES: AdminAccountStatus[] = ['active', 'suspended', 'deactivated', 'locked'];
 
 @Injectable()
 export class AppService implements OnModuleInit, OnApplicationShutdown {
@@ -118,9 +139,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   private userResetKey(userId: string) { return `auth:password-reset:user:${userId}`; }
   private emailChangeKey(token: string) { return `auth:email-change:${token}`; }
   private userEmailChangeKey(userId: string) { return `auth:email-change:user:${userId}`; }
-  private registrationOtpKey(verificationId: string) { return `auth:registration-otp:${verificationId}`; }
-  private registrationOtpAttemptKey(verificationId: string) { return `auth:registration-otp-attempts:${verificationId}`; }
-  private registrationOtpRateKey(email: string) { return `auth:registration-otp-rate:${createHash('sha256').update(email).digest('hex')}`; }
+  private otpKey(purpose: OtpPurpose, email: string) { return `auth:${purpose}:otp:${createHash('sha256').update(email).digest('hex')}`; }
   private deactivationRequestRateKey(email: string) { return `auth:deactivation-request-rate:${createHash('sha256').update(email).digest('hex')}`; }
   private otpHash(verificationId: string, code: string) { return createHash('sha256').update(`${verificationId}:${code}`).digest('hex'); }
   private refreshTtlSeconds() {
@@ -240,12 +259,12 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async createDatabaseBackup(caller: Caller) {
     await this.admin(caller);
-    const [groupRoleHistory, users, admins, groups, announcements, groupMembers, joinCodes, messages, projects, projectMembers, tasks, dependencies, assignments, comments, workflow, ideas, polls, pollOptions, votes, calendarEvents, notifications, preferences, pushSubscriptions, mobileTokens, tools, connections, resources, usage, aiInteractions, embeddings, snapshots, tickets, settings, auditLogs, systemNotices, backups] = await this.prisma.$transaction([
-      this.prisma.groupRoleHistory.findMany(), this.prisma.user.findMany(), this.prisma.admin.findMany(), this.prisma.group.findMany(), this.prisma.announcement.findMany(), this.prisma.groupMember.findMany(), this.prisma.joinCode.findMany(), this.prisma.chatMessage.findMany(), this.prisma.project.findMany(), this.prisma.projectMember.findMany(), this.prisma.task.findMany(), this.prisma.taskDependency.findMany(), this.prisma.taskAssignment.findMany(), this.prisma.taskComment.findMany(), this.prisma.workflowEvent.findMany(), this.prisma.idea.findMany(), this.prisma.ideaPoll.findMany(), this.prisma.pollOption.findMany(), this.prisma.vote.findMany(), this.prisma.calendarEvent.findMany(), this.prisma.notification.findMany(), this.prisma.notificationPreference.findMany(), this.prisma.pushSubscription.findMany(), this.prisma.mobilePushToken.findMany(), this.prisma.connectedTool.findMany(), this.prisma.toolConnection.findMany(), this.prisma.linkedResource.findMany(), this.prisma.toolUsage.findMany(), this.prisma.aiInteraction.findMany(), this.prisma.embedding.findMany(), this.prisma.analyticsSnapshot.findMany(), this.prisma.supportTicket.findMany(), this.prisma.systemSetting.findMany(), this.prisma.auditLog.findMany(), this.prisma.systemNotice.findMany(), this.prisma.systemBackup.findMany(),
+    const [groupRoleHistory, users, admins, groups, announcements, groupMembers, joinCodes, messages, projects, projectMembers, tasks, dependencies, assignments, comments, workflow, ideas, polls, pollOptions, votes, calendarEvents, calendarNotes, administratorActivity, notifications, preferences, pushSubscriptions, mobileTokens, tools, connections, resources, usage, aiInteractions, embeddings, snapshots, tickets, settings, auditLogs, systemNotices, backups] = await this.prisma.$transaction([
+      this.prisma.groupRoleHistory.findMany(), this.prisma.user.findMany(), this.prisma.admin.findMany(), this.prisma.group.findMany(), this.prisma.announcement.findMany(), this.prisma.groupMember.findMany(), this.prisma.joinCode.findMany(), this.prisma.chatMessage.findMany(), this.prisma.project.findMany(), this.prisma.projectMember.findMany(), this.prisma.task.findMany(), this.prisma.taskDependency.findMany(), this.prisma.taskAssignment.findMany(), this.prisma.taskComment.findMany(), this.prisma.workflowEvent.findMany(), this.prisma.idea.findMany(), this.prisma.ideaPoll.findMany(), this.prisma.pollOption.findMany(), this.prisma.vote.findMany(), this.prisma.calendarEvent.findMany(), this.prisma.calendarNote.findMany(), this.prisma.adminActivitySample.findMany(), this.prisma.notification.findMany(), this.prisma.notificationPreference.findMany(), this.prisma.pushSubscription.findMany(), this.prisma.mobilePushToken.findMany(), this.prisma.connectedTool.findMany(), this.prisma.toolConnection.findMany(), this.prisma.linkedResource.findMany(), this.prisma.toolUsage.findMany(), this.prisma.aiInteraction.findMany(), this.prisma.embedding.findMany(), this.prisma.analyticsSnapshot.findMany(), this.prisma.supportTicket.findMany(), this.prisma.systemSetting.findMany(), this.prisma.auditLog.findMany(), this.prisma.systemNotice.findMany(), this.prisma.systemBackup.findMany(),
     ]);
     const now = new Date();
     const fileName = `websphere-backup-${now.toISOString().replace(/[:.]/g, '-')}-${randomBytes(4).toString('hex')}.json`;
-    const snapshot = JSON.stringify({ format: 'websphere-database-backup', version: 1, generatedAt: now.toISOString(), data: { groupRoleHistory, users, admins, groups, announcements, groupMembers, joinCodes, messages, projects, projectMembers, tasks, dependencies, assignments, comments, workflow, ideas, polls, pollOptions, votes, calendarEvents, notifications, preferences, pushSubscriptions, mobileTokens, tools, connections, resources, usage, aiInteractions, embeddings, snapshots, tickets, settings, auditLogs, systemNotices, backups } });
+    const snapshot = JSON.stringify({ format: 'websphere-database-backup', version: 1, generatedAt: now.toISOString(), data: { groupRoleHistory, users, admins, groups, announcements, groupMembers, joinCodes, messages, projects, projectMembers, tasks, dependencies, assignments, comments, workflow, ideas, polls, pollOptions, votes, calendarEvents, calendarNotes, administratorActivity, notifications, preferences, pushSubscriptions, mobileTokens, tools, connections, resources, usage, aiInteractions, embeddings, snapshots, tickets, settings, auditLogs, systemNotices, backups } });
     const bytes = await this.storage.saveBackup(fileName, snapshot);
     const backup = await this.prisma.systemBackup.create({ data: { fileName, bytes, createdBy: caller.id } });
     await this.systemNotice('Database backup created', `${fileName} was created successfully.`, 'backup');
@@ -271,18 +290,61 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (clientType !== 'web' && clientType !== 'mobile') fail('AUTH_UNAUTHENTICATED', 'Please sign in again.', 401);
     if (clientType === 'web' && await this.redis.get(this.webSessionKey(userId)) !== sessionId) fail('AUTH_UNAUTHENTICATED', 'A newer web session has signed in.', 401);
   }
-  async caller(header?: string, options: { allowLocked?: boolean; touchSession?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); if (typeof verified.payload.sid !== 'string') fail('AUTH_UNAUTHENTICATED', 'Please sign in again.', 401); if (typeof verified.payload.sid === 'string') { await this.enforceWebSession(user.id, verified.payload.sid, verified.payload.clientType); await this.enforceSessionTimeout(verified.payload.sid, options.touchSession !== false); } return { id: user.id, role: user.role, tv: user.tokenVersion, sessionId: typeof verified.payload.sid === 'string' ? verified.payload.sid : undefined }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
-  async sendRegistrationOtp(rawEmail: string) {
-    const email = rawEmail.trim().toLowerCase();
-    const exists = await this.prisma.user.findUnique({ where: { email } });
-    if (exists) fail('EMAIL_IN_USE', 'An account already uses that email address.', 409, { email: 'already in use' });
-    const sends = await this.redis.incrementWithExpiry(this.registrationOtpRateKey(email), this.config.get('REGISTRATION_OTP_SEND_WINDOW_SECONDS'));
+  async caller(header?: string, options: { allowLocked?: boolean; touchSession?: boolean } = {}): Promise<Caller> { if (!header?.startsWith('Bearer ')) fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); try { const verified = await jwtVerify(header!.slice(7), this.accessSecret); const user = await this.prisma.user.findUnique({ where: { id: verified.payload.sub } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', archivedMessage, 403); const allowedStatus = user?.status === 'active' || (options.allowLocked && user?.status === 'locked'); if (!user || !allowedStatus || user.tokenVersion !== Number(verified.payload.tv)) fail('AUTH_UNAUTHENTICATED', 'Session is invalid', 401); if (typeof verified.payload.sid !== 'string') fail('AUTH_UNAUTHENTICATED', 'Please sign in again.', 401); if (typeof verified.payload.sid === 'string') { await this.enforceWebSession(user.id, verified.payload.sid, verified.payload.clientType); await this.enforceSessionTimeout(verified.payload.sid, options.touchSession !== false); } return { id: user.id, role: user.role, tv: user.tokenVersion, clientType: verified.payload.clientType as SessionClient, sessionId: typeof verified.payload.sid === 'string' ? verified.payload.sid : undefined }; } catch (error) { if (error instanceof HttpException) throw error; return fail('AUTH_UNAUTHENTICATED', 'A valid access token is required', 401); } }
+  async validateSocketCaller(caller?: Caller) {
+    if (!caller?.sessionId) return fail('AUTH_UNAUTHENTICATED', 'Sign in again.', 401);
+    const user = await this.prisma.user.findUnique({ where: { id: caller.id }, select: { status: true, tokenVersion: true, role: true } });
+    if (user?.status === 'archived') return fail('ACCOUNT_ARCHIVED', archivedMessage, 403);
+    if (user?.status !== 'active' || user.tokenVersion !== caller.tv || user.role !== caller.role) return fail('AUTH_UNAUTHENTICATED', 'Session is invalid.', 401);
+    await this.enforceWebSession(caller.id, caller.sessionId, caller.clientType);
+    await this.enforceSessionTimeout(caller.sessionId, true);
+  }
+  private async sendOtp(purpose: OtpPurpose, email: string, user?: { id: string; tokenVersion: number }) {
+    const key = this.otpKey(purpose, email);
+    const sends = await this.redis.incrementWithExpiry(`${key}:rate`, this.config.get('REGISTRATION_OTP_SEND_WINDOW_SECONDS'));
     if (sends > this.config.get('REGISTRATION_OTP_MAX_SENDS')) fail('OTP_RATE_LIMITED', 'Too many codes were requested. Please wait before trying again.', 429);
     const verificationId = randomBytes(32).toString('hex');
     const code = randomInt(100_000, 1_000_000).toString();
-    await this.email.sendRegistrationVerification(email, code);
-    await this.redis.set(this.registrationOtpKey(verificationId), JSON.stringify({ email, codeHash: this.otpHash(verificationId, code) }), this.config.get('REGISTRATION_OTP_TTL_SECONDS'));
+    const record = JSON.stringify({ verificationId, codeHash: this.otpHash(verificationId, code), ...(user ? { userId: user.id, tokenVersion: user.tokenVersion } : {}) });
+    if (purpose === 'password-recovery' && !user) return { ok: true, verificationId };
+    await this.redis.set(key, record, OTP_TTL_SECONDS);
+    try {
+      if (purpose === 'registration') await this.email.sendRegistrationVerification(email, code);
+      else await this.email.sendPasswordRecoveryCode(email, code);
+    } catch (error) {
+      await this.redis.replaceIfCurrent(key, record);
+      if (purpose === 'registration') throw error;
+      // Recovery responses must not reveal whether the email belongs to an account.
+      this.logger.warn('Password recovery email could not be delivered');
+    }
     return { ok: true, verificationId };
+  }
+
+  private async claimOtp(purpose: OtpPurpose, email: string, verificationId: string, code: string, resetToken?: string) {
+    const key = this.otpKey(purpose, email);
+    const stored = await this.redis.get(key);
+    const expired = () => fail('OTP_EXPIRED', 'This code has expired. Select Resend Code to continue.');
+    if (!stored) return expired();
+    const record = JSON.parse(stored) as OtpRecord;
+    if (record.verificationId !== verificationId) return expired();
+    const attempts = await this.redis.incrementWithExpiry(`${key}:attempts:${verificationId}`, OTP_TTL_SECONDS);
+    const valid = timingSafeEqual(Buffer.from(record.codeHash, 'hex'), Buffer.from(this.otpHash(verificationId, code), 'hex'));
+    const maxAttempts = this.config.get('REGISTRATION_OTP_MAX_ATTEMPTS');
+    if (attempts > maxAttempts || (!valid && attempts === maxAttempts)) {
+      await this.redis.replaceIfCurrent(key, stored);
+      return expired();
+    }
+    if (!valid) fail('OTP_INVALID', 'Enter the six-digit code from your email.');
+    const replacement = resetToken ? JSON.stringify({ userId: record.userId, tokenVersion: record.tokenVersion, resetToken }) : undefined;
+    if (!await this.redis.replaceIfCurrent(key, stored, replacement, OTP_TTL_SECONDS)) return expired();
+  }
+
+  async sendRegistrationOtp(rawEmail: string) {
+    const email = rawEmail.trim().toLowerCase();
+    if (await this.prisma.user.findUnique({ where: { email }, select: { id: true } })) {
+      fail('EMAIL_IN_USE', 'An account already uses that email address.', 409, { email: 'already in use' });
+    }
+    return this.sendOtp('registration', email);
   }
 
   /**
@@ -303,41 +365,29 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
 
   async register(input: any) {
-    const { verificationId, verificationCode, ...registration } = input;
-    const policy = validatePassword(registration.password);
+    const { verificationId, verificationCode, clientType = 'web', password, middleName, ...registration } = input;
+    const policy = validatePassword(password);
     if (!policy.ok) passwordPolicyFailed(policy.reason);
-    const stored = await this.redis.get(this.registrationOtpKey(verificationId));
-    if (!stored) fail('OTP_EXPIRED', 'This verification code has expired. Request a new code and try again.', 400, { verificationCode: 'expired' });
-    const verification = (() => {
-      try { return JSON.parse(stored!) as { email: string; codeHash: string }; }
-      catch { return fail('OTP_INVALID', 'This verification code is invalid. Request a new code and try again.', 400, { verificationCode: 'invalid' }); }
-    })();
-    const suppliedHash = this.otpHash(verificationId, verificationCode);
-    const codeMatches = verification.codeHash.length === suppliedHash.length && timingSafeEqual(Buffer.from(verification.codeHash), Buffer.from(suppliedHash));
-    const emailMatches = verification.email === registration.email.trim().toLowerCase();
-    if (!codeMatches || !emailMatches) {
-      const attempts = await this.redis.incrementWithExpiry(this.registrationOtpAttemptKey(verificationId), this.config.get('REGISTRATION_OTP_TTL_SECONDS'));
-      if (attempts >= this.config.get('REGISTRATION_OTP_MAX_ATTEMPTS')) {
-        await this.redis.delete(this.registrationOtpKey(verificationId), this.registrationOtpAttemptKey(verificationId));
-        fail('OTP_EXPIRED', 'Too many incorrect attempts. Request a new verification code.', 400, { verificationCode: 'too many attempts' });
-      }
-      fail('OTP_INVALID', 'Enter the six-digit code from your email.', 400, { verificationCode: 'invalid' });
-    }
-    const claimed = await this.redis.take(this.registrationOtpKey(verificationId));
-    if (!claimed) fail('OTP_EXPIRED', 'This verification code has expired. Request a new code and try again.', 400, { verificationCode: 'expired' });
-    const exists = await this.prisma.user.findUnique({ where: { email: registration.email } });
-    if (exists) fail('EMAIL_IN_USE', 'An account already uses that email address.', 409, { email: 'already in use' });
-    const user = await this.prisma.user.create({ data: { ...registration, email: registration.email.trim().toLowerCase(), passwordHash: await hash(registration.password), password: undefined } as any });
-    await this.redis.delete(this.registrationOtpAttemptKey(verificationId));
+    const email = registration.email.trim().toLowerCase();
+    await this.claimOtp('registration', email, verificationId, verificationCode);
+    const user = await this.prisma.user.create({
+      data: { ...registration, email, middleName: middleName || null, passwordHash: await hash(password) },
+    }).catch((error: any) => {
+      if (error.code === 'P2002') fail('EMAIL_IN_USE', 'An account already uses that email address.', 409, { email: 'already in use' });
+      throw error;
+    });
+    this.adminActivityChanged('users');
     await this.audit.log('AuthModule', 'account_registered', 'info', `New account registered for ${user.email}`, user.id);
-    return { user: this.publicUser(user), ...(await this.issue(user)) };
+    return { user: this.publicUser(user), ...(await this.issue(user, undefined, undefined, clientType)) };
   }
-  async login(email: string, password: string, admin = false, clientType: SessionClient = 'web') { const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', 'Your account is archived. Please contact our admin.', 403); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } const updated = await this.prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0, lastLoginAt: new Date() } }); await this.redis.delete(this.failedLoginKey(user.id)); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in on ${clientType}`, user.id); return { user: this.publicUser(updated), ...(await this.issue(updated, undefined, undefined, clientType)) }; }
+  async login(email: string, password: string, admin = false, clientType: SessionClient = 'web') { email = email.trim().toLowerCase(); const user = await this.prisma.user.findUnique({ where: { email } }); if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', archivedMessage, 403); if (user?.status === 'locked') fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); if (user?.passwordEnabled === false) fail('AUTH_INVALID_CREDENTIALS', 'Use Continue with Google to sign in to this account.', 401); if (!user || !(await verify(user.passwordHash, password))) { if (user) { const failures = await this.redis.incrementWithExpiry(this.failedLoginKey(user.id), this.config.get('LOGIN_WINDOW_SECONDS')); const locked = failures >= this.config.get('LOGIN_MAX_ATTEMPTS'); await this.prisma.user.update({ where: { id: user.id, status: 'active', tokenVersion: user.tokenVersion }, data: locked ? { failedLogins: failures, status: 'locked', lockedAt: new Date() } : { failedLogins: failures } }); if (locked) { this.adminActivityChanged('users'); await this.audit.log('AuthModule', 'account_locked', 'warning', `Account ${user.email} locked after repeated failed logins`, user.id); fail('ACCOUNT_LOCKED', 'Account is locked; use the email reset path', 423); } } await this.audit.log('AuthModule', 'login_failed', 'warning', `Failed login attempt for ${email}`); fail('AUTH_INVALID_CREDENTIALS', 'Invalid email or password', 401); } if (user.status !== 'active') fail('AUTH_UNAUTHENTICATED', 'Account is inactive', 401); if (admin && user.role !== Role.Administrator) { await this.audit.log('AuthModule', 'admin_login_denied', 'warning', `Non-administrator ${user.email} attempted admin login`, user.id); fail('ADMIN_UNAUTHORIZED', 'Administrator access is required', 403); } const updated = await this.prisma.user.update({ where: { id: user.id, status: 'active', tokenVersion: user.tokenVersion, ...(admin ? { role: Role.Administrator } : {}) }, data: { failedLogins: 0, lastLoginAt: new Date() } }).catch((error: any) => { if (error.code === 'P2025') fail('AUTH_UNAUTHENTICATED', 'Sign in again.', 401); throw error; }); await this.redis.delete(this.failedLoginKey(user.id)); await this.audit.log('AuthModule', admin ? 'admin_login' : 'login', 'info', `${user.email} signed in on ${clientType}`, user.id); return { user: this.publicUser(updated), ...(await this.issue(updated, undefined, undefined, clientType)) }; }
   async refreshToken(token: string) {
     try {
       const verified = await jwtVerify(token, this.refreshSecret);
       const subject = verified.payload.sub;
       if (!subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
+      const user = await this.prisma.user.findUnique({ where: { id: subject } });
+      if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', archivedMessage, 403);
       const jti = String(verified.payload.jti);
       const stored = await this.redis.take(this.refreshKey(jti));
       if (!stored) {
@@ -347,7 +397,6 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       const record = JSON.parse(stored!) as { userId: string; sessionId?: string };
       if (record.userId !== subject) fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
       if (!record.sessionId) fail('AUTH_UNAUTHENTICATED', 'Please sign in again.', 401); if (record.sessionId) { await this.enforceWebSession(record.userId, record.sessionId, verified.payload.clientType); await this.enforceSessionTimeout(record.sessionId); }
-      const user = await this.prisma.user.findUnique({ where: { id: record.userId } });
       if (!user || user.status !== 'active' || user.tokenVersion !== Number(verified.payload.tv)) {
         await this.redis.removeFromSet(this.userRefreshKey(record.userId), jti);
         fail('AUTH_UNAUTHENTICATED', 'Refresh token is invalid', 401);
@@ -365,10 +414,153 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   private async removeRefreshSessions(userId: string) { const key = this.userRefreshKey(userId); const jtis = await this.redis.setMembers(key); await this.redis.delete(...jtis.map((jti) => this.refreshKey(jti)), key); }
   async logout(user: Caller) { if (user.sessionId) await this.redis.delete(this.sessionKey(user.sessionId)); else { await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } }); } await this.audit.log('AuthModule', 'logout', 'info', 'User signed out', user.id); return { ok: true }; }
-  async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (!(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) passwordPolicyFailed(policy.reason); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'password_changed', 'info', 'User changed their password', user.id); return { ok: true }; }
-  async forgot(email: string) {
+  async changePassword(user: Caller, oldPassword: string, password: string, confirm: string) { if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' }); const entity = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } }); if (entity.status === 'locked') fail('ACCOUNT_LOCKED', 'Use the email reset path for locked accounts', 423); if (entity.passwordEnabled === false || !(await verify(entity.passwordHash, oldPassword))) fail('PASSWORD_INCORRECT', 'Current password is incorrect'); const policy = validatePassword(password); if (!policy.ok) passwordPolicyFailed(policy.reason); await this.removeRefreshSessions(user.id); await this.prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hash(password), tokenVersion: { increment: 1 } } }); await this.audit.log('AuthModule', 'password_changed', 'info', 'User changed their password', user.id); return { ok: true }; }
+  private googleCallbackUrl() {
+    const base = this.config.get('OAUTH_CALLBACK_BASE_URL')
+      ?? (this.config.get('NODE_ENV') === 'production'
+        ? new URL('/api/', this.config.get('WEB_ORIGIN').split(',')[0].trim()).toString()
+        : `http://localhost:${this.config.get('PORT')}`);
+    return new URL('auth/google/callback', `${base.replace(/\/+$/, '')}/`).toString();
+  }
+
+  async startGoogle(input: Pick<GoogleFlow, 'clientType' | 'mode'> & { challenge?: string }, auth?: string) {
+    const clientId = this.config.get('GOOGLE_CLIENT_ID');
+    if (!clientId || !this.config.get('GOOGLE_CLIENT_SECRET')) fail('GOOGLE_UNAVAILABLE', 'Google sign-in is unavailable. You can continue with your email and password.', 503);
+    const caller = input.mode === 'link' ? await this.caller(auth) : undefined;
+    if (caller?.role === Role.Administrator) fail('ADMIN_UNAUTHORIZED', 'Use administrator sign-in for this account.', 403);
+    const state = randomBytes(32).toString('hex');
+    const nonce = randomBytes(32).toString('hex');
+    const verifier = input.clientType === 'mobile' && !input.challenge ? randomBytes(32).toString('hex') : undefined;
+    const challenge = verifier ? createHash('sha256').update(verifier).digest('hex') : input.challenge!;
+    const flow: GoogleFlow = { ...input, challenge, nonce, userId: caller?.id, tokenVersion: caller?.tv };
+    await this.redis.set(`auth:google:state:${state}`, JSON.stringify(flow), 600);
+    const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    url.search = new URLSearchParams({ response_type: 'code', client_id: clientId!, redirect_uri: this.googleCallbackUrl(), scope: 'openid email profile', state, nonce, prompt: 'select_account' }).toString();
+    return { url: url.toString(), ...(verifier ? { verifier } : {}) };
+  }
+
+  async finishGoogle(state = '', code?: string) {
+    const stored = /^[a-f0-9]{64}$/.test(state) ? await this.redis.take(`auth:google:state:${state}`) : null;
+    const flow = stored ? JSON.parse(stored) as GoogleFlow : null;
+    const destination = new URL(flow?.clientType === 'mobile' ? 'websphere://google-auth' : this.config.get('WEB_ORIGIN').split(',')[0].trim());
+    if (!flow || !code) {
+      destination.searchParams.set('googleError', 'cancelled');
+      return destination.toString();
+    }
+    try {
+      const clientId = this.config.get('GOOGLE_CLIENT_ID')!;
+      const response = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        body: new URLSearchParams({ code, client_id: clientId, client_secret: this.config.get('GOOGLE_CLIENT_SECRET')!, redirect_uri: this.googleCallbackUrl(), grant_type: 'authorization_code' }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!response.ok) throw new Error('Google token exchange failed');
+      const { id_token } = await response.json() as { id_token: string };
+      const { payload } = await jwtVerify(id_token, googleKeys, {
+        issuer: ['https://accounts.google.com', 'accounts.google.com'],
+        audience: clientId,
+        algorithms: ['RS256'],
+        requiredClaims: ['exp', 'sub', 'nonce'],
+      });
+      if (payload.nonce !== flow.nonce || !payload.sub || payload.email_verified !== true || typeof payload.email !== 'string') throw new Error('Invalid Google identity');
+      const email = payload.email.trim().toLowerCase();
+      const identity: GoogleIdentity = { subject: payload.sub, email, fullName: (typeof payload.name === 'string' ? payload.name.trim() : '').slice(0, 120) || email.split('@')[0] };
+      const exchange = randomBytes(32).toString('hex');
+      await this.redis.set(`auth:google:exchange:${exchange}`, JSON.stringify({ flow, identity }), 60);
+      destination.searchParams.set('googleCode', exchange);
+    } catch {
+      destination.searchParams.set('googleError', 'failed');
+    }
+    return destination.toString();
+  }
+
+  async exchangeGoogle(code: string, verifier: string, auth?: string) {
+    const key = `auth:google:exchange:${code}`;
+    const stored = await this.redis.get(key);
+    if (!stored) return fail('GOOGLE_EXPIRED', 'Google sign-in expired. Please try again.', 400);
+    const { flow, identity } = JSON.parse(stored) as { flow: GoogleFlow; identity: GoogleIdentity };
+    if (createHash('sha256').update(verifier).digest('hex') !== flow.challenge || !await this.redis.replaceIfCurrent(key, stored)) {
+      return fail('GOOGLE_EXPIRED', 'Google sign-in expired. Please try again.', 400);
+    }
+    let user = await this.prisma.user.findUnique({ where: { googleSubject: identity.subject } });
+    const rejectRestricted = (account: { status: string; role: Role }) => {
+      if (account.status === 'archived') fail('ACCOUNT_ARCHIVED', archivedMessage, 403);
+      if (account.role === Role.Administrator) fail('ADMIN_UNAUTHORIZED', 'Use administrator sign-in for this account.', 403);
+      if (account.status !== 'active') fail('GOOGLE_ACCOUNT_UNAVAILABLE', 'This account is unavailable. Please contact an administrator.', 403);
+    };
+    const rejectConflict = (error: any) => {
+      if (error.code === 'P2002' || error.code === 'P2025') fail('GOOGLE_ACCOUNT_CONFLICT', 'That Google identity or email is already linked or unavailable.', 409);
+      throw error;
+    };
+    if (user) rejectRestricted(user);
+    if (flow.mode === 'link') {
+      const caller = await this.caller(auth);
+      if (caller.id !== flow.userId || caller.tv !== flow.tokenVersion || caller.role === Role.Administrator) {
+        return fail('GOOGLE_LINK_DENIED', 'Sign in again before linking Google.', 403);
+      }
+      if (user?.id === caller.id) return { linked: true };
+      if (user) return fail('GOOGLE_ACCOUNT_CONFLICT', 'That Google identity is already linked.', 409);
+      const emailOwner = await this.prisma.user.findUnique({ where: { email: identity.email }, select: { id: true } });
+      if (emailOwner && emailOwner.id !== caller.id) return fail('GOOGLE_ACCOUNT_CONFLICT', 'That Google email belongs to a different WebSphere account.', 409);
+      await this.prisma.user.update({
+        where: { id: caller.id, status: 'active', tokenVersion: caller.tv, googleSubject: null, role: { not: Role.Administrator } },
+        data: { googleSubject: identity.subject },
+      }).catch(rejectConflict);
+      await this.audit.log('AuthModule', 'google_linked', 'info', 'Member linked their Google identity', caller.id);
+      return { linked: true };
+    }
+    if (!user) {
+      const emailOwner = await this.prisma.user.findUnique({ where: { email: identity.email } });
+      if (emailOwner) {
+        rejectRestricted(emailOwner);
+        return fail('GOOGLE_LINK_REQUIRED', 'Sign in with your password, then link Google in Profile and Settings.', 409);
+      }
+      if (flow.mode !== 'register') return fail('GOOGLE_NOT_REGISTERED', 'Choose Sign up to create a WebSphere account with Google.', 404);
+      if (!registerSchema.shape.email.safeParse(identity.email).success) return fail('VALIDATION_FAILED', 'Use a permanent email address.');
+      user = await this.prisma.user.create({ data: {
+        email: identity.email, fullName: identity.fullName, googleSubject: identity.subject, passwordHash: '!google-only',
+        passwordEnabled: false, lastLoginAt: new Date(),
+      } }).catch(rejectConflict);
+      this.adminActivityChanged('users');
+    } else {
+      user = await this.prisma.user.update({
+        where: { id: user.id, status: 'active', role: { not: Role.Administrator }, tokenVersion: user.tokenVersion },
+        data: { lastLoginAt: new Date() },
+      }).catch(rejectConflict);
+    }
+    await this.audit.log('AuthModule', 'google_login', 'info', `Member signed in with Google on ${flow.clientType}`, user.id);
+    return { user: this.publicUser(user), ...(await this.issue(user, undefined, undefined, flow.clientType)) };
+  }
+
+  async requestPasswordRecovery(rawEmail: string) {
+    const email = rawEmail.trim().toLowerCase();
     const user = await this.prisma.user.findUnique({ where: { email } });
-    if (!user || !['active', 'locked'].includes(user.status)) return { ok: true };
+    const eligible = user && user.passwordEnabled !== false && ['active', 'locked'].includes(user.status);
+    return this.sendOtp('password-recovery', email, eligible ? user : undefined);
+  }
+
+  async verifyPasswordRecovery(email: string, verificationId: string, verificationCode: string) {
+    const token = randomBytes(32).toString('hex');
+    await this.claimOtp('password-recovery', email.trim().toLowerCase(), verificationId, verificationCode, token);
+    return { token };
+  }
+
+  async completePasswordRecovery(email: string, token: string, password: string, confirm: string, clientType: SessionClient) {
+    this.checkNewPassword(password, confirm);
+    const key = this.otpKey('password-recovery', email.trim().toLowerCase());
+    const stored = await this.redis.get(key);
+    const recovery = stored ? JSON.parse(stored) as { resetToken?: string; userId?: string; tokenVersion?: number } : null;
+    if (!stored || !recovery?.userId || recovery.resetToken !== token || !await this.redis.replaceIfCurrent(key, stored)) {
+      return fail('OTP_EXPIRED', 'This reset has expired. Select Resend Code to continue.');
+    }
+    const user = await this.applyPasswordReset(recovery.userId, password, recovery.tokenVersion);
+    return { user: this.publicUser(user), ...(await this.issue(user, undefined, undefined, clientType)) };
+  }
+
+  // Kept for installed versions that still open an emailed reset link.
+  async forgot(rawEmail: string) {
+    const user = await this.prisma.user.findUnique({ where: { email: rawEmail.trim().toLowerCase() } });
+    if (!user || user.passwordEnabled === false || !['active', 'locked'].includes(user.status)) return { ok: true };
     const oldToken = await this.redis.get(this.userResetKey(user.id));
     if (oldToken) await this.redis.delete(this.resetKey(oldToken));
     const token = randomBytes(32).toString('hex');
@@ -378,26 +570,50 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       this.redis.set(this.userResetKey(user.id), token, ttl),
     ]);
     try {
-      const delivered = await this.email.sendPasswordReset(user.email, token);
-      return { ok: true, ...(delivered ? {} : { resetToken: token }) };
-    } catch (error) {
-      await this.redis.delete(this.resetKey(token), this.userResetKey(user.id));
-      throw error;
+      await this.email.sendPasswordReset(user.email, token);
+    } catch {
+      await this.redis.delete(this.resetKey(token));
+      this.logger?.warn('Password recovery email could not be delivered');
     }
+    return { ok: true };
   }
+
   async resetPassword(token: string, password: string, confirm: string) {
+    this.checkNewPassword(password, confirm);
+    const userId = await this.redis.take(this.resetKey(token));
+    if (!userId) return fail('AUTH_UNAUTHENTICATED', 'Reset token is invalid or expired', 401);
+    await this.applyPasswordReset(userId, password);
+    return { ok: true };
+  }
+
+  private checkNewPassword(password: string, confirm: string) {
     if (password !== confirm) fail('VALIDATION_FAILED', 'Password confirmation does not match', 400, { confirm: 'mismatch' });
     const policy = validatePassword(password);
     if (!policy.ok) passwordPolicyFailed(policy.reason);
-    const userId = await this.redis.take(this.resetKey(token));
-    if (!userId) fail('AUTH_UNAUTHENTICATED', 'Reset token is invalid or expired', 401);
-    const lockedUserId = userId!;
+  }
+
+  private async applyPasswordReset(userId: string, password: string, tokenVersion?: number) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user?.status === 'archived') fail('ACCOUNT_ARCHIVED', archivedMessage, 403);
+    if (!user || user.passwordEnabled === false || !['active', 'locked'].includes(user.status) || (tokenVersion !== undefined && tokenVersion !== user.tokenVersion)) {
+      fail('AUTH_UNAUTHENTICATED', 'Reset token is invalid or expired', 401);
+    }
+    const now = new Date();
+    const updated = await this.prisma.user.update({
+      where: { id: userId, status: { in: ['active', 'locked'] }, tokenVersion: user.tokenVersion, passwordEnabled: true },
+      data: { passwordHash: await hash(password), status: 'active', lockedAt: null, failedLogins: 0, lastLoginAt: now, tokenVersion: { increment: 1 } },
+    }).catch((error: any) => {
+      if (error.code === 'P2025') fail('AUTH_UNAUTHENTICATED', 'Reset token is invalid or expired', 401);
+      throw error;
+    });
+    const oldToken = await this.redis.get(this.userResetKey(userId));
     await Promise.all([
-      this.removeRefreshSessions(lockedUserId),
-      this.redis.delete(this.failedLoginKey(lockedUserId), this.userResetKey(lockedUserId)),
-      this.prisma.user.update({ where: { id: lockedUserId }, data: { passwordHash: await hash(password), status: 'active', lockedAt: null, failedLogins: 0, tokenVersion: { increment: 1 } } }),
+      this.removeRefreshSessions(userId),
+      this.redis.delete(this.failedLoginKey(userId), this.userResetKey(userId), ...(oldToken ? [this.resetKey(oldToken)] : [])),
     ]);
-    return { ok: true };
+    if (user.status === 'locked') this.adminActivityChanged('users');
+    await this.audit.log('AuthModule', 'password_reset', 'info', 'User reset their password', userId);
+    return updated;
   }
   emailChangeReturnUrl(result: 'confirmed' | 'invalid') {
     const target = new URL(this.config.get('WEB_ORIGIN').split(',')[0].trim());
@@ -433,7 +649,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       return this.publicUser(updated);
     } finally { await this.redis.delete(this.userEmailChangeKey(change!.userId)); }
   }
-  publicUser(user: any) { const { passwordHash, ...safe } = user; return safe; }
+  publicUser(user: any) { const { passwordHash, googleSubject, ...safe } = user; return { ...safe, googleLinked: Boolean(googleSubject) }; }
   async me(caller: Caller) { return this.publicUser(await this.prisma.user.findUniqueOrThrow({ where: { id: caller.id } })); }
   async updateMe(caller: Caller, input: any) {
     const { email, ...updates } = input;
@@ -446,8 +662,8 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   /** Erases personal data while retaining an anonymized author row so shared project history remains intact. */
   async deleteMyAccount(caller: Caller, password: string) {
-    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: caller.id }, select: { id: true, role: true, passwordHash: true } });
-    if (!await verify(user.passwordHash, password)) fail('AUTH_INVALID_CREDENTIALS', 'Current password is incorrect.', 401, { password: 'incorrect' });
+    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: caller.id }, select: { id: true, role: true, passwordHash: true, passwordEnabled: true } });
+    if (user.passwordEnabled === false || !await verify(user.passwordHash, password)) fail('AUTH_INVALID_CREDENTIALS', 'Current password is incorrect.', 401, { password: 'incorrect' });
     const [ledGroups, ledProjects, connections] = await Promise.all([
       this.prisma.groupMember.findMany({ where: { userId: user.id, role: ProjectRole.Project_Leader }, select: { groupId: true } }),
       this.prisma.projectMember.findMany({ where: { userId: user.id, role: ProjectRole.Project_Leader }, select: { projectId: true } }),
@@ -476,8 +692,10 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       this.prisma.groupMember.deleteMany({ where: { userId: user.id } }),
       this.prisma.projectMember.deleteMany({ where: { userId: user.id } }),
       this.prisma.admin.deleteMany({ where: { userId: user.id } }),
-      this.prisma.user.update({ where: { id: user.id }, data: { email: `deleted-${user.id}@invalid.local`, fullName: 'Deleted user', passwordHash: await hash(randomBytes(32).toString('hex')), institution: null, course: null, avatarUrl: null, status: 'removed', failedLogins: 0, lockedAt: null, archivedAt: null, tokenVersion: { increment: 1 } } }),
+      this.prisma.calendarNote.deleteMany({ where: { ownerId: user.id } }),
+      this.prisma.user.update({ where: { id: user.id }, data: { email: `deleted-${user.id}@invalid.local`, fullName: 'Deleted user', middleName: null, googleSubject: null, passwordHash: await hash(randomBytes(32).toString('hex')), institution: null, course: null, avatarUrl: null, status: 'removed', failedLogins: 0, lockedAt: null, archivedAt: null, tokenVersion: { increment: 1 } } }),
     ]);
+    this.adminActivityChanged('users');
     await this.audit.log('Privacy', 'account_deleted', 'info', 'User removed their account and personal data was anonymized', user.id);
     return { ok: true };
   }
@@ -645,6 +863,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       }
       return { project, tasks };
     });
+    this.adminActivityChanged('projects');
     // Notify only after commit, so live dashboards and mobile links can read the new tasks.
     await Promise.all(tasks.map((task: { id: string; title: string; assigneeId: string }) =>
       this.notify([task.assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}” in “${project.title}”`, task.id, 'task')
@@ -652,6 +871,99 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     ));
     return project;
   }
+  async projectOptions(caller: Caller) {
+    return this.prisma.project.findMany({ where: this.projectAccessWhere(caller.id), select: { id: true, title: true }, orderBy: [{ title: 'asc' }, { id: 'asc' }] });
+  }
+
+  private async projectSummaries(caller: Caller, where: any, options: any) {
+    const projects = await this.prisma.project.findMany({ where, ...options, select: {
+      id: true, title: true, status: true, startDate: true, deadline: true,
+      group: { select: { id: true, name: true, members: { where: { userId: caller.id }, select: { role: true } } } },
+      members: { where: { userId: caller.id }, select: { role: true } }, _count: { select: { members: true } },
+    } });
+    const counts = projects.length ? await this.prisma.task.groupBy({
+      by: ['projectId', 'status'], where: { projectId: { in: projects.map((project) => project.id) } }, _count: { _all: true },
+    }) : [];
+    const progressById = new Map<string, { total: number; points: number }>();
+    for (const row of counts) {
+      const current = progressById.get(row.projectId) ?? { total: 0, points: 0 };
+      current.total += row._count._all;
+      current.points += taskProgress(row.status) * row._count._all;
+      progressById.set(row.projectId, current);
+    }
+    return projects.map(({ group, members, ...project }) => {
+      const progress = progressById.get(project.id);
+      return {
+        ...project,
+        group: group ? { id: group.id, name: group.name } : null,
+        members: group ? [{ role: group.members[0]?.role ?? ProjectRole.Project_Member }] : members,
+        progressAverage: progress ? progress.points / progress.total : 0,
+      };
+    });
+  }
+
+  async projectList(caller: Caller, filter: ListFilter) {
+    const where = {
+      ...this.projectAccessWhere(caller.id),
+      ...(filter.status ? { status: filter.status } : {}),
+      ...(filter.q ? { title: { contains: filter.q } } : {}),
+    };
+    const sort = filter.sort === 'title' ? { title: 'asc' } : filter.sort === 'deadline' ? { deadline: { sort: 'asc', nulls: 'last' } } : { createdAt: 'desc' };
+    const [items, total] = await Promise.all([
+      this.projectSummaries(caller, where, { ...pageWindow(filter), orderBy: [sort, { id: 'asc' }] }),
+      this.prisma.project.count({ where }),
+    ]);
+    return listResult(items, total, filter);
+  }
+
+  async assignedTaskList(caller: Caller, filter: ListFilter) {
+    const assignment = { assigneeId: caller.id, active: true };
+    const where = {
+      project: this.groupAccessWhere(caller.id), assignments: { some: assignment },
+      ...(filter.taskId ? { id: filter.taskId } : {}),
+      ...(filter.projectId ? { projectId: filter.projectId } : {}),
+      ...(filter.status ? { status: filter.status } : {}),
+      ...(filter.q ? { title: { contains: filter.q } } : {}),
+    };
+    const sort = filter.sort === 'title' ? { title: 'asc' } : filter.sort === 'deadline' ? { deadline: { sort: 'asc', nulls: 'last' } } : { createdAt: 'desc' };
+    const [tasks, total, statusCounts] = await Promise.all([
+      this.prisma.task.findMany({ where, ...pageWindow(filter), orderBy: [sort, { id: 'asc' }], select: {
+        id: true, title: true, deadline: true, completedAt: true, priority: true, status: true, createdAt: true, projectId: true,
+        project: { select: { id: true, title: true } },
+        assignments: { where: assignment, take: 1, orderBy: { assignedAt: 'desc' }, select: { assignedAt: true, assignerId: true } },
+      } }),
+      filter.taskId ? 1 : this.prisma.task.count({ where }),
+      filter.taskId ? [] : this.prisma.task.groupBy({ by: ['status'], where: { ...where, status: undefined }, _count: { _all: true } }),
+    ]);
+    const ids = [...new Set(tasks.map((task) => task.assignments[0]?.assignerId).filter(Boolean))];
+    const assigners = ids.length ? await this.prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, fullName: true } }) : [];
+    const names = new Map(assigners.map((user) => [user.id, user.fullName]));
+    const items = tasks.map(({ assignments, ...task }) => ({ ...task, assignedBy: names.get(assignments[0]?.assignerId) ?? 'Unassigned', assignedAt: assignments[0]?.assignedAt ?? task.createdAt, progress: taskProgress(task.status) }));
+    return { ...listResult(items, total, filter), statusCounts: Object.fromEntries(statusCounts.map((row) => [row.status, row._count._all])) };
+  }
+
+  async assignedTaskDetail(caller: Caller, taskId: string) {
+    const result = await this.assignedTaskList(caller, { page: 1, pageSize: 1, taskId });
+    return result.items[0] ?? fail('NOT_FOUND', 'This task is unavailable in My Tasks.', 404);
+  }
+
+  async compactDashboard(caller: Caller) {
+    const projectAccess = this.projectAccessWhere(caller.id);
+    const taskAccess = { project: this.groupAccessWhere(caller.id), assignments: { some: { assigneeId: caller.id, active: true } } };
+    const alerts = { userId: caller.id };
+    const [projects, tasks, notifications, activity, online, announcements, milestones, activeProjects, pendingTasks, ideasSubmitted, unreadNotifications] = await Promise.all([
+      this.projectSummaries(caller, { ...projectAccess, status: { not: 'archived' } }, { take: 12, orderBy: [{ createdAt: 'desc' }, { id: 'asc' }] }),
+      this.prisma.task.findMany({ where: taskAccess, take: 12, orderBy: [{ deadline: { sort: 'asc', nulls: 'last' } }, { id: 'asc' }], select: { id: true, title: true, status: true, priority: true, deadline: true, completedAt: true, project: { select: { id: true, title: true } } } }),
+      this.prisma.notification.findMany({ where: alerts, take: 8, orderBy: { createdAt: 'desc' } }),
+      this.activityFeed(caller, 8), this.onlineTeammates(caller, 8), this.eventAnnouncements(caller, 4), this.milestones(caller, 5),
+      this.prisma.project.count({ where: { ...projectAccess, status: 'active' } }),
+      this.prisma.task.count({ where: { ...taskAccess, status: 'pending' } }),
+      this.prisma.idea.count({ where: { authorId: caller.id } }),
+      this.prisma.notification.count({ where: { ...alerts, read: false } }),
+    ]);
+    return { glance: { activeProjects, pendingTasks, ideasSubmitted }, projects, tasks, notifications, unreadNotifications, activity, online, announcements, milestones };
+  }
+
   async projects(caller: Caller) {
     const projects = await this.prisma.project.findMany({ where: this.projectAccessWhere(caller.id), include: { group: { include: { members: { where: { userId: caller.id }, select: { userId: true, role: true } } } }, members: { where: { userId: caller.id } }, tasks: true, _count: { select: { members: true } } } });
     return projects.map((project) => ({ ...project, members: project.members.map((member) => project.group ? { ...member, role: project.group.members?.find((groupMember) => groupMember.userId === member.userId)?.role ?? ProjectRole.Project_Member } : member) }));
@@ -671,7 +983,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.projectMember(id, caller.id, true);
     if (input.startDate !== undefined || input.deadline !== undefined) this.validateSchedule(input, await this.prisma.project.findUniqueOrThrow({ where: { id }, select: { startDate: true, deadline: true } }));
     const { memberIds, ...data } = input;
-    return this.prisma.project.update({ where: { id }, data });
+    const project = await this.prisma.project.update({ where: { id }, data });
+    if (input.status !== undefined) this.adminActivityChanged('projects');
+    return project;
   }
   async deleteProject(caller: Caller, id: string) {
     await this.projectMember(id, caller.id, true);
@@ -695,6 +1009,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       await tx.projectMember.deleteMany({ where: { projectId: id } });
       await tx.project.delete({ where: { id } });
     });
+    this.adminActivityChanged('projects');
     return { ok: true };
   }
   async addProjectMember(caller: Caller, projectId: string, userId: string) { await this.projectMember(projectId, caller.id, true); const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } }); if (!project.groupId) fail('INVALID_OPERATION', 'Connect this independent project to a group before adding members.', 400); const groupMembership = await this.member(project.groupId, userId); return this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: groupMembership.role } }); }
@@ -760,6 +1075,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       await tx.workflowEvent.deleteMany({ where: { taskId: id } });
       await tx.task.delete({ where: { id } });
     });
+    this.events?.emitTaskDeleted?.(task.projectId, id);
     await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
     return { ok: true };
   }
@@ -772,7 +1088,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   private async requireTaskResource(taskId: string) {
     const resource = await this.prisma.linkedResource.findFirst({ where: { taskId }, select: { id: true } });
-    if (!resource) fail('VALIDATION_FAILED', 'Attach a file link in Task Progress Tracker before marking this task completed.', 400);
+    if (!resource) fail('VALIDATION_FAILED', 'Add an attachment in Task Progress Tracker before marking this task completed.', 400);
   }
   /** All task mutation routes share the same recipients and human-readable status message. */
   private async notifyTaskStatus(taskId: string, actorId: string, status: TaskStatus) {
@@ -826,22 +1142,41 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return filter.sort === 'assigned' ? assignedTasks.sort((a: any, b: any) => new Date(b.assignedAt).getTime() - new Date(a.assignedAt).getTime()) : assignedTasks;
   }
   async tracker(caller: Caller, projectId: string) { await this.projectMember(projectId, caller.id); const tasks = await this.prisma.task.findMany({ where: { projectId } }); const counts = Object.fromEntries(['pending', 'ongoing', 'for_review', 'completed'].map((status) => [status, tasks.filter((task) => task.status === status).length])); return { ...counts, total: tasks.length, progress: averageTaskProgress(tasks) / 100 }; }
-  async taskTracker(caller: Caller) {
+  async taskTracker(caller: Caller, filter?: ListFilter & { platform?: string }) {
+    const projectAccess = this.projectAccessWhere(caller.id);
+    const projectWhere = { project: projectAccess, ...(filter?.projectId ? { projectId: filter.projectId } : {}) };
+    const platformWhere = filter?.platform === 'upload' ? { storageKey: { not: null } }
+      : filter?.platform === 'link' ? { provider: null, connectionId: null, storageKey: null }
+      : filter?.platform ? { OR: [{ provider: filter.platform }, { connection: { provider: filter.platform } }] } : undefined;
+    const where = { ...projectWhere, ...(filter?.status ? { status: filter.status } : {}), ...(platformWhere ? { linkedResources: { some: platformWhere } } : {}) };
+    const paging = filter ? pageWindow(filter) : {};
+    const totals = filter ? Promise.all([
+      this.prisma.task.count({ where }),
+      this.prisma.task.groupBy({ where: projectWhere, by: ['status'], _count: { _all: true } }),
+      this.prisma.linkedResource.count({ where: { task: projectWhere } }),
+      Promise.all([
+        this.prisma.linkedResource.groupBy({ where: { task: projectWhere, storageKey: null, provider: { not: null } }, by: ['provider'] }),
+        this.prisma.linkedResource.count({ where: { task: projectWhere, storageKey: { not: null } } }),
+        this.prisma.linkedResource.count({ where: { task: projectWhere, storageKey: null, provider: null, connectionId: null } }),
+        this.prisma.toolConnection.groupBy({ where: { linkedResources: { some: { task: projectWhere, provider: null } } }, by: ['provider'] }),
+      ]),
+    ]) : Promise.resolve(null);
     const [tasks, connections, workflow, usage, projects] = await Promise.all([
       this.prisma.task.findMany({
-        where: { project: this.projectAccessWhere(caller.id) },
-        orderBy: { createdAt: 'desc' },
+        where,
+        ...paging,
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
         include: {
           project: { select: { id: true, title: true, group: { select: { members: { where: { userId: caller.id }, select: { userId: true, role: true } } } }, members: { include: { user: { select: { id: true, fullName: true, avatarUrl: true } } } } } },
           assignments: { where: { active: true } },
-          linkedResources: { include: { connection: { include: { tool: true } } }, orderBy: { createdAt: 'desc' } },
+          linkedResources: { ...(platformWhere ? { where: platformWhere } : {}), include: { connection: { include: { tool: true } } }, orderBy: { createdAt: 'desc' } },
           workflow: { orderBy: { createdAt: 'desc' }, take: 1 },
         },
       }),
       this.prisma.toolConnection.findMany({ where: { userId: caller.id }, include: { tool: true }, orderBy: { lastSyncedAt: 'desc' } }),
-      this.prisma.workflowEvent.findMany({ where: { project: this.projectAccessWhere(caller.id) }, orderBy: { createdAt: 'desc' }, take: 24, include: { task: { select: { id: true, title: true } }, project: { select: { title: true } } } }),
+      this.prisma.workflowEvent.findMany({ where: projectWhere, orderBy: { createdAt: 'desc' }, take: 24, include: { task: { select: { id: true, title: true } }, project: { select: { title: true } } } }),
       this.prisma.toolUsage.findMany({ where: { connection: { userId: caller.id } }, orderBy: { createdAt: 'desc' }, take: 24, include: { connection: { include: { tool: true } } } }),
-      this.prisma.project.findMany({ where: this.projectAccessWhere(caller.id), select: { id: true, title: true, members: { select: { user: { select: { id: true, fullName: true, avatarUrl: true } } } } }, orderBy: { title: 'asc' } }),
+      this.prisma.project.findMany({ where: this.projectAccessWhere(caller.id), select: { id: true, title: true, ...(!filter || filter.projectId ? { members: { select: { user: { select: { id: true, fullName: true, avatarUrl: true } } } } } : {}) }, orderBy: { title: 'asc' } }),
     ]);
     const actorIds = [...new Set(workflow.map((event: any) => event.actorId))];
     const actors = actorIds.length ? await this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, fullName: true, avatarUrl: true } }) : [];
@@ -854,7 +1189,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       return {
         id: task.id, title: task.title, description: task.description, deadline: task.deadline, priority: task.priority, status: task.status,
         progress: taskProgress(task.status), createdAt: task.createdAt, latestActivityAt: new Date(latest), project: { id: task.project.id, title: task.project.title },
-        resources: task.linkedResources.map((resource: any) => ({ id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: resource.provider ?? resource.connection?.provider, toolKind: resource.toolKind, platform: ({ 'google-forms': 'Google Forms', 'google-docs': 'Google Docs', 'microsoft-word': 'Microsoft Word', 'microsoft-excel': 'Microsoft Excel' } as Record<string, string>)[resource.toolKind] ?? resource.connection?.tool.name ?? providerNames[resource.provider as ProviderId] ?? resource.provider, category: resource.connection?.tool.category ?? '', createdAt: resource.createdAt })),
+        resources: task.linkedResources.map((resource: any) => ({ id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: resource.provider ?? resource.connection?.provider, toolKind: resource.toolKind, platform: ({ 'google-forms': 'Google Forms', 'google-docs': 'Google Docs', 'microsoft-word': 'Microsoft Word', 'microsoft-excel': 'Microsoft Excel' } as Record<string, string>)[resource.toolKind] ?? resource.connection?.tool.name ?? providerNames[resource.provider as ProviderId] ?? resource.provider, category: resource.connection?.tool.category ?? '', createdAt: resource.createdAt, ...(resource.storageKey ? { upload: true, fileSize: resource.fileSize, platform: 'Uploaded file' } : {}), ...(resource.academicUseConfirmed && !resource.provider && !resource.storageKey ? { platform: 'External link' } : {}) })),
         assignees: task.assignments.map((assignment: any) => task.project.members.find((member: any) => member.userId === assignment.assigneeId)?.user).filter(Boolean),
         canUpdateStatus,
         canAssign,
@@ -869,26 +1204,40 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const usageActivity = usage.map((event: any) => ({
       id: `usage-${event.id}`, kind: 'integration', action: event.action, platform: event.connection.tool.name, provider: event.connection.provider, createdAt: event.createdAt,
     }));
+    const counts = await totals;
+    const pageTotals = counts && filter ? (() => {
+      const [total, byStatus, fileCount, resourceKinds] = counts;
+      const statuses = Object.fromEntries(byStatus.map((row) => [row.status, row._count._all])) as Record<string, number>;
+      const taskCount = byStatus.reduce((sum, row) => sum + row._count._all, 0);
+      const average = taskCount ? byStatus.reduce((sum, row) => sum + row._count._all * taskProgress(row.status), 0) / taskCount : 0;
+      const [providers, uploads, links, connectionProviders] = resourceKinds;
+      const platforms = [...new Set<string>([...providers, ...connectionProviders].map((row) => row.provider).concat(uploads ? ['upload'] : [], links ? ['link'] : []))]
+        .map((id) => ({ id, label: providerNames[id as ProviderId] ?? (id === 'upload' ? 'Uploaded file' : 'External link') }));
+      return { page: filter.page, totalPages: Math.max(1, Math.ceil(total / filter.pageSize)), stats: { taskCount, fileCount, statuses, average: Math.round(average) }, platforms };
+    })() : {};
     return {
+      ...pageTotals,
       tasks: taskItems,
-      projects: projects.map((project) => ({ id: project.id, title: project.title, collaborators: project.members.map((member) => member.user) })),
+      projects: projects.map((project) => ({ id: project.id, title: project.title, collaborators: (!filter || project.id === filter.projectId) ? (project.members ?? []).map((member) => member.user) : [] })),
       connections: connections.map((connection: any) => ({ id: connection.id, provider: connection.provider, platform: connection.tool.name, category: connection.tool.category, status: connection.status, syncState: connection.syncState, lastSyncedAt: connection.lastSyncedAt })),
       activity: [...workflowActivity, ...usageActivity].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 24),
     };
   }
-  async linkTaskResource(caller: Caller, taskId: string, input: { connectionId?: string; provider?: ProviderId; toolKind?: string | null; title: string; externalUrl: string; externalId?: string; status?: TaskStatus }) {
+  async linkTaskResource(caller: Caller, taskId: string, input: { connectionId?: string; provider?: ProviderId; toolKind?: string | null; title: string; externalUrl: string; externalId?: string; status?: TaskStatus; academicUse?: true }) {
     const task = await this.task(caller, taskId);
     if (!task.assignments.some((assignment: any) => assignment.assigneeId === caller.id)) fail('RBAC_FORBIDDEN', 'Only the active assignee can attach a file link', 403);
     const connection = input.connectionId ? await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } }) : null;
     if (input.connectionId && !connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before linking a file', 400);
-    const provider = connection?.provider ?? input.provider;
-    if (!provider) fail('VALIDATION_FAILED', 'Choose a platform for this file link', 400);
-    const linkError = resourceLinkError(input.externalUrl, provider, input.toolKind);
+    const detected = input.academicUse ? identifyResourceLink(input.externalUrl) : null;
+    const provider = input.academicUse ? detected?.provider ?? null : connection?.provider ?? input.provider;
+    const toolKind = input.academicUse ? detected?.toolKind ?? null : input.toolKind ?? null;
+    if (!input.academicUse && !provider) fail('VALIDATION_FAILED', 'Confirm the link is for academic project work', 400);
+    const linkError = input.academicUse ? (detected ? null : 'Use an HTTPS link without embedded credentials.') : resourceLinkError(input.externalUrl, provider, toolKind);
     if (linkError) fail('VALIDATION_FAILED', linkError, 400, { externalUrl: linkError });
     const changedStatus = input.status && input.status !== task.status;
     const now = new Date();
     const resource = await this.prisma.$transaction(async (tx: any) => {
-      const created = await tx.linkedResource.create({ data: { connectionId: connection?.id ?? null, provider, toolKind: input.toolKind ?? null, projectId: task.projectId, taskId, externalId: input.externalId ?? randomBytes(12).toString('hex'), title: input.title, externalUrl: input.externalUrl } });
+      const created = await tx.linkedResource.create({ data: { connectionId: connection?.id ?? null, provider, toolKind, ...(input.academicUse ? { academicUseConfirmed: true } : {}), projectId: task.projectId, taskId, externalId: input.externalId ?? randomBytes(12).toString('hex'), title: input.title, externalUrl: input.externalUrl } });
       await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: WorkflowEventType.progress_activity, fromValue: 'resource_linked', toValue: input.title } });
       if (changedStatus) {
         await tx.task.update({ where: { id: taskId }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: input.status === 'completed' ? now : null } });
@@ -901,10 +1250,11 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
       await this.notifyTaskStatus(taskId, caller.id, input.status!);
     }
-    return { ...resource, provider, platform: connection?.tool.name ?? provider, category: connection?.tool.category ?? '' };
+    return { ...resource, provider, platform: detected?.name ?? connection?.tool.name ?? provider, category: connection?.tool.category ?? '' };
   }
-  async updateLinkedResource(caller: Caller, resourceId: string, input: { connectionId?: string; provider?: ProviderId; toolKind?: string | null; title: string; externalUrl: string; assigneeId?: string; status?: TaskStatus }) {
+  async updateLinkedResource(caller: Caller, resourceId: string, input: { connectionId?: string; provider?: ProviderId; toolKind?: string | null; title: string; externalUrl: string; assigneeId?: string; status?: TaskStatus; academicUse?: true }) {
     const resource = await this.prisma.linkedResource.findUniqueOrThrow({ where: { id: resourceId }, include: { connection: true, task: { include: { assignments: { where: { active: true } }, project: { include: { members: true } } } } } });
+    if (resource.storageKey) fail('VALIDATION_FAILED', 'Uploaded files are available for download.', 400);
     if (!resource.task) fail('VALIDATION_FAILED', 'Only task-linked resources can be edited here', 400);
     const task = resource.task;
     const membership = await this.projectMember(task.projectId, caller.id);
@@ -917,15 +1267,16 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (input.assigneeId) await this.projectMember(task.projectId, input.assigneeId);
     const connection = input.connectionId ? await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } }) : null;
     if (input.connectionId && !connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before saving the file link', 400);
-    const provider = input.provider ?? connection?.provider ?? resource.provider;
-    if (!provider && !connection) fail('VALIDATION_FAILED', 'Choose a platform for this file link', 400);
-    const linkError = resourceLinkError(input.externalUrl, provider, input.toolKind === undefined ? resource.toolKind : input.toolKind);
+    const detected = input.academicUse ? identifyResourceLink(input.externalUrl) : null;
+    const provider = input.academicUse ? detected?.provider ?? null : input.provider ?? connection?.provider ?? resource.provider;
+    if (!input.academicUse && !provider && !connection) fail('VALIDATION_FAILED', 'Confirm the link is for academic project work', 400);
+    const linkError = input.academicUse ? (detected ? null : 'Use an HTTPS link without embedded credentials.') : resourceLinkError(input.externalUrl, provider, input.toolKind === undefined ? resource.toolKind : input.toolKind);
     if (linkError) fail('VALIDATION_FAILED', linkError, 400, { externalUrl: linkError });
     const now = new Date();
     const reassigned = input.assigneeId && input.assigneeId !== activeAssignment?.assigneeId;
     const changedStatus = input.status && input.status !== task.status;
     const operations = (client: any) => [
-      client.linkedResource.update({ where: { id: resource.id }, data: { ...(input.provider ? { connectionId: resource.connection?.provider === input.provider ? resource.connectionId : null, provider } : { connectionId: connection?.id ?? null }), ...(input.toolKind !== undefined ? { toolKind: input.toolKind } : {}), title: input.title, externalUrl: input.externalUrl } }),
+      client.linkedResource.update({ where: { id: resource.id }, data: { ...(input.academicUse ? { connectionId: resource.connection?.provider === provider ? resource.connectionId : null, provider, toolKind: detected?.toolKind ?? null, academicUseConfirmed: true } : input.provider ? { connectionId: resource.connection?.provider === input.provider ? resource.connectionId : null, provider } : { connectionId: connection?.id ?? null }), ...(input.toolKind !== undefined ? { toolKind: input.toolKind } : {}), title: input.title, externalUrl: input.externalUrl } }),
       ...(reassigned ? [client.taskAssignment.updateMany({ where: { taskId: task.id, active: true }, data: { active: false } }), client.taskAssignment.create({ data: { taskId: task.id, assigneeId: input.assigneeId, assignerId: caller.id } }), client.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: WorkflowEventType.assignment_change, fromValue: activeAssignment?.assigneeId, toValue: input.assigneeId } })] : []),
       ...(changedStatus ? [client.task.update({ where: { id: task.id }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: input.status === 'completed' ? now : null } }), client.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: input.status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: input.status } })] : []),
     ];
@@ -944,12 +1295,50 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     else if (reassigned) await this.notifyTaskAdmins(task.id, `Task “${task.title}” was reassigned.`, caller.id);
     return { ok: true, taskId: task.id, projectId: task.projectId };
   }
+  async attachTaskFile(caller: Caller, taskId: string, file: { originalname: string; buffer: Buffer }, status?: TaskStatus) {
+    const task = await this.task(caller, taskId);
+    if (!task.assignments.some((assignment: any) => assignment.assigneeId === caller.id)) fail('RBAC_FORBIDDEN', 'Only the active assignee can attach a file', 403);
+    const title = file.originalname.split(/[\\/]/).pop()?.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 180) || 'Attachment';
+    const storageKey = await this.storage.saveTaskFile(file.buffer);
+    const changedStatus = status && status !== task.status;
+    const now = new Date();
+    try {
+      await this.prisma.$transaction(async (tx: any) => {
+        await tx.linkedResource.create({ data: { storageKey, fileSize: file.buffer.length, title, externalId: randomBytes(12).toString('hex'), externalUrl: '', taskId, projectId: task.projectId } });
+        await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: WorkflowEventType.progress_activity, fromValue: 'resource_linked', toValue: title } });
+        if (changedStatus) {
+          await tx.task.update({ where: { id: taskId }, data: { status, ...(status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: status === 'completed' ? now : null } });
+          await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: status } });
+        }
+      });
+    } catch (error) {
+      await this.storage.removeTaskFile(storageKey).catch(() => undefined);
+      throw error;
+    }
+    if (changedStatus) {
+      await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
+      await this.notifyTaskStatus(taskId, caller.id, status!).catch(() => undefined);
+    }
+    return { ok: true, projectId: task.projectId };
+  }
+
+  async downloadTaskFile(caller: Caller, resourceId: string) {
+    const resource = await this.prisma.linkedResource.findUnique({ where: { id: resourceId }, select: { taskId: true, storageKey: true, title: true } });
+    if (!resource?.taskId || !resource.storageKey) fail('NOT_FOUND', 'Attachment not found', 404);
+    await this.task(caller, resource.taskId);
+    return { title: resource.title, content: await this.storage.readTaskFile(resource.storageKey) };
+  }
+
   async launchResource(caller: Caller, resourceId: string) {
     const resource = await this.prisma.linkedResource.findUniqueOrThrow({ where: { id: resourceId }, include: { connection: { include: { tool: true } } } });
     if (resource.taskId) await this.task(caller, resource.taskId);
     else if (resource.projectId) await this.projectMember(resource.projectId, caller.id);
     else if (!resource.connection || resource.connection.userId !== caller.id) fail('RBAC_FORBIDDEN', 'This linked file is not available to you', 403);
-    if (!resource.connection) return { externalUrl: resource.externalUrl, platform: resource.provider };
+    if (resource.storageKey) fail('INVALID_OPERATION', 'Download this attachment using its download action.', 400);
+    if (!resource.connection) {
+      if (!identifyResourceLink(resource.externalUrl)) fail('VALIDATION_FAILED', 'This resource does not have a valid HTTPS link', 400);
+      return { externalUrl: resource.externalUrl, platform: resource.provider };
+    }
     const externalUrl = await connectors[resource.connection.provider as ProviderId].launchUrl({ projectId: resource.projectId ?? undefined, taskId: resource.taskId ?? undefined, externalId: resource.externalId, title: resource.title, externalUrl: resource.externalUrl });
     if (resource.connection.userId === caller.id) await this.prisma.toolUsage.create({ data: { connectionId: resource.connectionId, action: `Opened “${resource.title}”` } });
     return { externalUrl, platform: resource.connection.tool.name };
@@ -1200,7 +1589,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const currentPoll = await this.prisma.ideaPoll.findFirst({ where: { groupId }, orderBy: { createdAt: 'desc' }, select: { id: true, open: true, closesAt: true } });
     if (!currentPoll) fail('VOTING_REQUIRED', 'Complete a group vote before starting a project.', 409);
     await this.settleExpired(currentPoll);
-    return this.prisma.$transaction(async (tx: any) => {
+    const project = await this.prisma.$transaction(async (tx: any) => {
       const idea = await tx.idea.findFirst({ where: { id: ideaId, groupId } });
       if (!idea) fail('NOT_FOUND', 'Idea does not belong to group', 404);
       if (idea.status !== 'submitted' && idea.status !== 'refined') fail('IDEA_NOT_ELIGIBLE', 'Only an unselected, non-rejected idea can become a project.', 409);
@@ -1215,17 +1604,15 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       await tx.idea.update({ where: { id: ideaId }, data: { status: 'selected' } });
       return project;
     }, { isolationLevel: 'Serializable' });
+    this.adminActivityChanged('projects');
+    return project;
   }
   async maintenanceStatus() {
     const [mode, scheduled] = await Promise.all([
       this.prisma.systemSetting.findUnique({ where: { key: 'maintenanceMode' } }),
       this.prisma.systemSetting.findUnique({ where: { key: 'maintenanceSchedule' } }),
     ]);
-    const raw = scheduled?.value as { startsAt?: string } | null;
-    const startsAt = raw?.startsAt && !Number.isNaN(new Date(raw.startsAt).getTime()) ? new Date(raw.startsAt) : null;
-    const manuallyEnabled = mode?.value === true || mode?.value?.enabled === true;
-    const scheduledActive = Boolean(startsAt && startsAt <= new Date());
-    return { active: manuallyEnabled || scheduledActive, scheduledStart: startsAt?.toISOString() ?? null };
+    return maintenanceState(mode?.value, scheduled?.value);
   }
   async announceMaintenance(caller: Caller, input: { startsAt: string; message: string }) {
     await this.admin(caller);
@@ -1242,6 +1629,19 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     await this.audit.log('AdminModule', 'maintenance_announced', 'info', `Announced maintenance starting ${startsAt.toISOString()} to ${users.length} active account(s)`, caller.id);
     return { startsAt: startsAt.toISOString(), notified: users.length };
   }
+  async calendarNote(caller: Caller, date: string) {
+    return await this.prisma.calendarNote.findUnique({ where: { ownerId_date: { ownerId: caller.id, date } }, select: { date: true, body: true } }) ?? { date, body: '' };
+  }
+
+  async saveCalendarNote(caller: Caller, date: string, body: string) {
+    return this.prisma.calendarNote.upsert({
+      where: { ownerId_date: { ownerId: caller.id, date } },
+      create: { ownerId: caller.id, date, body },
+      update: { body },
+      select: { date: true, body: true },
+    });
+  }
+
   async calendar(caller: Caller, from?: string, to?: string) {
     const dateRange = from || to ? { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } : {};
     const [events, projects, tasks, notifications, maintenanceSetting] = await Promise.all([
@@ -1637,6 +2037,41 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     })).sort((a: any, b: any) => b.score - a.score || new Date(a.deadline ?? 0).getTime() - new Date(b.deadline ?? 0).getTime());
     return { ...stats, stages, taskRisks, recommendations: recommendations(stats.riskLevel, stats.bottlenecks), tasksCompleted: project.tasks.filter((task: any) => task.status === 'completed').length };
   }
+  async workflowReport(caller: Caller, projectId: string, period: 'daily' | 'weekly' | 'monthly') {
+    await this.projectMember(projectId, caller.id);
+    const now = new Date();
+    const hour = 3600000;
+    const timeZone = process.env.APP_TIME_ZONE ?? 'Asia/Manila';
+    const dayStart = new Date(`${reportingDate(now)}T00:00:00Z`);
+    const part = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' }).formatToParts(dayStart).find((item) => item.type === 'timeZoneName')?.value;
+    const offset = /GMT([+-])(\d{2}):(\d{2})/.exec(part ?? '');
+    const offsetMs = offset ? (offset[1] === '-' ? -1 : 1) * (+offset[2] * 60 + +offset[3]) * 60000 : 0;
+    const startOfDay = +dayStart - offsetMs;
+    const width = period === 'daily' ? 4 * hour : 24 * hour;
+    const count = period === 'daily' ? 6 : period === 'weekly' ? 7 : 30;
+    const startAt = period === 'daily' ? startOfDay : startOfDay - (count - 1) * width;
+    const endAt = startAt + width * count;
+    const [memberships, activeAssignments, events] = await Promise.all([
+      this.prisma.projectMember.findMany({ where: { projectId }, select: { role: true, userId: true, user: { select: { fullName: true } }, project: { select: { group: { select: { members: { select: { userId: true, role: true } } } } } } } }),
+      this.prisma.taskAssignment.findMany({ where: { active: true, task: { projectId } }, select: { assigneeId: true, task: { select: { status: true } } } }),
+      this.prisma.workflowEvent.findMany({ where: { projectId, createdAt: { gte: new Date(startAt), lt: new Date(Math.min(endAt, +now)) } }, select: { actorId: true, type: true, createdAt: true, taskId: true } }),
+    ]);
+    const groupRoles = new Map((memberships[0]?.project.group?.members ?? []).map((member) => [member.userId, member.role]));
+    const axisOptions: Intl.DateTimeFormatOptions = period === 'daily' ? { hour: 'numeric' } : period === 'weekly' ? { weekday: 'short' } : { month: 'short', day: 'numeric' };
+    const labels = Array.from({ length: count }, (_, index) => new Date(startAt + index * width).toLocaleString('en-US', { ...axisOptions, timeZone }));
+    const members = memberships.map((member) => {
+      const contributions = events.filter((event) => event.actorId === member.userId);
+      const completions: number[] = Array(count).fill(0);
+      for (const event of contributions) if (event.type === WorkflowEventType.task_completed) completions[Math.floor((+event.createdAt - startAt) / width)] += 1;
+      return {
+        id: member.userId, fullName: member.user.fullName, role: groupRoles.get(member.userId) ?? member.role,
+        performance: averageTaskProgress(activeAssignments.filter((assignment) => assignment.assigneeId === member.userId).map((assignment) => assignment.task)),
+        totalContributions: contributions.length, completions,
+      };
+    });
+    return { labels, members };
+  }
+
   async analyticsTrends(caller: Caller, projectId: string) {
     const project = await this.project(caller, projectId);
     const now = new Date();
@@ -1673,8 +2108,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
         const tasksCompleted = memberEvents.filter((event: any) => event.type === WorkflowEventType.task_completed).length;
         const contributions = memberEvents.length;
         const assignedTasks = assignmentsByMember.get(member.id) ?? [];
-        const completedAssigned = assignedTasks.filter((task: any) => task.status === 'completed').length;
-        const performance = assignedTasks.length ? Math.round((completedAssigned / assignedTasks.length) * 100) : 0;
+        const performance = averageTaskProgress(assignedTasks);
         return { id: member.id, fullName: member.fullName, role: member.role, contributions, tasksCompleted, performance, active: contributions > 0 };
       });
       const activeMembers = memberStats.filter((member: any) => member.active);
@@ -1687,8 +2121,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       const totalCompleted = perWeek.reduce((sum: number, entry: any) => sum + entry.tasksCompleted, 0);
       const activeWeeks = perWeek.filter((entry: any) => entry.active).length;
       const assignedTasks = assignmentsByMember.get(member.id) ?? [];
-      const completedAssigned = assignedTasks.filter((task: any) => task.status === 'completed').length;
-      const performance = assignedTasks.length ? Math.round((completedAssigned / assignedTasks.length) * 100) : 0;
+      const performance = averageTaskProgress(assignedTasks);
       return { id: member.id, fullName: member.fullName, role: member.role, totalContributions, totalCompleted, activeWeeks, performance, active: activeWeeks > 0 };
     });
     return { weeks, members: memberSummary, activeMembers: memberSummary.filter((member: any) => member.active).length, inactiveMembers: memberSummary.filter((member: any) => !member.active).length };
@@ -1771,7 +2204,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const search = term ? [{ OR: [{ fullName: { contains: term } }, { email: { contains: term } }] }] : [];
     const where = { AND: [{ status: { notIn: ['archived', 'removed'] } }, ...search] };
     const [users, total] = await this.prisma.$transaction([
-      this.prisma.user.findMany({ where, select: { id: true, email: true, fullName: true, role: true, status: true, createdAt: true }, orderBy: { createdAt: 'asc' }, skip, take }),
+      this.prisma.user.findMany({ where, select: { id: true, email: true, fullName: true, role: true, status: true, createdAt: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], skip, take }),
       this.prisma.user.count({ where }),
     ]);
     return { users, total, page: safePage, pageSize: take, totalPages: Math.max(1, Math.ceil(total / take)) };
@@ -1787,7 +2220,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const search = term ? [{ OR: [{ fullName: { contains: term } }, { email: { contains: term } }] }] : [];
     const where = { AND: [{ status: 'archived' as const }, ...search] };
     const [users, total] = await this.prisma.$transaction([
-      this.prisma.user.findMany({ where, select: { id: true, email: true, fullName: true, role: true, status: true, archivedAt: true }, orderBy: { archivedAt: 'desc' }, skip, take }),
+      this.prisma.user.findMany({ where, select: { id: true, email: true, fullName: true, role: true, status: true, archivedAt: true }, orderBy: [{ archivedAt: 'desc' }, { id: 'asc' }], skip, take }),
       this.prisma.user.count({ where }),
     ]);
     return { users, total, page: safePage, pageSize: take, totalPages: Math.max(1, Math.ceil(total / take)) };
@@ -1813,11 +2246,13 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const current = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, fullName: true, status: true } });
     if (!current) fail('NOT_FOUND', 'Account not found', 404);
     if (current.status === 'removed') fail('INVALID_OPERATION', 'Deleted accounts cannot be modified', 409);
-    const updated = await this.prisma.user.update({ where: { id: targetId, status: { not: 'removed' } }, data: bumpTokens ? { ...patch, tokenVersion: { increment: 1 } } : patch });
+    if (current.status === 'archived') fail('INVALID_OPERATION', 'Restore the account before modifying it', 409);
+    const updated = await this.prisma.user.update({ where: { id: targetId, status: { notIn: ['removed', 'archived'] } }, data: bumpTokens ? { ...patch, tokenVersion: { increment: 1 } } : patch });
+    if (patch.status && patch.status !== current.status) this.adminActivityChanged('users');
     if (patch.status) await this.audit.log('AdminModule', 'account_lifecycle_change', 'info', `Administrator set account ${updated.email} status to ${patch.status}`, caller.id);
     if (patch.role) await this.audit.log('AdminModule', 'account_role_change', 'info', `Administrator set account ${updated.email} role to ${patch.role}`, caller.id);
     if (patch.status && patch.status !== current?.status) await Promise.resolve(this.email?.sendAccountStatusChange?.(updated.email, updated.fullName ?? current?.fullName ?? 'there', patch.status)).catch(async () => this.audit.log('AdminModule', 'account_status_email_failed', 'warning', `Account-status email could not be delivered to ${updated.email}`, caller.id));
-    return updated;
+    return this.publicUser(updated);
   }
 
   /**
@@ -1834,9 +2269,25 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (target!.status === 'archived') fail('INVALID_OPERATION', 'That account is already archived', 409);
     if (target!.status === 'removed') fail('INVALID_OPERATION', 'Deleted accounts cannot be archived', 409);
     await this.prisma.user.update({ where: { id: targetId, status: { not: 'removed' } }, data: { status: 'archived', archivedAt: new Date(), tokenVersion: { increment: 1 } } });
+    this.events?.emitAccountArchived?.(targetId);
+    this.adminActivityChanged('users');
+    await this.revokeArchivedCredentials(targetId, target!.email);
     await this.audit.log('AdminModule', 'account_archived', 'warning', `Administrator archived account ${target!.email}`, caller.id);
     await Promise.resolve(this.email?.sendAccountStatusChange?.(target!.email, target!.fullName, 'archived')).catch(async () => this.audit.log('AdminModule', 'account_status_email_failed', 'warning', `Account-status email could not be delivered to ${target!.email}`, caller.id));
     return { ok: true };
+  }
+
+  private async revokeArchivedCredentials(userId: string, email: string) {
+    try {
+      const oldReset = await this.redis.get(this.userResetKey(userId));
+      await Promise.all([
+        this.removeRefreshSessions(userId),
+        this.redis.delete(this.userResetKey(userId), this.otpKey('password-recovery', email), ...(oldReset ? [this.resetKey(oldReset)] : [])),
+      ]);
+    } catch {
+      // The committed status and token version already deny this account at the request boundary.
+      this.logger?.warn('Could not clear every cached credential for an archived account');
+    }
   }
 
   /** Restores an archived account back to the active list; it reauthenticates under its existing permissions. */
@@ -1846,10 +2297,36 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (!target) fail('NOT_FOUND', 'Account not found', 404);
     if (target!.status !== 'archived') fail('INVALID_OPERATION', 'That account is not archived', 409);
     await this.prisma.user.update({ where: { id: targetId }, data: { status: 'active', archivedAt: null } });
+    this.adminActivityChanged('users');
     await this.audit.log('AdminModule', 'account_restored', 'info', `Administrator restored account ${target!.email}`, caller.id);
     await Promise.resolve(this.email?.sendAccountStatusChange?.(target!.email, target!.fullName, 'active')).catch(async () => this.audit.log('AdminModule', 'account_status_email_failed', 'warning', `Account-status email could not be delivered to ${target!.email}`, caller.id));
     return { ok: true };
   }
+  private adminActivityChanged(metric: ActivityMetric) {
+    this.events?.emitAdminActivity?.(metric);
+    if (this.prisma.adminActivitySample) void this.recordAdminActivity(metric).catch(() => this.logger.warn('Could not record administrator activity sample'));
+  }
+
+  private async recordAdminActivity(metric: ActivityMetric) {
+    const date = reportingDate(new Date());
+    const table = metric === 'users' ? this.prisma.user : this.prisma.project;
+    const count = await table.count({ where: { status: 'active' } });
+    await this.prisma.adminActivitySample.upsert({ where: { metric_date: { metric, date } }, create: { metric, date, count }, update: { count } });
+    return { date, count };
+  }
+
+  async adminActivity(caller: Caller, metric: ActivityMetric, period: ActivityPeriod) {
+    await this.admin(caller);
+    const current = await this.recordAdminActivity(metric);
+    const ranges = activityRanges(period, current.date);
+    const [prior, samples] = await Promise.all([
+      this.prisma.adminActivitySample.findFirst({ where: { metric, date: { lt: ranges[0].start } }, orderBy: { date: 'desc' }, select: { date: true, count: true } }),
+      this.prisma.adminActivitySample.findMany({ where: { metric, date: { gte: ranges[0].start, lt: current.date } }, orderBy: { date: 'asc' }, select: { date: true, count: true } }),
+    ]);
+    const points = activityPoints(ranges, [...(prior ? [prior] : []), ...samples, current]);
+    return { current: current.count, points };
+  }
+
   async monitoring(caller: Caller) {
     await this.admin(caller);
     const since24h = new Date(Date.now() - 24 * 3600000);

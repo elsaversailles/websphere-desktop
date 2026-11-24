@@ -1,10 +1,12 @@
 import { ChangeEvent, FormEvent, useEffect, useState } from 'react';
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, passwordRequirements } from '@websphere/shared';
-import { authenticate, request, saveSession, type Session } from '../api';
+import { archivedAccountMessage, authenticate, request, type Session } from '../api';
+
+import { startGoogle } from '../googleAuth';
 
 type AuthScreenProps = { onAuthenticated: (session: Session) => void; notify: (message: string) => void; initialMode?: 'login' | 'register'; onBack?: () => void };
-type AuthMode = 'login' | 'register' | 'verify' | 'admin' | 'forgot' | 'reset' | 'support';
-type RegistrationData = { fullName: string; email: string; password: string; institution: string; course: string };
+type AuthMode = 'login' | 'register' | 'verify' | 'admin' | 'forgot' | 'reset-code' | 'reset' | 'support';
+type RegistrationData = { fullName: string; middleName?: string; email: string; password: string; institution: string; course: string };
 
 /** Sentinel option value for "Others" on the course/institution selects — never submitted as-is, see SelectWithOther. */
 const OTHER_OPTION = '__other__';
@@ -28,12 +30,13 @@ const schools = [
 
 export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', onBack }: AuthScreenProps) {
   const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get('resetToken') ?? '');
+  const [recovery, setRecovery] = useState<{ email: string; verificationId: string } | null>(null);
   const [mode, setMode] = useState<AuthMode>(() => resetToken ? 'reset' : initialMode);
   const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [message, setMessage] = useState('');
   const [registration, setRegistration] = useState<RegistrationData | null>(null);
-  const [registrationNames, setRegistrationNames] = useState({ firstName: '', lastName: '' });
+  const [registrationNames, setRegistrationNames] = useState({ firstName: '', middleName: '', lastName: '' });
   const [verificationId, setVerificationId] = useState('');
   const [registerPassword, setRegisterPassword] = useState('');
   const [resetPassword, setResetPasswordValue] = useState('');
@@ -71,7 +74,6 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     setBusy(true);
     try {
       const session = await authenticate(String(data.get('email') ?? ''), String(data.get('password') ?? ''), admin);
-      saveSession(session);
       onAuthenticated(session);
     } catch (error: unknown) { showError(error); } finally { setBusy(false); }
   }
@@ -85,8 +87,10 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     if (!passwordRequirements(String(data.get('password') ?? '')).every((requirement) => requirement.met)) return setErrorMessage('Your password does not meet all of the requirements below.');
     if (data.get('password') !== data.get('confirm')) return setErrorMessage('Your passwords do not match.');
     if (!agreedToPrivacy) return setErrorMessage('Please agree to the Privacy Policy to continue.');
+    const middleName = String(data.get('middleName') ?? '').trim();
     const pending: RegistrationData = {
-      fullName: `${data.get('firstName')} ${data.get('lastName')}`.trim(),
+      fullName: [data.get('firstName'), middleName, data.get('lastName')].map((name) => String(name ?? '').trim()).filter(Boolean).join(' '),
+      middleName,
       email: String(data.get('email') ?? '').trim(), password: String(data.get('password') ?? ''),
       institution: String(data.get('institution') ?? ''), course: String(data.get('course') ?? ''),
     };
@@ -94,7 +98,7 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     try {
       const result = await request<{ ok: true; verificationId: string }>('/auth/registration/otp', { method: 'POST', body: JSON.stringify({ email: pending.email }) });
       setRegistration(pending);
-      setRegistrationNames({ firstName: String(data.get('firstName') ?? ''), lastName: String(data.get('lastName') ?? '') });
+      setRegistrationNames({ firstName: String(data.get('firstName') ?? ''), middleName, lastName: String(data.get('lastName') ?? '') });
       setVerificationId(result.verificationId);
       setOtpSentAt(Date.now());
       setNow(Date.now());
@@ -124,29 +128,53 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     setErrorMessage('');
     setBusy(true);
     try {
-      await request('/auth/register', { method: 'POST', body: JSON.stringify({ ...registration, verificationId, verificationCode }) });
-      setRegistration(null);
-      setRegistrationNames({ firstName: '', lastName: '' });
-      setRegisterPassword('');
-      setAgreedToPrivacy(false);
-      setVerificationId('');
-      setOtpSentAt(null);
-      setMessage('Email verified. Your account is ready—please sign in.');
-      setMode('login');
+      const session = await request<Session>('/auth/register', { method: 'POST', body: JSON.stringify({ ...registration, verificationId, verificationCode }) });
+      onAuthenticated(session);
     } catch (error: unknown) { showError(error); } finally { setBusy(false); }
   }
 
   async function submitForgot(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const email = String(new FormData(event.currentTarget).get('email') ?? '').trim();
+    await sendRecoveryCode(email);
+  }
+
+  async function sendRecoveryCode(email: string) {
     setErrorMessage('');
     setBusy(true);
     try {
-      const result = await request<{ ok: true; resetToken?: string }>('/auth/password/forgot', { method: 'POST', body: JSON.stringify({ email }) });
-      setMessage('If an account matches that email, a reset link has been sent.');
-      if (result.resetToken) { setResetToken(result.resetToken); setMode('reset'); }
-      else setMode('login');
+      const result = await request<{ verificationId: string }>('/auth/password/recovery', { method: 'POST', body: JSON.stringify({ email }) });
+      setRecovery({ email, verificationId: result.verificationId });
+      setResetToken('');
+      setMessage('If an account matches that email, a six-digit code has been sent.');
+      setMode('reset-code');
     } catch (error: unknown) { showError(error); } finally { setBusy(false); }
+  }
+
+  async function verifyRecovery(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!recovery) return;
+    const verificationCode = new FormData(event.currentTarget).get('verificationCode');
+    setErrorMessage('');
+    setBusy(true);
+    try {
+      const { token } = await request<{ token: string }>('/auth/password/recovery/verify', {
+        method: 'POST', body: JSON.stringify({ ...recovery, verificationCode }),
+      });
+      setResetToken(token);
+      changeMode('reset');
+    } catch (error) { showError(error); } finally { setBusy(false); }
+  }
+
+  async function continueWithGoogle(googleMode: 'login' | 'register') {
+    if (googleMode === 'register' && !agreedToPrivacy) {
+      setErrorMessage('Please agree to the Privacy Policy to continue.');
+      return;
+    }
+    setBusy(true);
+    setErrorMessage('');
+    try { await startGoogle(googleMode); }
+    catch (error) { showError(error); setBusy(false); }
   }
 
   async function submitSupport(event: FormEvent<HTMLFormElement>) {
@@ -170,6 +198,11 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     if (data.get('password') !== data.get('confirm')) return setErrorMessage('Your passwords do not match.');
     setBusy(true);
     try {
+      if (recovery) {
+        const session = await request<Session>('/auth/password/recovery/complete', { method: 'POST', body: JSON.stringify({ email: recovery.email, token: resetToken, password: data.get('password'), confirm: data.get('confirm') }) });
+        onAuthenticated(session);
+        return;
+      }
       await request('/auth/password/reset', { method: 'POST', body: JSON.stringify({ token: resetToken, password: data.get('password'), confirm: data.get('confirm') }) });
       window.history.replaceState({}, '', window.location.pathname);
       setResetToken('');
@@ -182,12 +215,13 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
     <div className="swirl s1" /><div className="swirl s2" />
     {onBack ? <button type="button" className="auth-back" onClick={onBack}>&larr; Back to home</button> : null}
     {mode === 'login' ? <form className="abox" onSubmit={(event) => void submitLogin(event, false)}>
-      <h1 className="atitle">Welcome Back</h1><p className="asub">Sign in to your account to continue</p>
+      <h1 className="atitle">Welcome Back to WebSphere</h1><p className="asub">Sign in to your account to continue</p>
       <AuthFeedback error={errorMessage} message={message} />
       <AuthField label="Email Address" name="email" type="email" placeholder="your@gmail.com" />
       <AuthField label="Password" name="password" type="password" placeholder="Enter your password" />
       <button className="aforgot" type="button" onClick={() => changeMode('forgot')}>Forgot password?</button>
-      <button className="abtn" disabled={busy}>{busy ? 'Signing In…' : 'Sign In'}</button>
+      <button className="abtn" disabled={busy}>{busy ? 'Signing In…' : 'Log in'}</button>
+      <GoogleButton disabled={busy} onClick={() => void continueWithGoogle('login')} />
       <p className="alink">Don&apos;t have an account? <button type="button" onClick={() => changeMode('register')}>Register here</button></p>
       <p className="alink admin-link"><button type="button" onClick={() => changeMode('admin')}>Admin login</button> · <button type="button" onClick={() => changeMode('support')}>Need help?</button></p>
     </form> : null}
@@ -201,9 +235,9 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <p className="alink admin-link"><button type="button" onClick={() => changeMode('login')}>User login</button></p>
     </form> : null}
     {mode === 'register' ? <form className="abox register-box" onSubmit={(event) => void submitRegister(event)}>
-      <h1 className="atitle register-title">Create an Account</h1>
+      <h1 className="atitle register-title">Create an Account to WebSphere</h1>
       <AuthFeedback error={errorMessage} message={message} />
-      <div className="auth-two"><AuthField label="First Name" name="firstName" placeholder="First Name" defaultValue={registrationNames.firstName} /><AuthField label="Last Name" name="lastName" placeholder="Last Name" defaultValue={registrationNames.lastName} /></div>
+      <div className="auth-name-fields"><AuthField label="First Name" name="firstName" placeholder="First Name" defaultValue={registrationNames.firstName} /><AuthField label="Middle Name" name="middleName" placeholder="Middle Name" defaultValue={registrationNames.middleName} optional /><AuthField label="Last Name" name="lastName" placeholder="Last Name" defaultValue={registrationNames.lastName} /></div>
       <AuthField label="Email Address" name="email" type="email" placeholder="your@email.com" defaultValue={registration?.email} />
       <SelectWithOther label="Course" name="course" options={courses} placeholder="Select your course" defaultValue={registration?.course} />
       <SelectWithOther label="School / Institution" name="institution" options={schools} placeholder="Select your school" defaultValue={registration?.institution} />
@@ -211,7 +245,8 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <PasswordChecklist password={registerPassword} />
       <AuthField label="Confirm Password" name="confirm" type="password" placeholder="Confirm your password" defaultValue={registration?.password} />
       <label className="auth-consent"><input type="checkbox" required checked={agreedToPrivacy} onChange={(event) => setAgreedToPrivacy(event.target.checked)} /><span>I agree to the <button type="button" className="auth-inline-link" onClick={() => setPrivacyOpen(true)}>Privacy Policy</button><span className="required-mark" aria-hidden="true"> *</span></span></label>
-      <button className="abtn register-submit" disabled={busy}>{busy ? 'Sending code…' : 'Continue'}</button>
+      <button className="abtn register-submit" disabled={busy}>{busy ? 'Sending code…' : 'Create Account'}</button>
+      <GoogleButton disabled={busy} onClick={() => void continueWithGoogle('register')} />
       <p className="alink">Already have an account? <button type="button" onClick={() => changeMode('login')}>Sign in here</button></p>
     </form> : null}
     {privacyOpen ? <PrivacyPolicyModal onClose={() => setPrivacyOpen(false)} onAccept={() => { setAgreedToPrivacy(true); setPrivacyOpen(false); }} /> : null}
@@ -224,10 +259,10 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <p className="alink"><button type="button" disabled={busy || otpResendInMs > 0} onClick={() => void resendVerification()}>{otpResendInMs > 0 ? `Resend code in ${Math.ceil(otpResendInMs / 1000)}s` : 'Resend code'}</button> · <button type="button" disabled={busy} onClick={() => changeMode('register')}>Edit details</button></p>
     </form> : null}
     {mode === 'forgot' ? <form className="abox" onSubmit={(event) => void submitForgot(event)}>
-      <h1 className="atitle">Reset Password</h1><p className="asub">We’ll send a one-time reset link to your email.</p>
+      <h1 className="atitle">Reset Password</h1><p className="asub">We’ll send a six-digit reset code to your email.</p>
       <AuthFeedback error={errorMessage} message={message} />
       <AuthField label="Email Address" name="email" type="email" placeholder="your@email.com" />
-      <button className="abtn" disabled={busy}>{busy ? 'Sending…' : 'Send Reset Link'}</button>
+      <button className="abtn" disabled={busy}>{busy ? 'Sending…' : 'Send Reset Code'}</button>
       <p className="alink"><button type="button" onClick={() => changeMode('login')}>Back to sign in</button></p>
     </form> : null}
     {mode === 'support' ? <form className="abox" onSubmit={(event) => void submitSupport(event)}>
@@ -240,13 +275,23 @@ export function AuthScreen({ onAuthenticated, notify, initialMode = 'register', 
       <button className="abtn" disabled={busy}>{busy ? 'Sending…' : 'Send request'}</button>
       <p className="alink"><button type="button" onClick={() => changeMode('login')}>Back to sign in</button></p>
     </form> : null}
+    {mode === 'reset-code' ? <form className="abox" onSubmit={(event) => void verifyRecovery(event)}>
+      <h1 className="atitle">Verify your reset code</h1>
+      <p className="asub">Enter the six-digit code sent to {recovery?.email}.</p>
+      <AuthFeedback error={errorMessage} message={message} />
+      <label className="auth-field"><span className="lbl">Verification Code</span><input key={recovery?.verificationId} className="afield otp-field" name="verificationCode" required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} /></label>
+      <button className="abtn" disabled={busy}>Verify Code</button>
+      <p className="alink"><button type="button" disabled={busy} onClick={() => recovery && void sendRecoveryCode(recovery.email)}>Resend Code</button></p>
+      <p className="alink"><button type="button" onClick={() => changeMode('forgot')}>Change email</button></p>
+    </form> : null}
     {mode === 'reset' ? <form className="abox" onSubmit={(event) => void submitReset(event)}>
-      <h1 className="atitle">Choose a New Password</h1><p className="asub">Your reset link can only be used once.</p>
+      <h1 className="atitle">Choose a New Password</h1><p className="asub">Your verified reset can only be used once.</p>
       <AuthFeedback error={errorMessage} message={message} />
       <AuthField label="New Password" name="password" type="password" placeholder="Enter a new password" onChange={(event) => setResetPasswordValue(event.target.value)} />
       <PasswordChecklist password={resetPassword} />
       <AuthField label="Confirm Password" name="confirm" type="password" placeholder="Confirm your new password" />
       <button className="abtn" disabled={busy || !resetToken}>{busy ? 'Resetting…' : 'Reset Password'}</button>
+      {recovery ? <p className="alink"><button type="button" disabled={busy} onClick={() => void sendRecoveryCode(recovery.email)}>Resend Code</button></p> : null}
       <p className="alink"><button type="button" onClick={() => changeMode('login')}>Back to sign in</button></p>
     </form> : null}
   </main>;
@@ -260,8 +305,13 @@ function formatCountdown(ms: number) {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
+function GoogleButton({ disabled, onClick }: { disabled: boolean; onClick: () => void }) {
+  return <><div className="auth-divider"><span>or</span></div><button type="button" className="auth-google" disabled={disabled} onClick={onClick}><span className="auth-google-mark" aria-hidden="true">G</span>Continue with Google</button></>;
+}
+
 function AuthFeedback({ error, message }: { error: string; message: string }) {
   if (!error && !message) return null;
+  if (error === archivedAccountMessage) return <div className="modal-ov open"><section className="modal-box" role="alertdialog" aria-modal="true"><p>{error}</p><button className="btn" type="button" onClick={() => window.location.assign('/')}>OK</button></section></div>;
   return <p className={`auth-feedback ${error ? 'error' : 'success'}`} role={error ? 'alert' : 'status'}>{error || message}</p>;
 }
 
@@ -277,9 +327,9 @@ function EyeIcon({ open }: { open: boolean }) {
   </svg>;
 }
 
-function AuthField({ label, name, type = 'text', placeholder, onChange, defaultValue }: { label: string; name: string; type?: string; placeholder: string; onChange?: (event: ChangeEvent<HTMLInputElement>) => void; defaultValue?: string }) {
+function AuthField({ label, name, type = 'text', placeholder, onChange, defaultValue, optional = false }: { optional?: boolean; label: string; name: string; type?: string; placeholder: string; onChange?: (event: ChangeEvent<HTMLInputElement>) => void; defaultValue?: string }) {
   const [visible, setVisible] = useState(false);
-  return <label className="auth-field"><span className="lbl">{label}<span className="required-mark" aria-hidden="true"> *</span></span><span className="auth-input-wrap"><input className={`afield${type === 'password' ? ' afield-pw' : ''}`} required minLength={type === 'password' ? PASSWORD_MIN_LENGTH : undefined} maxLength={type === 'password' ? PASSWORD_MAX_LENGTH : undefined} name={name} type={type === 'password' && visible ? 'text' : type} placeholder={placeholder} defaultValue={defaultValue} onChange={onChange} />{type === 'password' ? <button className="auth-eye" type="button" aria-label={visible ? 'Hide password' : 'Show password'} onClick={() => setVisible((value) => !value)}><EyeIcon open={visible} /></button> : null}</span></label>;
+  return <label className="auth-field"><span className="lbl">{label}{optional ? <small> (optional)</small> : <span className="required-mark" aria-hidden="true"> *</span>}</span><span className="auth-input-wrap"><input className={`afield${type === 'password' ? ' afield-pw' : ''}`} required={!optional} minLength={type === 'password' ? PASSWORD_MIN_LENGTH : undefined} maxLength={type === 'password' ? PASSWORD_MAX_LENGTH : undefined} name={name} type={type === 'password' && visible ? 'text' : type} placeholder={placeholder} defaultValue={defaultValue} onChange={onChange} />{type === 'password' ? <button className="auth-eye" type="button" aria-label={visible ? 'Hide password' : 'Show password'} onClick={() => setVisible((value) => !value)}><EyeIcon open={visible} /></button> : null}</span></label>;
 }
 
 /** Guided choice with a required-field asterisk and a free-text fallback when the user picks "Others" —

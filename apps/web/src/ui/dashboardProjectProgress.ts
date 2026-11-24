@@ -8,8 +8,8 @@ const TASK_PROGRESS: Record<string, number> = {
 };
 
 /** Average task auto-progress; lifecycle states remain visible for closed or paused projects. */
-export function dashboardProjectProgress(tasks: Array<{ status: string }>, projectStatus?: string | null): { progress: number; health: Health } {
-  const average = tasks.length ? tasks.reduce((total, task) => total + (TASK_PROGRESS[task.status] ?? 0), 0) / tasks.length : 0;
+export function dashboardProjectProgress(tasks: Array<{ status: string }>, projectStatus?: string | null, aggregateAverage?: number): { progress: number; health: Health } {
+  const average = aggregateAverage ?? (tasks.length ? tasks.reduce((total, task) => total + (TASK_PROGRESS[task.status] ?? 0), 0) / tasks.length : 0);
   // Rounding must not make an unfinished project look complete.
   const progress = average < 100 ? Math.min(99, Math.round(average)) : 100;
   let health: Health;

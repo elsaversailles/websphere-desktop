@@ -18,13 +18,13 @@ function fixture(hasResource: boolean, status = 'for_review') {
 describe('task completion requires a linked file', () => {
   it('blocks a direct completion without a task-linked file', async () => {
     const { service, prisma } = fixture(false);
-    await expect(service.taskStatus(caller, 'task-1', 'completed')).rejects.toThrow('Attach a file link');
+    await expect(service.taskStatus(caller, 'task-1', 'completed')).rejects.toThrow('Add an attachment');
     expect(prisma.task.update).not.toHaveBeenCalled();
     expect(prisma.linkedResource.findFirst).toHaveBeenCalledWith({ where: { taskId: 'task-1' }, select: { id: true } });
   });
   it('blocks completion through the project task editor as well', async () => {
     const { service, prisma } = fixture(false);
-    await expect(service.updateTask(caller, 'task-1', { status: 'completed' })).rejects.toThrow('Attach a file link');
+    await expect(service.updateTask(caller, 'task-1', { status: 'completed' })).rejects.toThrow('Add an attachment');
     expect(prisma.task.update).not.toHaveBeenCalled();
   });
   it('allows completion with a linked file', async () => {

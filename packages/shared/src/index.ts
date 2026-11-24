@@ -88,6 +88,7 @@ const newAccountEmail = requiredEmail.refine((email) => !isDisposableEmail(email
 
 export const registerSchema = z.object({
   fullName: z.string().trim().min(2).max(120),
+  middleName: z.string().trim().max(60).optional(),
   email: newAccountEmail,
   password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
   institution: z.string().trim().min(2).max(160),
@@ -97,6 +98,7 @@ export const registrationOtpRequestSchema = z.object({ email: newAccountEmail })
 export const verifiedRegisterSchema = registerSchema.extend({
   verificationId: z.string().regex(/^[a-f0-9]{64}$/i),
   verificationCode: z.string().regex(/^\d{6}$/),
+  clientType: z.enum(['web', 'mobile']).optional(),
 });
 export const pushSubscriptionSchema = z.object({
   endpoint: z.string().url().max(4000),
@@ -111,6 +113,24 @@ export const passwordChangeSchema = z.object({
   confirm: z.string().min(1),
 });
 export const passwordForgotSchema = z.object({ email: requiredEmail });
+export const recoveryVerifySchema = passwordForgotSchema.extend({
+  verificationId: z.string().regex(/^[a-f0-9]{64}$/),
+  verificationCode: z.string().regex(/^\d{6}$/),
+});
+export const recoveryCompleteSchema = passwordChangeSchema.omit({ oldPassword: true }).extend({
+  email: requiredEmail,
+  token: z.string().regex(/^[a-f0-9]{64}$/),
+  clientType: z.enum(['web', 'mobile']).default('web'),
+});
+export const googleStartSchema = z.object({
+  mode: z.enum(['login', 'register', 'link']),
+  clientType: z.enum(['web', 'mobile']),
+  challenge: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+}).refine((input) => input.clientType === 'mobile' || input.challenge, { message: 'A browser challenge is required' });
+export const googleExchangeSchema = z.object({
+  code: z.string().regex(/^[a-f0-9]{64}$/),
+  verifier: z.string().regex(/^[a-f0-9]{64}$/),
+});
 export const deactivationRequestSchema = z.object({ email: requiredEmail, reason: z.string().trim().max(1000).default('') });
 export const passwordResetSchema = z.object({
   token: z.string().min(32).max(256),
@@ -160,6 +180,7 @@ export const resourceLinkSchema = z.object({
   title: z.string().trim().min(2).max(180),
   externalUrl: z.string().url().max(4000).refine((value) => /^https?:\/\//i.test(value), 'Use an HTTP or HTTPS link'),
   externalId: z.string().trim().min(1).max(512).optional(),
+  academicUse: z.literal(true).optional(),
   status: z.enum(['pending', 'ongoing', 'for_review', 'completed']).optional(),
 });
 export const resourceUpdateSchema = resourceLinkSchema.extend({
@@ -215,6 +236,8 @@ export type CreateTaskDto = z.infer<typeof taskSchema>;
 export type TaskStatusDto = z.infer<typeof taskStatusSchema>;
 export type CreateAnnouncementDto = z.infer<typeof announcementSchema>;
 export type ServerToClientEvents = {
+  'account:archived': () => void;
+  'admin:activity': (metric: 'users' | 'projects') => void;
   'chat:message': (message: unknown) => void;
   'presence:update': (presence: unknown) => void;
   'task:updated': (task: unknown) => void;
@@ -239,9 +262,11 @@ export type ServerToClientEvents = {
 export type ClientToServerEvents = {
   'chat:send': (message: { groupId: string; body: string }, ack: (result: AckDto) => void) => void;
   'group:join': (groupId: string, ack: (result: AckDto) => void) => void;
+  'group:leave': (groupId: string, ack: (result: AckDto) => void) => void;
+  'project:leave': (projectId: string, ack: (result: AckDto) => void) => void;
   'project:join': (projectId: string, ack: (result: AckDto) => void) => void;
   'sync:request': (cursor: { projectId: string; cursor?: string }, ack: (state: unknown) => void) => void;
-  'call:join': (call: { groupId: string; kind: CallKind; cameraEnabled?: boolean }, ack: (result: AckDto & { participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[] }) => void) => void;
+  'call:join': (call: { groupId: string; kind: CallKind; muted?: boolean; cameraEnabled?: boolean; resumeId?: string }, ack: (result: AckDto & { callId?: string; participants?: CallParticipant[]; hostSocketId?: string; raisedHandSocketIds?: string[] }) => void) => void;
   'call:leave': (call: { groupId: string }, ack: (result: AckDto) => void) => void;
   'call:signal': (signal: { groupId: string; targetSocketId: string; signal: CallSignal }, ack: (result: AckDto) => void) => void;
   'call:screen-share': (share: { groupId: string; sharing: boolean }, ack: (result: AckDto) => void) => void;
@@ -254,3 +279,5 @@ export type ClientToServerEvents = {
 export const apiError = (code: string, message: string, fields?: Record<string, string>): ApiError => ({ code, message, ...(fields ? { fields } : {}) });
 
 export { resourceLinkError } from './resource-link.js';
+
+export { identifyResourceLink } from './resource-link.js';
