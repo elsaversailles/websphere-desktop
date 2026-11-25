@@ -1,6 +1,6 @@
 import { workflowBuckets } from './workflow-reporting.js';
 import { maintenanceState } from './maintenance-state.js';
-import { activityPoints, activityRanges, projectActivityCounts, reportingDate, type ActivityMetric, type ActivityPeriod } from './admin-activity.js';
+import { activityPoints, activityRanges, projectActivityPoints, reportingDate, type ActivityMetric, type ActivityPeriod } from './admin-activity.js';
 import { Injectable, Logger, HttpException, HttpStatus, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { Prisma, type ProjectStatus } from '@prisma/client';
 import { hash, verify } from 'argon2';
@@ -2447,23 +2447,26 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const dateFilter = { gte: first, lte: today };
     const recent = { createdAt: { gte: since, lte: now } };
     const timestamp = { where: recent, select: { createdAt: true } };
-    const projects = await this.prisma.project.findMany({
-      where: { status: 'active', OR: [
-        recent, { activityDays: { some: { date: dateFilter } } },
-        { tasks: { some: recent } }, { workflow: { some: recent } },
-        { linkedResources: { some: recent } },
-      ] },
-      select: {
-        createdAt: true, activityDays: { where: { date: dateFilter }, select: { date: true } },
-        tasks: timestamp, workflow: timestamp, linkedResources: timestamp,
-      },
-    });
+    const [current, projects] = await Promise.all([
+      this.prisma.project.count({ where: { status: 'active' } }),
+      this.prisma.project.findMany({
+        where: { status: 'active', OR: [
+          recent, { activityDays: { some: { date: dateFilter } } },
+          { tasks: { some: recent } }, { workflow: { some: recent } },
+          { linkedResources: { some: recent } },
+        ] },
+        select: {
+          createdAt: true, activityDays: { where: { date: dateFilter }, select: { date: true } },
+          tasks: timestamp, workflow: timestamp, linkedResources: timestamp,
+        },
+      }),
+    ]);
     const dates = projects.map((project) => new Set([
       ...project.activityDays.map(({ date }) => date),
       ...[project, ...project.tasks, ...project.workflow, ...project.linkedResources]
         .map(({ createdAt }) => reportingDate(createdAt)),
     ]));
-    return projectActivityCounts(ranges, dates, today);
+    return { current, points: projectActivityPoints(ranges, dates) };
   }
 
   async monitoring(caller: Caller) {

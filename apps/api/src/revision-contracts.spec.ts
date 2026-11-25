@@ -153,7 +153,7 @@ describe('bounded project views', () => {
     expect(activityPoints(ranges, [{ date: '2026-11-22', count: 12 }, { date: '2026-11-24', count: 13 }]).map((point) => point.value)).toEqual([null, null, null, null, 12, 12, 13]);
   });
 
-  it('counts distinct active projects with changes in each admin chart period', async () => {
+  it('reports the total active projects above distinct changes in each chart period', async () => {
     const oldProject = { createdAt: new Date('2026-01-01T00:00:00Z'), activityDays: [], tasks: [], workflow: [], linkedResources: [] };
     const timestamp = (value: string) => ({ createdAt: new Date(value) });
     const findMany = vi.fn().mockResolvedValue([
@@ -166,8 +166,9 @@ describe('bounded project views', () => {
       { ...oldProject, linkedResources: [timestamp('2026-11-24T16:20:00Z')] },
       oldProject,
     ]);
+    const count = vi.fn().mockResolvedValue(5);
     const service = Object.assign(Object.create(AppService.prototype), {
-      prisma: { project: { findMany } },
+      prisma: { project: { count, findMany } },
     }) as AppService;
     const admin = { id: 'admin', role: 'Administrator' as const, tv: 0 };
     vi.stubEnv('APP_TIME_ZONE', 'Asia/Manila');
@@ -175,10 +176,12 @@ describe('bounded project views', () => {
     vi.setSystemTime(new Date('2026-11-25T12:00:00Z'));
     try {
       const weekly = await service.adminActivity(admin, 'projects', 'weekly');
-      expect(weekly.current).toBe(2);
+      expect(weekly.current).toBe(5);
       expect(weekly.points.map(({ value }) => value)).toEqual([0, 0, 0, 0, 0, 1, 2]);
       const sixMonths = await service.adminActivity(admin, 'projects', 'six-months');
+      expect(sixMonths.current).toBe(5);
       expect(sixMonths.points.at(-1)).toEqual({ label: 'Nov', value: 2 });
+      expect(count).toHaveBeenCalledWith({ where: { status: 'active' } });
       expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({ status: 'active' }),
       }));

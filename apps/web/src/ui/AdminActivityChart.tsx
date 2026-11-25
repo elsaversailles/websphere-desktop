@@ -68,7 +68,7 @@ export function AdminActivityChart({ metric, initialPeriod = 'weekly' }: { metri
   const tint = projects ? '#0038a8' : '#19965e';
   const hasGaps = activity?.points.some((point) => point.value === null);
   return <section className="cc admin-activity-chart">
-    <div className="cc-head"><h3 className="admin-chart-title"><strong style={{ color: tint }} title={projects ? 'Active projects with changes today' : undefined}>{activity?.current ?? '—'}</strong>{title}</h3>
+    <div className="cc-head"><h3 className="admin-chart-title"><strong style={{ color: tint }} title={projects ? 'Total currently active projects' : undefined}>{activity?.current ?? '—'}</strong>{title}</h3>
       <div className="admin-periods" role="group" aria-label={`${title} reporting period`}>
         {periods.map((option) => <button key={option.value} type="button" aria-pressed={period === option.value} onClick={() => {
           if (period !== option.value) { setActivity(null); setError(''); setPeriod(option.value); }
