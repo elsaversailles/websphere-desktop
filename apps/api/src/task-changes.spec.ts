@@ -15,6 +15,7 @@ function taskService() {
   const notify = vi.fn(async () => ({ ok: true, delivered: 1 }));
   const enqueueAnalyticsRecompute = vi.fn(async () => { throw new Error('queue unavailable'); });
   const prisma = {
+    projectActivityDay: { createMany: vi.fn(async () => ({ count: 1 })) },
     task: { findUniqueOrThrow: vi.fn(async () => ({ ...saved, assignments: [{ assigneeId: assignee.id }], project: { title: 'Capstone' } })), update },
     taskAssignment: { findFirst: vi.fn(async () => ({ assigneeId: assignee.id })), create: assignmentCreate, updateMany: assignmentUpdateMany },
     workflowEvent: { create: workflowCreate },

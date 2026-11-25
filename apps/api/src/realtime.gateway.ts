@@ -79,7 +79,10 @@ export class RealtimeGateway implements OnGatewayInit, OnApplicationShutdown {
     const projects = await this.app.prisma.project.findMany({ where: { groupId }, select: { id: true } });
     for (const project of projects) this.server.in(userRoom).socketsLeave(`project:${project.id}`);
   }
-  publishTaskUpdated(projectId: string, task: unknown) { this.server.to(`project:${projectId}`).emit('task:updated', task); }
+  publishTaskUpdated(projectId: string, task: unknown) {
+    this.server.to(`project:${projectId}`).emit('task:updated', task);
+    this.server.to('administrators').emit('admin:activity', 'projects');
+  }
   publishNotification(userId: string, notification: unknown) { this.server.to(`user:${userId}`).emit('notification:new', notification); }
   handleDisconnect(socket: Socket) { const userId = socket.data.caller?.id; if (!userId) return; const ids = this.presence.get(userId); ids?.delete(socket.id); if (!ids?.size) this.presence.delete(userId); }
   @SubscribeMessage('group:join') groupJoin(@ConnectedSocket() socket: Socket, @MessageBody() groupId: string) { return this.ack(async () => { this.assertAuthenticated(socket); if (!groupId) throw new HttpException({ code: 'VALIDATION_FAILED', message: 'Group ID is required' }, 400); await this.app.member(groupId, socket.data.caller.id); await socket.join(`group:${groupId}`); }); }

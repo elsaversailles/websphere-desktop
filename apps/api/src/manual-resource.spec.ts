@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { resourceLinkSchema } from '@websphere/shared';
+import { identifyResourceLink, resourceLinkSchema } from '@websphere/shared';
 import { AppService } from './app.service.js';
 
 function fixture() {
@@ -67,15 +67,68 @@ describe('manual task file links', () => {
   });
 
   it.each([
-    ['google-docs', 'google'], ['google-forms', 'google'], ['microsoft-word', 'microsoft'], ['microsoft-excel', 'microsoft'],
+    ['google-docs', 'google'], ['microsoft-word', 'microsoft'], ['microsoft-excel', 'microsoft'],
   ] as const)('stores and returns a %s link', async (toolKind, provider) => {
     const { service, prisma } = fixture();
-    const externalUrl = toolKind === 'google-forms' ? 'https://forms.gle/example' : provider === 'microsoft' ? 'https://tenant.sharepoint.com/report' : link.externalUrl;
+    const externalUrl = provider === 'microsoft' ? 'https://tenant.sharepoint.com/report' : link.externalUrl;
     const input = { ...link, provider, toolKind, externalUrl };
     expect(resourceLinkSchema.safeParse(input).success).toBe(true);
     const result = await service.linkTaskResource(caller, 'task-1', input);
     expect(prisma.linkedResource.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ provider, toolKind, externalUrl: input.externalUrl }) }));
     expect(result.externalUrl).toBe(input.externalUrl);
+  });
+
+  it('identifies and names an allowed Figma attachment without an integration', async () => {
+    const { service, prisma } = fixture();
+    const externalUrl = 'https://www.figma.com/design/example';
+    await expect(service.linkTaskResource(caller, 'task-1', {
+      title: 'External link', academicUse: true, externalUrl,
+    })).resolves.toMatchObject({ title: 'Figma', platform: 'Figma' });
+    expect(prisma.linkedResource.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ title: 'Figma', provider: null, connectionId: null, externalUrl }),
+    }));
+  });
+
+  it.each(['https://www.facebook.com/example', 'https://forms.gle/example'])('rejects an unlisted website on both create and edit: %s', async (externalUrl) => {
+    const { service, prisma } = fixture();
+    prisma.linkedResource.findUniqueOrThrow = vi.fn(async () => ({
+      id: 'resource-1', connection: null, task: { id: 'task-1', projectId: 'project-1', assignments: [{ assigneeId: caller.id }] },
+    }));
+    prisma.linkedResource.update = vi.fn();
+    Object.assign(service, { projectMember: vi.fn(async () => ({ role: 'Project_Member' })) });
+    const input = { title: 'Attachment', academicUse: true as const, externalUrl };
+    await expect(service.linkTaskResource(caller, 'task-1', input)).rejects.toMatchObject({ status: 400 });
+    await expect(service.updateLinkedResource(caller, 'resource-1', input)).rejects.toMatchObject({ status: 400 });
+    expect(prisma.linkedResource.create).not.toHaveBeenCalled();
+    expect(prisma.linkedResource.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Google Docs', 'docs.google.com/document/d/example'],
+    ['Google Sheets', 'docs.google.com/spreadsheets/d/example'],
+    ['Google Slides', 'docs.google.com/presentation/d/example'],
+    ['Microsoft Word', 'tenant.sharepoint.com/:w:/s/example'],
+    ['Microsoft Excel', '1drv.ms/x/s!example'],
+    ['Microsoft PowerPoint', 'tenant.sharepoint.com/:p:/s/example'],
+    ['Canva', 'www.canva.com/design/example'],
+    ['Figma', 'www.figma.com/design/example'],
+    ['Adobe Express', 'new.express.adobe.com/page/example'],
+    ['Miro', 'miro.com/app/board/example'],
+    ['Trello', 'trello.com/b/example'],
+    ['Asana', 'app.asana.com/0/example'],
+    ['Notion', 'workspace.notion.site/example'],
+    ['GitHub', 'gist.github.com/example'],
+    ['GitLab', 'gitlab.com/example'],
+    ['Google Colab', 'colab.research.google.com/drive/example'],
+    ['Replit', 'replit.com/@example/project'],
+    ['CodePen', 'codepen.io/example/pen/sample'],
+    ['Google Drive', 'drive.google.com/file/d/example'],
+    ['Zotero', 'www.zotero.org/groups/example'],
+    ['Mendeley', 'www.mendeley.com/catalogue/example'],
+    ['Lucidchart', 'lucid.app/lucidchart/example'],
+    ['Draw.io', 'app.diagrams.net/?libs=general'],
+  ])('identifies %s from an approved URL', (name, url) => {
+    expect(identifyResourceLink(`https://${url}`)).toMatchObject({ name });
   });
 
   it.each(['https://canva.com/design/123', 'https://figma.com/design/123', 'https://docs.google.com.evil.test/document/d/123', 'https://docs.google.com/forms/d/123'])('rejects a mismatched Docs URL before writing: %s', async (externalUrl) => {

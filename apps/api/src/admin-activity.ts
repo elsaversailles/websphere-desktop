@@ -36,3 +36,12 @@ export function activityPoints(ranges: ReturnType<typeof activityRanges>, sample
     return { label: range.label, value };
   });
 }
+
+export function projectActivityCounts(ranges: ReturnType<typeof activityRanges>, projects: Set<string>[], today: string) {
+  const activeToday = projects.filter((dates) => dates.has(today)).length;
+  const points = ranges.map(({ start, end, label }) => ({
+    label,
+    value: projects.filter((dates) => [...dates].some((date) => date >= start && date <= end)).length,
+  }));
+  return { current: activeToday, points };
+}
