@@ -577,7 +577,6 @@ export function TrackerPage({ notify }: { notify: Notice }) {
   const [projectId, changeProjectId] = useState('all');
   const setPlatform = (next: string) => { changePlatform(next); setTrackerPage(1); };
   const setProjectId = (next: string) => { changeProjectId(next); changePlatform('all'); setTrackerPage(1); };
-  const [attachmentMode, setAttachmentMode] = useState<'link' | 'file'>('link');
   const [linkingTaskId, setLinkingTaskId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [editingResourceId, setEditingResourceId] = useState<string | null>(null);
@@ -631,9 +630,8 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     setEditStatus(task.status);
   }
 
-  function openAttachment(mode: 'link' | 'file', taskId = ownTasks[0]?.id) {
+  function openAttachment(taskId = ownTasks[0]?.id) {
     if (!taskId) { notify('You need an assigned task before adding an attachment.'); return; }
-    setAttachmentMode(mode);
     selectAttachmentTask(taskId);
   }
 
@@ -656,14 +654,7 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     const form = new FormData(event.currentTarget);
     setSaving(true);
     try {
-      if (attachmentMode === 'file') {
-        const file = form.get('file');
-        if (!(file instanceof File) || file.size < 1 || file.size > 5 * 1024 * 1024) throw new Error('Choose a file between 1 byte and 5 MB.');
-        if (linkingTask.canUpdateStatus) form.set('status', editStatus);
-        await request(`/tasks/${linkingTask.id}/files`, { method: 'POST', body: form });
-      } else {
-        await request(`/tasks/${linkingTask.id}/resources`, { method: 'POST', body: JSON.stringify({ ...academicLink(form), ...(linkingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
-      }
+      await request(`/tasks/${linkingTask.id}/resources`, { method: 'POST', body: JSON.stringify({ ...academicLink(form), ...(linkingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
       setLinkingTaskId(null);
       await refresh();
       notify('Attachment added to the task.');
@@ -701,16 +692,16 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     } catch (error) { tab.close(); notify(error instanceof Error ? error.message : 'Could not open this file.'); }
   }
 
-  return <section className="sp on tracker-page"><Head title="Task Progress Tracker" action={<div className="tracker-head-actions"><button type="button" className="btn-o btn-sm" onClick={() => openAttachment('link')}>⌕ Attach File Link</button><button type="button" className="btn-o btn-sm" onClick={() => openAttachment('file')}>Upload File</button><button className="btn btn-sm" disabled={syncing} onClick={() => void syncFiles()}>{syncing ? 'Syncing…' : '↻ Sync Files'}</button></div>} />
+  return <section className="sp on tracker-page"><Head title="Task Progress Tracker" action={<div className="tracker-head-actions"><button type="button" className="btn-o btn-sm" onClick={() => openAttachment()}>⌕ Attach File Link</button><button className="btn btn-sm" disabled={syncing} onClick={() => void syncFiles()}>{syncing ? 'Syncing…' : '↻ Sync Files'}</button></div>} />
     <label className="tracker-project-picker"><span>Task progress for</span><select className="legacy-select" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="all">All projects</option>{data?.projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
     <div className="tracker-kpis"><TrackerKpi icon="▤" value={data?.stats.fileCount ?? 0} label="Total Files" /><TrackerKpi icon="◷" value={data?.stats.statuses.ongoing ?? 0} label="In Progress" tone="yel" /><TrackerKpi icon="✓" value={complete} label="Completed" tone="grn" /><TrackerKpi icon="▥" value={`${average}%`} label="Avg. Progress" /></div>
     <div className="tracker-toolbar"><div className="tracker-filter"><span>Filter:</span><div>{trackerFilters.map((value) => <button type="button" className={filter === value ? 'on' : ''} key={value} onClick={() => setFilter(value)}>{trackerFilterLabel[value]}</button>)}</div></div><label className="tracker-platform">Platform:<span className="tracker-selected-platform">{platform !== 'all' ? <ToolLogo provider={platform} size="xs" /> : null}<select value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">All Platforms</option>{trackerPlatforms.map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></span></label></div>
-    {data === null ? <div className="cc"><Empty>Loading your tracker…</Empty></div> : projectSections.length ? <div className="tracker-project-sections">{projectSections.map((section) => <section className="tracker-project-section" key={section.title}><div className="tracker-project-heading"><span>Project</span><h3>{section.title}</h3></div><div className="tracker-resource-grid">{section.cards.map(({ task, resource }) => <TrackerResourceCard key={resource?.id ?? task.id} task={task} resource={resource} onEdit={() => { if (!resource) return; setEditingTaskId(task.id); setEditingResourceId(resource.id); setEditStatus(task.status); }} onOpen={() => resource && void openResource(resource)} onAttach={() => openAttachment('link', task.id)} />)}</div></section>)}</div> : <div className="cc"><Empty>{projectTasks.length ? 'No linked files match the selected filters.' : 'No tasks are available for the selected project.'}</Empty></div>}
+    {data === null ? <div className="cc"><Empty>Loading your tracker…</Empty></div> : projectSections.length ? <div className="tracker-project-sections">{projectSections.map((section) => <section className="tracker-project-section" key={section.title}><div className="tracker-project-heading"><span>Project</span><h3>{section.title}</h3></div><div className="tracker-resource-grid">{section.cards.map(({ task, resource }) => <TrackerResourceCard key={resource?.id ?? task.id} task={task} resource={resource} onEdit={() => { if (!resource) return; setEditingTaskId(task.id); setEditingResourceId(resource.id); setEditStatus(task.status); }} onOpen={() => resource && void openResource(resource)} onAttach={() => openAttachment(task.id)} />)}</div></section>)}</div> : <div className="cc"><Empty>{projectTasks.length ? 'No linked files match the selected filters.' : 'No tasks are available for the selected project.'}</Empty></div>}
     {data ? <ListPager page={trackerPage} totalPages={data.totalPages} setPage={setTrackerPage} /> : null}
     <div className="tracker-lower-grid"><section className="cc tracker-activity"><div className="cc-head"><h3>Recent File Activity</h3><span>Latest updates</span></div>{activity.length ? <div className="tracker-activity-list">{activity.slice(0, 8).map((activity) => <div className="tracker-activity-row" key={activity.id}><TrackerActivityIcon activity={activity} /><div><strong>{activityLabel(activity)}</strong><span>{relativeDate(activity.createdAt)}</span></div></div>)}</div> : <Empty>Linked-file and task updates will appear here.</Empty>}</section><section className="cc tracker-collaborators"><div className="cc-head"><h3>Project Collaborators</h3><span>{collaborators.length || '—'} members</span></div>{collaborators.length ? <div className="tracker-collaborator-list">{collaborators.map((member) => <div className="tracker-collaborator" key={member.id}><span className={`tracker-collaborator-avatar tone-${avatarTone(member.id)}`}>{member.avatarUrl ? <img src={member.avatarUrl} alt="" /> : initials(member.fullName)}</span><strong>{member.fullName}</strong></div>)}</div> : <Empty>Collaborators appear when you have assigned project tasks.</Empty>}</section></div>
-    {linkingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLinkingTaskId(null); }}><div className="modal-box tracker-link-modal" role="dialog" aria-modal="true" aria-label={attachmentMode === 'link' ? 'Attach file link' : 'Upload file'}><div className="modal-ttl"><span>Add Attachment</span><button type="button" className="modal-close" aria-label="Close" onClick={() => setLinkingTaskId(null)}>×</button></div><form onSubmit={linkFile}>
+    {linkingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLinkingTaskId(null); }}><div className="modal-box tracker-link-modal" role="dialog" aria-modal="true" aria-label="Attach file link"><div className="modal-ttl"><span>Add Attachment</span><button type="button" className="modal-close" aria-label="Close" onClick={() => setLinkingTaskId(null)}>×</button></div><form onSubmit={linkFile}>
       <label className="lbl" htmlFor="tracker-link-task">Task</label><select className="ifield" id="tracker-link-task" value={linkingTask.id} onChange={(event) => selectAttachmentTask(event.target.value)}>{ownTasks.map((task) => <option key={task.id} value={task.id}>{task.project.title} — {task.title}</option>)}</select>
-      {attachmentMode === 'link' ? <LinkFields /> : <label className="lbl">Choose file (up to 5 MB)<input className="ifield" name="file" type="file" required /></label>}
+      <LinkFields />
       <label className="lbl">Assigned member</label><div className="tracker-auto-progress-note">{linkingTask.assignees.map((member) => member.fullName).join(', ') || 'Unassigned'}</div>
       <label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!linkingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div>
       <div className="modal-acts"><button type="button" className="btn-o" onClick={() => setLinkingTaskId(null)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Attaching…' : 'Attach'}</button></div></form></div></div> : null}
