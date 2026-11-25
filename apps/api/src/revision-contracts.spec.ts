@@ -154,7 +154,7 @@ describe('bounded project views', () => {
   });
 
   it('counts distinct active projects with changes in each admin chart period', async () => {
-    const oldProject = { createdAt: new Date('2026-01-01T00:00:00Z'), activityDays: [], tasks: [], workflow: [], linkedResources: [], members: [] };
+    const oldProject = { createdAt: new Date('2026-01-01T00:00:00Z'), activityDays: [], tasks: [], workflow: [], linkedResources: [] };
     const timestamp = (value: string) => ({ createdAt: new Date(value) });
     const findMany = vi.fn().mockResolvedValue([
       {
@@ -182,10 +182,42 @@ describe('bounded project views', () => {
       expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({ status: 'active' }),
       }));
+      const query = findMany.mock.calls[0][0];
+      expect(query.select).not.toHaveProperty('members');
+      expect(query.where.OR.some((filter: object) => 'members' in filter)).toBe(false);
     } finally {
       vi.useRealTimers();
       vi.unstubAllEnvs();
     }
+  });
+
+  it('records a new project membership as activity and leaves repeat requests idempotent', async () => {
+    const membership = { id: 'membership', userId: 'member-2', projectId: 'project-1', role: 'Project_Member' };
+    const createMany = vi.fn().mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    const markActivity = vi.fn().mockResolvedValue({ count: 1 });
+    const tx = {
+      projectMember: { createMany, findUniqueOrThrow: vi.fn().mockResolvedValue(membership) },
+      projectActivityDay: { createMany: markActivity },
+    };
+    const emitAdminActivity = vi.fn();
+    const service = Object.assign(Object.create(AppService.prototype), {
+      prisma: {
+        project: { findUniqueOrThrow: vi.fn().mockResolvedValue({ groupId: 'group-1' }) },
+        $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+      },
+      projectMember: vi.fn().mockResolvedValue({ role: 'Project_Leader' }),
+      member: vi.fn().mockResolvedValue({ role: 'Project_Member' }),
+      events: { emitAdminActivity },
+    }) as AppService;
+    const leader = { id: 'leader', role: 'Project_Leader' as const, tv: 0 };
+    await expect(service.addProjectMember(leader, 'project-1', 'member-2')).resolves.toEqual(membership);
+    await expect(service.addProjectMember(leader, 'project-1', 'member-2')).resolves.toEqual(membership);
+    expect(markActivity).toHaveBeenCalledTimes(1);
+    expect(markActivity).toHaveBeenCalledWith({
+      data: { projectId: 'project-1', date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) },
+      skipDuplicates: true,
+    });
+    expect(emitAdminActivity.mock.calls).toEqual([['projects']]);
   });
 
   it('detects allowed URL services and rejects unlisted and invalid URLs', () => {

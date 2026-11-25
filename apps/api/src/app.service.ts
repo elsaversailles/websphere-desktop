@@ -1013,8 +1013,16 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } });
     if (!project.groupId) fail('INVALID_OPERATION', 'Connect this independent project to a group before adding members.', 400);
     const groupMembership = await this.member(project.groupId, userId);
-    const membership = await this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: groupMembership.role } });
-    this.adminActivityChanged('projects');
+    const { membership, added } = await this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.projectMember.createMany({
+        data: { projectId, userId, role: groupMembership.role },
+        skipDuplicates: true,
+      });
+      if (count) await this.recordProjectChange(tx, projectId);
+      const membership = await tx.projectMember.findUniqueOrThrow({ where: { projectId_userId: { projectId, userId } } });
+      return { membership, added: count > 0 };
+    });
+    if (added) this.adminActivityChanged('projects');
     return membership;
   }
   async updateResponsibility(caller: Caller, projectId: string, userId: string, responsibility: string) {
@@ -2443,16 +2451,16 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       where: { status: 'active', OR: [
         recent, { activityDays: { some: { date: dateFilter } } },
         { tasks: { some: recent } }, { workflow: { some: recent } },
-        { linkedResources: { some: recent } }, { members: { some: recent } },
+        { linkedResources: { some: recent } },
       ] },
       select: {
         createdAt: true, activityDays: { where: { date: dateFilter }, select: { date: true } },
-        tasks: timestamp, workflow: timestamp, linkedResources: timestamp, members: timestamp,
+        tasks: timestamp, workflow: timestamp, linkedResources: timestamp,
       },
     });
     const dates = projects.map((project) => new Set([
       ...project.activityDays.map(({ date }) => date),
-      ...[project, ...project.tasks, ...project.workflow, ...project.linkedResources, ...project.members]
+      ...[project, ...project.tasks, ...project.workflow, ...project.linkedResources]
         .map(({ createdAt }) => reportingDate(createdAt)),
     ]));
     return projectActivityCounts(ranges, dates, today);
