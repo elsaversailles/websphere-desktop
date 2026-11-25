@@ -153,8 +153,8 @@ describe('bounded project views', () => {
     expect(activityPoints(ranges, [{ date: '2026-11-22', count: 12 }, { date: '2026-11-24', count: 13 }]).map((point) => point.value)).toEqual([null, null, null, null, 12, 12, 13]);
   });
 
-  it('counts distinct active projects with changes in each admin chart period', async () => {
-    const oldProject = { createdAt: new Date('2026-01-01T00:00:00Z'), activityDays: [], tasks: [], workflow: [], linkedResources: [], members: [] };
+  it('reports the total active projects above distinct changes in each chart period', async () => {
+    const oldProject = { createdAt: new Date('2026-01-01T00:00:00Z'), activityDays: [], tasks: [], workflow: [], linkedResources: [] };
     const timestamp = (value: string) => ({ createdAt: new Date(value) });
     const findMany = vi.fn().mockResolvedValue([
       {
@@ -166,8 +166,9 @@ describe('bounded project views', () => {
       { ...oldProject, linkedResources: [timestamp('2026-11-24T16:20:00Z')] },
       oldProject,
     ]);
+    const count = vi.fn().mockResolvedValue(5);
     const service = Object.assign(Object.create(AppService.prototype), {
-      prisma: { project: { findMany } },
+      prisma: { project: { count, findMany } },
     }) as AppService;
     const admin = { id: 'admin', role: 'Administrator' as const, tv: 0 };
     vi.stubEnv('APP_TIME_ZONE', 'Asia/Manila');
@@ -175,17 +176,51 @@ describe('bounded project views', () => {
     vi.setSystemTime(new Date('2026-11-25T12:00:00Z'));
     try {
       const weekly = await service.adminActivity(admin, 'projects', 'weekly');
-      expect(weekly.current).toBe(2);
+      expect(weekly.current).toBe(5);
       expect(weekly.points.map(({ value }) => value)).toEqual([0, 0, 0, 0, 0, 1, 2]);
       const sixMonths = await service.adminActivity(admin, 'projects', 'six-months');
+      expect(sixMonths.current).toBe(5);
       expect(sixMonths.points.at(-1)).toEqual({ label: 'Nov', value: 2 });
+      expect(count).toHaveBeenCalledWith({ where: { status: 'active' } });
       expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({ status: 'active' }),
       }));
+      const query = findMany.mock.calls[0][0];
+      expect(query.select).not.toHaveProperty('members');
+      expect(query.where.OR.some((filter: object) => 'members' in filter)).toBe(false);
     } finally {
       vi.useRealTimers();
       vi.unstubAllEnvs();
     }
+  });
+
+  it('records a new project membership as activity and leaves repeat requests idempotent', async () => {
+    const membership = { id: 'membership', userId: 'member-2', projectId: 'project-1', role: 'Project_Member' };
+    const createMany = vi.fn().mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    const markActivity = vi.fn().mockResolvedValue({ count: 1 });
+    const tx = {
+      projectMember: { createMany, findUniqueOrThrow: vi.fn().mockResolvedValue(membership) },
+      projectActivityDay: { createMany: markActivity },
+    };
+    const emitAdminActivity = vi.fn();
+    const service = Object.assign(Object.create(AppService.prototype), {
+      prisma: {
+        project: { findUniqueOrThrow: vi.fn().mockResolvedValue({ groupId: 'group-1' }) },
+        $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+      },
+      projectMember: vi.fn().mockResolvedValue({ role: 'Project_Leader' }),
+      member: vi.fn().mockResolvedValue({ role: 'Project_Member' }),
+      events: { emitAdminActivity },
+    }) as AppService;
+    const leader = { id: 'leader', role: 'Project_Leader' as const, tv: 0 };
+    await expect(service.addProjectMember(leader, 'project-1', 'member-2')).resolves.toEqual(membership);
+    await expect(service.addProjectMember(leader, 'project-1', 'member-2')).resolves.toEqual(membership);
+    expect(markActivity).toHaveBeenCalledTimes(1);
+    expect(markActivity).toHaveBeenCalledWith({
+      data: { projectId: 'project-1', date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) },
+      skipDuplicates: true,
+    });
+    expect(emitAdminActivity.mock.calls).toEqual([['projects']]);
   });
 
   it('detects allowed URL services and rejects unlisted and invalid URLs', () => {
