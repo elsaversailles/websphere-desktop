@@ -3,22 +3,20 @@ import { useEffect, useState } from 'react';
 export type ListPage<T> = { items: T[]; page: number; totalPages: number; total: number };
 type Option = { value: string; label: string };
 
-export function useListFilters(defaultSort = 'recent', statusParam = 'status') {
+export function useListFilters(sort = 'recent', statusParam = 'status') {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [term, setTerm] = useState('');
   const [status, setStatus] = useState('');
-  const [sort, setSort] = useState(defaultSort);
   useEffect(() => {
     const timer = window.setTimeout(() => { setTerm(search.trim()); setPage(1); }, 260);
     return () => window.clearTimeout(timer);
   }, [search]);
   const query = new URLSearchParams({ page: String(page), sort, ...(term ? { q: term } : {}), ...(status ? { [statusParam]: status } : {}) }).toString();
   return {
-    page, setPage, search, setSearch, status, sort, query,
+    page, setPage, search, setSearch, status, query,
     setStatus(value: string) { setStatus(value); setPage(1); },
-    setSort(value: string) { setSort(value); setPage(1); },
-    reset() { setSearch(''); setTerm(''); setStatus(''); setSort(defaultSort); setPage(1); },
+    reset() { setSearch(''); setTerm(''); setStatus(''); setPage(1); },
   };
 }
 
@@ -27,9 +25,6 @@ export function ListFilters({ filters, statuses, placeholder }: { filters: Retur
     <input type="search" className="ifield" value={filters.search} placeholder={placeholder} aria-label={placeholder} onChange={(event) => filters.setSearch(event.target.value)} />
     <select className="legacy-select" value={filters.status} aria-label="Filter by status" onChange={(event) => filters.setStatus(event.target.value)}>
       <option value="">All statuses</option>{statuses.map((status) => <option key={status.value} value={status.value}>{status.label}</option>)}
-    </select>
-    <select className="legacy-select" value={filters.sort} aria-label="Sort results" onChange={(event) => filters.setSort(event.target.value)}>
-      <option value="recent">Recently created</option><option value="deadline">Due date</option><option value="title">Title</option>
     </select>
     <button className="btn-o btn-sm" type="button" onClick={filters.reset}>Reset filters</button>
   </div>;
