@@ -6,13 +6,14 @@ const leader = { id: 'leader-1', role: 'Project_Leader' as const, tv: 0 };
 function deletionService() {
   const calls: string[] = [];
   const model = (name: string) => ({
+    createMany: vi.fn(async () => { calls.push(`${name}.createMany`); }),
     deleteMany: vi.fn(async () => { calls.push(`${name}.deleteMany`); }),
     updateMany: vi.fn(async () => { calls.push(`${name}.updateMany`); }),
     delete: vi.fn(async () => { calls.push(`${name}.delete`); }),
     findMany: vi.fn(async () => [{ id: 'task-1' }]),
     findUnique: vi.fn(async () => ({ projectId: 'project-1' })),
   });
-  const tx = Object.fromEntries(['notification', 'taskDependency', 'taskAssignment', 'taskComment', 'embedding', 'linkedResource', 'workflowEvent', 'task', 'calendarEvent', 'analyticsSnapshot', 'projectMember', 'project'].map((name) => [name, model(name)]));
+  const tx = Object.fromEntries(['notification', 'taskDependency', 'taskAssignment', 'taskComment', 'embedding', 'linkedResource', 'workflowEvent', 'task', 'calendarEvent', 'analyticsSnapshot', 'projectMember', 'project', 'projectActivityDay'].map((name) => [name, model(name)]));
   const prisma = { ...tx, $transaction: vi.fn(async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx)) };
   const projectMember = vi.fn().mockResolvedValue({ role: 'Project_Leader' });
   const enqueueAnalyticsRecompute = vi.fn().mockResolvedValue(undefined);
@@ -41,7 +42,7 @@ describe('project and task deletion', () => {
     const { service, projectMember, enqueueAnalyticsRecompute, calls } = deletionService();
     await service.deleteTask(leader, 'task-1');
     expect(projectMember).toHaveBeenCalledWith('project-1', leader.id, true);
-    expect(calls.at(-1)).toBe('task.delete');
+    expect(calls.slice(-2)).toEqual(['task.delete', 'projectActivityDay.createMany']);
     expect(enqueueAnalyticsRecompute).toHaveBeenCalledWith('project-1');
   });
 });

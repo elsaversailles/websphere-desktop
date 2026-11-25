@@ -153,9 +153,44 @@ describe('bounded project views', () => {
     expect(activityPoints(ranges, [{ date: '2026-11-22', count: 12 }, { date: '2026-11-24', count: 13 }]).map((point) => point.value)).toEqual([null, null, null, null, 12, 12, 13]);
   });
 
-  it('detects URL services from the hostname and safely labels unknown HTTPS sites', () => {
+  it('counts distinct active projects with changes in each admin chart period', async () => {
+    const oldProject = { createdAt: new Date('2026-01-01T00:00:00Z'), activityDays: [], tasks: [], workflow: [], linkedResources: [], members: [] };
+    const timestamp = (value: string) => ({ createdAt: new Date(value) });
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        ...oldProject,
+        activityDays: [{ date: '2026-11-24' }, { date: '2026-11-25' }],
+        tasks: [timestamp('2026-11-24T16:00:00Z')],
+        workflow: [timestamp('2026-11-24T15:59:59Z'), timestamp('2026-11-24T16:10:00Z')],
+      },
+      { ...oldProject, linkedResources: [timestamp('2026-11-24T16:20:00Z')] },
+      oldProject,
+    ]);
+    const service = Object.assign(Object.create(AppService.prototype), {
+      prisma: { project: { findMany } },
+    }) as AppService;
+    const admin = { id: 'admin', role: 'Administrator' as const, tv: 0 };
+    vi.stubEnv('APP_TIME_ZONE', 'Asia/Manila');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-25T12:00:00Z'));
+    try {
+      const weekly = await service.adminActivity(admin, 'projects', 'weekly');
+      expect(weekly.current).toBe(2);
+      expect(weekly.points.map(({ value }) => value)).toEqual([0, 0, 0, 0, 0, 1, 2]);
+      const sixMonths = await service.adminActivity(admin, 'projects', 'six-months');
+      expect(sixMonths.points.at(-1)).toEqual({ label: 'Nov', value: 2 });
+      expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ status: 'active' }),
+      }));
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('detects allowed URL services and rejects unlisted and invalid URLs', () => {
     expect(identifyResourceLink('https://www.canva.com/design/abc')).toMatchObject({ provider: 'canva' });
-    expect(identifyResourceLink('https://canva.com.example.edu/?next=https://canva.com')).toMatchObject({ provider: null });
+    expect(identifyResourceLink('https://canva.com.example.edu/?next=https://canva.com')).toBeNull();
     expect(identifyResourceLink('https://canva.com@elsewhere.example.edu/')).toBeNull();
     expect(identifyResourceLink('javascript:alert(1)')).toBeNull();
   });

@@ -5,6 +5,7 @@ const caller = { id: 'assignee', role: 'Project_Member', tv: 0 } as const;
 function fixture(hasResource: boolean, status = 'for_review') {
   const task = { id: 'task-1', projectId: 'project-1', status, startedAt: null, assignments: [{ assigneeId: caller.id }], project: { title: 'Project' } };
   const prisma: any = {
+    projectActivityDay: { createMany: vi.fn(async () => ({ count: 1 })) },
     task: { findUniqueOrThrow: vi.fn(async () => task), update: vi.fn(async ({ data }) => ({ ...task, ...data })) },
     taskAssignment: { findFirst: vi.fn(async () => task.assignments[0]) },
     linkedResource: { findFirst: vi.fn(async () => hasResource ? { id: 'resource-1' } : null) },

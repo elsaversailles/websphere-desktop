@@ -8,6 +8,7 @@ function fixture() {
   const task = { ...project, id: 'task-1', projectId: project.id, status: 'pending', assignments: [], project: { title: project.title } };
   const event = { id: 'event-1', ownerId: caller.id, projectId: null, title: 'Meeting', type: 'meeting', startAt: new Date('2026-11-10T02:00:00Z'), endAt: new Date('2026-11-10T03:00:00Z') };
   const prisma: any = {
+    projectActivityDay: { createMany: vi.fn(async () => ({ count: 1 })) },
     project: { create: vi.fn(async ({ data }) => ({ id: project.id, ...data })), findUniqueOrThrow: vi.fn(async () => project), update: vi.fn(async ({ data }) => ({ ...project, ...data })) },
     task: { create: vi.fn(async ({ data }) => ({ id: task.id, ...data })), findUniqueOrThrow: vi.fn(async () => task), update: vi.fn(async ({ data }) => ({ ...task, ...data })) },
     calendarEvent: { create: vi.fn(async ({ data }) => ({ id: event.id, ...data })), findUniqueOrThrow: vi.fn(async () => event), update: vi.fn(async ({ data }) => ({ ...event, ...data })) },

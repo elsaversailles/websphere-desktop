@@ -288,4 +288,4 @@ export const apiError = (code: string, message: string, fields?: Record<string, 
 
 export { resourceLinkError } from './resource-link.js';
 
-export { identifyResourceLink } from './resource-link.js';
+export { identifyResourceLink, isHttpsResourceLink, unsupportedResourceLinkMessage } from './resource-link.js';

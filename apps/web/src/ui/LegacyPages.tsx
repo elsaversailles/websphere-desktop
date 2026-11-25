@@ -1,7 +1,7 @@
 import { ListFilters, ListPager, useListFilters, type ListPage } from './ListFilters';
 import { startGoogle } from '../googleAuth';
 import { workspaceSubscription } from './workspaceSocket';
-import { identifyResourceLink, schedulingDay, shiftWorkflowPeriod, workflowPeriods, workflowPeriodStart, type WorkflowPeriod } from '@websphere/shared';
+import { identifyResourceLink, unsupportedResourceLinkMessage, schedulingDay, shiftWorkflowPeriod, workflowPeriods, workflowPeriodStart, type WorkflowPeriod } from '@websphere/shared';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiRequestError, apiUrl, getAccessToken, request, type User } from '../api';
 import { disablePush, enablePush, pushStatus as getPushStatus, type PushStatus } from '../push';
@@ -341,8 +341,9 @@ export function ProjectsAnalyticsPage({ kind, notify }: { kind: 'workflow' | 'pr
     const rangeCaption = selectedPeriod === currentPeriod ? (period === 'monthly' ? 'Month to date' : currentLabel) : null;
     return <section className="sp on workflow-analytics">
       <header className="workflow-header">
-        <div><div className="workflow-heading"><h2>Workflow Analytics</h2>{picker}</div><p>{periodName}{rangeCaption ? ` · ${rangeCaption}` : ''}</p></div>
+        <div><h2>Workflow Analytics</h2><p>{periodName}{rangeCaption ? ` · ${rangeCaption}` : ''}</p></div>
         <div className="workflow-periods">
+          {picker}
           <div className="workflow-period-buttons" role="group" aria-label="Reporting period">
             {workflowPeriods.map((option) => <button key={option} type="button" aria-pressed={period === option} onClick={() => selectPeriod(option, reportDate === 'today' ? today : reportDate)}>{periodLabel(option)}</button>)}
           </div>
@@ -544,21 +545,27 @@ type TrackerData = { page: number; totalPages: number; stats: { fileCount: numbe
 type TrackerCard = { task: TrackerTask; resource: TrackerResource | null };
 function LinkFields({ resource }: { resource?: TrackerResource }) {
   const [url, setUrl] = useState(resource?.externalUrl ?? '');
-  const detected = url ? identifyResourceLink(url) : null;
+  const detected = identifyResourceLink(url.trim());
   return <>
     <label className="lbl" htmlFor="tracker-link-url">External URL</label>
     <input className="ifield" id="tracker-link-url" name="externalUrl" type="url" required value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://…" />
-    {detected ? <p className="tracker-auto-progress-note"><ToolLogo provider={detected.provider} name={detected.name} size="xs" /> {detected.name}</p> : null}
+    <div aria-live="polite">
+      {detected ? <p className="tracker-auto-progress-note"><ToolLogo provider={detected.provider} name={detected.name} size="xs" /> {detected.name}</p> :
+        url.trim() ? <p className="auth-feedback error">{unsupportedResourceLinkMessage}</p> : null}
+    </div>
     <label className="auth-consent"><input name="academicUse" type="checkbox" required /> This link is for academic project work.</label>
   </>;
 }
 
-function academicLink(form: FormData, existingTitle?: string) {
+function academicLink(form: FormData, existingResource?: TrackerResource) {
   const externalUrl = String(form.get('externalUrl') ?? '').trim();
   const detected = identifyResourceLink(externalUrl);
-  if (!detected) throw new Error('Use an HTTPS link without embedded credentials.');
+  if (!detected) throw new Error(unsupportedResourceLinkMessage);
   if (!form.has('academicUse')) throw new Error('Confirm the link is for academic project work.');
-  return { title: existingTitle ?? detected.name, externalUrl, academicUse: true };
+  const existingName = existingResource && identifyResourceLink(existingResource.externalUrl, existingResource.toolKind)?.name;
+  const existingTitle = existingResource?.title;
+  const customTitle = existingTitle && existingTitle !== existingName && !/^external link$/i.test(existingTitle);
+  return { title: customTitle ? existingTitle : detected.name, externalUrl, academicUse: true };
 }
 
 export function TrackerPage({ notify }: { notify: Notice }) {
@@ -617,11 +624,17 @@ export function TrackerPage({ notify }: { notify: Notice }) {
   const linkingTask = ownTasks.find((task) => task.id === linkingTaskId) ?? null;
   const editingTask = tasks.find((task) => task.id === editingTaskId) ?? null;
   const editingResource = editingTask?.resources.find((resource) => resource.id === editingResourceId) ?? null;
-  function beginLink(taskId: string) {
+  function selectAttachmentTask(taskId: string) {
     const task = ownTasks.find((item) => item.id === taskId);
     if (!task) return;
-    setLinkingTaskId(taskId);
-    setEditStatus(task?.status ?? 'pending');
+    setLinkingTaskId(task.id);
+    setEditStatus(task.status);
+  }
+
+  function openAttachment(mode: 'link' | 'file', taskId = ownTasks[0]?.id) {
+    if (!taskId) { notify('You need an assigned task before adding an attachment.'); return; }
+    setAttachmentMode(mode);
+    selectAttachmentTask(taskId);
   }
 
   async function saveExternalFile(event: React.FormEvent<HTMLFormElement>) {
@@ -630,7 +643,7 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     const form = new FormData(event.currentTarget);
     setSaving(true);
     try {
-      await request(`/resources/${editingResource.id}`, { method: 'PATCH', body: JSON.stringify({ ...academicLink(form, editingResource.title), ...(editingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
+      await request(`/resources/${editingResource.id}`, { method: 'PATCH', body: JSON.stringify({ ...academicLink(form, editingResource), ...(editingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
       await refresh();
       setEditingTaskId(null); setEditingResourceId(null);
       notify('External file link updated.');
@@ -688,17 +701,15 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     } catch (error) { tab.close(); notify(error instanceof Error ? error.message : 'Could not open this file.'); }
   }
 
-  return <section className="sp on tracker-page"><Head title="Task Progress Tracker" action={<div className="tracker-head-actions"><button className="btn-o btn-sm" onClick={() => { if (!ownTasks.length) notify('You need an assigned task before attaching a file.'); else beginLink(ownTasks[0].id); }}>⌕ Attach File Link</button><button className="btn btn-sm" disabled={syncing} onClick={() => void syncFiles()}>{syncing ? 'Syncing…' : '↻ Sync Files'}</button></div>} />
+  return <section className="sp on tracker-page"><Head title="Task Progress Tracker" action={<div className="tracker-head-actions"><button type="button" className="btn-o btn-sm" onClick={() => openAttachment('link')}>⌕ Attach File Link</button><button type="button" className="btn-o btn-sm" onClick={() => openAttachment('file')}>Upload File</button><button className="btn btn-sm" disabled={syncing} onClick={() => void syncFiles()}>{syncing ? 'Syncing…' : '↻ Sync Files'}</button></div>} />
     <label className="tracker-project-picker"><span>Task progress for</span><select className="legacy-select" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="all">All projects</option>{data?.projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
     <div className="tracker-kpis"><TrackerKpi icon="▤" value={data?.stats.fileCount ?? 0} label="Total Files" /><TrackerKpi icon="◷" value={data?.stats.statuses.ongoing ?? 0} label="In Progress" tone="yel" /><TrackerKpi icon="✓" value={complete} label="Completed" tone="grn" /><TrackerKpi icon="▥" value={`${average}%`} label="Avg. Progress" /></div>
     <div className="tracker-toolbar"><div className="tracker-filter"><span>Filter:</span><div>{trackerFilters.map((value) => <button type="button" className={filter === value ? 'on' : ''} key={value} onClick={() => setFilter(value)}>{trackerFilterLabel[value]}</button>)}</div></div><label className="tracker-platform">Platform:<span className="tracker-selected-platform">{platform !== 'all' ? <ToolLogo provider={platform} size="xs" /> : null}<select value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">All Platforms</option>{trackerPlatforms.map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></span></label></div>
-    {data === null ? <div className="cc"><Empty>Loading your tracker…</Empty></div> : projectSections.length ? <div className="tracker-project-sections">{projectSections.map((section) => <section className="tracker-project-section" key={section.title}><div className="tracker-project-heading"><span>Project</span><h3>{section.title}</h3></div><div className="tracker-resource-grid">{section.cards.map(({ task, resource }) => <TrackerResourceCard key={resource?.id ?? task.id} task={task} resource={resource} onEdit={() => { if (!resource) return; setEditingTaskId(task.id); setEditingResourceId(resource.id); setEditStatus(task.status); }} onOpen={() => resource && void openResource(resource)} onAttach={() => beginLink(task.id)} />)}</div></section>)}</div> : <div className="cc"><Empty>{projectTasks.length ? 'No linked files match the selected filters.' : 'No tasks are available for the selected project.'}</Empty></div>}
+    {data === null ? <div className="cc"><Empty>Loading your tracker…</Empty></div> : projectSections.length ? <div className="tracker-project-sections">{projectSections.map((section) => <section className="tracker-project-section" key={section.title}><div className="tracker-project-heading"><span>Project</span><h3>{section.title}</h3></div><div className="tracker-resource-grid">{section.cards.map(({ task, resource }) => <TrackerResourceCard key={resource?.id ?? task.id} task={task} resource={resource} onEdit={() => { if (!resource) return; setEditingTaskId(task.id); setEditingResourceId(resource.id); setEditStatus(task.status); }} onOpen={() => resource && void openResource(resource)} onAttach={() => openAttachment('link', task.id)} />)}</div></section>)}</div> : <div className="cc"><Empty>{projectTasks.length ? 'No linked files match the selected filters.' : 'No tasks are available for the selected project.'}</Empty></div>}
     {data ? <ListPager page={trackerPage} totalPages={data.totalPages} setPage={setTrackerPage} /> : null}
     <div className="tracker-lower-grid"><section className="cc tracker-activity"><div className="cc-head"><h3>Recent File Activity</h3><span>Latest updates</span></div>{activity.length ? <div className="tracker-activity-list">{activity.slice(0, 8).map((activity) => <div className="tracker-activity-row" key={activity.id}><TrackerActivityIcon activity={activity} /><div><strong>{activityLabel(activity)}</strong><span>{relativeDate(activity.createdAt)}</span></div></div>)}</div> : <Empty>Linked-file and task updates will appear here.</Empty>}</section><section className="cc tracker-collaborators"><div className="cc-head"><h3>Project Collaborators</h3><span>{collaborators.length || '—'} members</span></div>{collaborators.length ? <div className="tracker-collaborator-list">{collaborators.map((member) => <div className="tracker-collaborator" key={member.id}><span className={`tracker-collaborator-avatar tone-${avatarTone(member.id)}`}>{member.avatarUrl ? <img src={member.avatarUrl} alt="" /> : initials(member.fullName)}</span><strong>{member.fullName}</strong></div>)}</div> : <Empty>Collaborators appear when you have assigned project tasks.</Empty>}</section></div>
-    {linkingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLinkingTaskId(null); }}><div className="modal-box tracker-link-modal" role="dialog" aria-modal="true" aria-label="Attach file link"><div className="modal-ttl"><span>Add Attachment</span><button type="button" className="modal-close" aria-label="Close" onClick={() => setLinkingTaskId(null)}>×</button></div><form onSubmit={linkFile}>
-      <label className="lbl" htmlFor="tracker-link-task">Task</label><select className="ifield" id="tracker-link-task" value={linkingTask.id} onChange={(event) => beginLink(event.target.value)}>{ownTasks.map((task) => <option key={task.id} value={task.id}>{task.project.title} — {task.title}</option>)}</select>
-      <label className="lbl" htmlFor="tracker-attachment-mode">Attachment type</label>
-      <select className="ifield" id="tracker-attachment-mode" value={attachmentMode} onChange={(event) => setAttachmentMode(event.target.value as 'link' | 'file')}><option value="link">External link</option><option value="file">Upload file</option></select>
+    {linkingTask ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget) setLinkingTaskId(null); }}><div className="modal-box tracker-link-modal" role="dialog" aria-modal="true" aria-label={attachmentMode === 'link' ? 'Attach file link' : 'Upload file'}><div className="modal-ttl"><span>Add Attachment</span><button type="button" className="modal-close" aria-label="Close" onClick={() => setLinkingTaskId(null)}>×</button></div><form onSubmit={linkFile}>
+      <label className="lbl" htmlFor="tracker-link-task">Task</label><select className="ifield" id="tracker-link-task" value={linkingTask.id} onChange={(event) => selectAttachmentTask(event.target.value)}>{ownTasks.map((task) => <option key={task.id} value={task.id}>{task.project.title} — {task.title}</option>)}</select>
       {attachmentMode === 'link' ? <LinkFields /> : <label className="lbl">Choose file (up to 5 MB)<input className="ifield" name="file" type="file" required /></label>}
       <label className="lbl">Assigned member</label><div className="tracker-auto-progress-note">{linkingTask.assignees.map((member) => member.fullName).join(', ') || 'Unassigned'}</div>
       <label className="lbl">Status</label><div className="tracker-status-options">{(['pending', 'ongoing', 'for_review', 'completed'] as const).map((status) => <button type="button" className={editStatus === status ? 'selected' : ''} disabled={!linkingTask.canUpdateStatus} key={status} onClick={() => setEditStatus(status)}>{trackerFilterLabel[status]}</button>)}</div>
@@ -907,9 +918,17 @@ function TeamPerformanceCard({ members, showCurrent }: { members: WorkflowMember
   </div>;
 }
 function BottleneckAnalysis({ stages }: { stages: Array<{ taskId: string; stage: string; averageDays: number | null; expectedDays: number | null; delayDays: number; impact: 'high' | 'medium' | 'none' }> | null }) {
-  return <div className="cc workflow-bottlenecks"><div className="cc-head"><h3>Bottleneck Analysis</h3><small>Current project</small></div>{stages?.length ? <table className="tbl"><thead><tr><th>Stage</th><th>Avg Time Spent</th><th>Expected</th><th>Delay</th><th>Impact</th></tr></thead><tbody>{stages.map((stage) => <tr key={stage.taskId}><td>{stage.stage}</td><td>{stage.averageDays === null ? 'Not started' : formatDays(stage.averageDays)}</td><td>{stage.expectedDays === null ? '—' : formatDays(stage.expectedDays)}</td><td className={`delay-${stage.impact}`}>{stage.delayDays > 0 ? `+${formatDays(stage.delayDays)}` : 'On Track'}</td><td><span className={`bdg ${stage.impact === 'high' ? 'r' : stage.impact === 'medium' ? 'y' : 'g'}`}>{stage.impact}</span></td></tr>)}</tbody></table> : <Empty>Stages with scheduled dates will appear here once work begins.</Empty>}</div>;
+  return <div className="cc workflow-bottlenecks"><div className="cc-head"><h3>Bottleneck Analysis</h3><small>Current project</small></div>{stages?.length ? <table className="tbl"><thead><tr><th>Stage</th><th>Avg Time Spent</th><th>Expected</th><th>Delay</th><th>Impact</th></tr></thead><tbody>{stages.map((stage) => <tr key={stage.taskId}><td>{stage.stage}</td><td>{stage.averageDays === null ? 'Not started' : formatElapsedTime(stage.averageDays)}</td><td>{stage.expectedDays === null ? '—' : formatDays(stage.expectedDays)}</td><td className={`delay-${stage.impact}`}>{stage.delayDays > 0 ? `+${formatDays(stage.delayDays)}` : 'On Track'}</td><td><span className={`bdg ${stage.impact === 'high' ? 'r' : stage.impact === 'medium' ? 'y' : 'g'}`}>{stage.impact}</span></td></tr>)}</tbody></table> : <Empty>Stages with scheduled dates will appear here once work begins.</Empty>}</div>;
 }
 function WorkflowSummaryCard({ summary }: { summary: WorkflowSummary | null }) { return <div className="cc workflow-summary"><div className="cc-head"><h3>Workflow Summary</h3></div>{summary ? <div className="summary-insights">{summary.insights.map((insight, index) => <div className={`summary-insight ${insight.tone}`} key={index}><strong>{insight.label}:</strong> {insight.text}</div>)}</div> : <Empty>Your workflow summary will appear here.</Empty>}</div>; }
+function formatElapsedTime(days: number) {
+  const totalMinutes = Math.round(days * 24 * 60);
+  if (days > 0 && totalMinutes === 0) return '<1 min';
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours === 0) return `${minutes} min`;
+  return minutes === 0 ? `${hours} hr` : `${hours} hr ${minutes} min`;
+}
 function formatDays(value: number) { const rounded = Math.round(value * 10) / 10; return `${rounded % 1 === 0 ? rounded.toFixed(0) : rounded} day${rounded === 1 ? '' : 's'}`; }
 function TaskRiskCard({ task }: { task: TaskRisk }) { const today = useLocalDay(); const due = deadlineHealth(task.deadline, today); return <article className={`risk-task-card ${task.level}`}><RiskRing score={task.score} title={task.title} /><div className="risk-attribution"><span>{assigneeLabel(task)}</span><small>{task.projectTitle}</small>{due ? <small>Due {formatDateOnly(task.deadline)} · {deadlineCountdown(due.days)}</small> : <small>No due date</small>}</div></article>; }
 function PredictionAlerts({ tasks, recommendations }: { tasks: TaskRisk[]; recommendations: string[] }) {

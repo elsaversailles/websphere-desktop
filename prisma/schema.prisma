@@ -235,9 +235,16 @@ model Project {
   tasks Task[]
   events CalendarEvent[]
   workflow WorkflowEvent[]
+  activityDays ProjectActivityDay[]
   snapshots AnalyticsSnapshot[]
   linkedResources LinkedResource[]
   embeddings Embedding[]
+}
+model ProjectActivityDay {
+  projectId String
+  date String @db.VarChar(10)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  @@id([projectId, date])
 }
 model ProjectMember {
   id String @id @default(cuid())

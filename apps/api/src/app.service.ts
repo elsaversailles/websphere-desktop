@@ -1,6 +1,6 @@
 import { workflowBuckets } from './workflow-reporting.js';
 import { maintenanceState } from './maintenance-state.js';
-import { activityPoints, activityRanges, reportingDate, type ActivityMetric, type ActivityPeriod } from './admin-activity.js';
+import { activityPoints, activityRanges, projectActivityCounts, reportingDate, type ActivityMetric, type ActivityPeriod } from './admin-activity.js';
 import { Injectable, Logger, HttpException, HttpStatus, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { Prisma, type ProjectStatus } from '@prisma/client';
 import { hash, verify } from 'argon2';
@@ -18,7 +18,7 @@ import { DomainEventsService } from './domain-events.service.js';
 import { AuditLogService } from './audit-log.service.js';
 import { PushService } from './push.service.js';
 import { LocalStorageService } from './local-storage.service.js';
-import { identifyResourceLink, registerSchema, resourceLinkError, passwordRequirements, projectProgressStatus, workflowPeriodStart, type WorkflowPeriod, sameScheduleDate, scheduleDateErrors, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
+import { identifyResourceLink, isHttpsResourceLink, unsupportedResourceLinkMessage, registerSchema, passwordRequirements, projectProgressStatus, workflowPeriodStart, type WorkflowPeriod, sameScheduleDate, scheduleDateErrors, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
@@ -972,10 +972,15 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   async updateProject(caller: Caller, id: string, input: any) {
     await this.projectMember(id, caller.id, true);
-    if (input.startDate !== undefined || input.deadline !== undefined) this.validateSchedule(input, await this.prisma.project.findUniqueOrThrow({ where: { id }, select: { startDate: true, deadline: true } }));
+    const previous = await this.prisma.project.findUniqueOrThrow({ where: { id } });
+    if (input.startDate !== undefined || input.deadline !== undefined) this.validateSchedule(input, previous);
     const { memberIds, ...data } = input;
-    const project = await this.prisma.project.update({ where: { id }, data });
-    if (input.status !== undefined) this.adminActivityChanged('projects');
+    const changed = this.hasProjectFieldChanges(previous, data);
+    const project = await this.prisma.project.update({ where: { id }, data: {
+      ...data,
+      ...(changed ? { activityDays: { createMany: { data: { date: reportingDate(new Date()) }, skipDuplicates: true } } } : {}),
+    } });
+    if (changed) this.adminActivityChanged('projects');
     return project;
   }
   async deleteProject(caller: Caller, id: string) {
@@ -1003,8 +1008,26 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     this.adminActivityChanged('projects');
     return { ok: true };
   }
-  async addProjectMember(caller: Caller, projectId: string, userId: string) { await this.projectMember(projectId, caller.id, true); const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } }); if (!project.groupId) fail('INVALID_OPERATION', 'Connect this independent project to a group before adding members.', 400); const groupMembership = await this.member(project.groupId, userId); return this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: groupMembership.role } }); }
-  async updateResponsibility(caller: Caller, projectId: string, userId: string, responsibility: string) { await this.projectMember(projectId, caller.id, true); await this.projectMember(projectId, userId); return this.prisma.projectMember.update({ where: { projectId_userId: { projectId, userId } }, data: { responsibility } }); }
+  async addProjectMember(caller: Caller, projectId: string, userId: string) {
+    await this.projectMember(projectId, caller.id, true);
+    const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { groupId: true } });
+    if (!project.groupId) fail('INVALID_OPERATION', 'Connect this independent project to a group before adding members.', 400);
+    const groupMembership = await this.member(project.groupId, userId);
+    const membership = await this.prisma.projectMember.upsert({ where: { projectId_userId: { projectId, userId } }, update: {}, create: { projectId, userId, role: groupMembership.role } });
+    this.adminActivityChanged('projects');
+    return membership;
+  }
+  async updateResponsibility(caller: Caller, projectId: string, userId: string, responsibility: string) {
+    await this.projectMember(projectId, caller.id, true);
+    const prior = await this.projectMember(projectId, userId);
+    const changed = prior.responsibility !== responsibility;
+    const [membership] = await this.prisma.$transaction([
+      this.prisma.projectMember.update({ where: { projectId_userId: { projectId, userId } }, data: { responsibility } }),
+      ...(changed ? [this.recordProjectChange(this.prisma, projectId)] : []),
+    ]);
+    if (changed) this.adminActivityChanged('projects');
+    return membership;
+  }
   async projectProgress(caller: Caller, id: string) { await this.projectMember(id, caller.id); const project = await this.prisma.project.findUniqueOrThrow({ where: { id }, include: { tasks: true } }); const analytics = projectAnalytics(project.tasks, project.deadline); return { progress: averageTaskProgress(project.tasks) / 100, onTrack: analytics.riskLevel === 'on_track', ...analytics }; }
   async createTask(caller: Caller, projectId: string, input: any) { await this.projectMember(projectId, caller.id, true); if (!input.startDate || !input.deadline) fail('VALIDATION_FAILED', 'Start date and due date are required to create a task.', 400, { ...(!input.startDate ? { startDate: 'Start date is required' } : {}), ...(!input.deadline ? { deadline: 'Due date is required' } : {}) }); this.validateSchedule(input, undefined, 'date', 'Due date'); return this.prisma.task.create({ data: { ...input, projectId, createdBy: caller.id } }); }
   async task(caller: Caller, id: string) {
@@ -1043,6 +1066,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
         await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: WorkflowEventType.assignment_change, fromValue: previousAssigneeId, toValue: assigneeId } });
       }
       if (statusChanged) await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId: id, actorId: caller.id, type: status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: status } });
+      if (!reassigned && !statusChanged && this.hasProjectFieldChanges(task, details)) {
+        await this.recordProjectChange(tx, task.projectId, now);
+      }
       return saved;
     }, { isolationLevel: 'Serializable' });
     if (reassigned && assigneeId) await this.notify([assigneeId], NotificationType.task_assignment, `You were assigned “${updated.title}” in “${task.project.title}”`, id, 'task').catch(() => undefined);
@@ -1065,6 +1091,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       await tx.embedding.deleteMany({ where: { sourceType: 'task', sourceId: id } });
       await tx.workflowEvent.deleteMany({ where: { taskId: id } });
       await tx.task.delete({ where: { id } });
+      await this.recordProjectChange(tx, task.projectId);
     });
     this.events?.emitTaskDeleted?.(task.projectId, id);
     await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
@@ -1180,7 +1207,18 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       return {
         id: task.id, title: task.title, description: task.description, deadline: task.deadline, priority: task.priority, status: task.status,
         progress: taskProgress(task.status), createdAt: task.createdAt, latestActivityAt: new Date(latest), project: { id: task.project.id, title: task.project.title },
-        resources: task.linkedResources.map((resource: any) => ({ id: resource.id, connectionId: resource.connectionId, title: resource.title, externalUrl: resource.externalUrl, provider: resource.provider ?? resource.connection?.provider, toolKind: resource.toolKind, platform: ({ 'google-forms': 'Google Forms', 'google-docs': 'Google Docs', 'microsoft-word': 'Microsoft Word', 'microsoft-excel': 'Microsoft Excel' } as Record<string, string>)[resource.toolKind] ?? resource.connection?.tool.name ?? providerNames[resource.provider as ProviderId] ?? resource.provider, category: resource.connection?.tool.category ?? '', createdAt: resource.createdAt, ...(resource.storageKey ? { upload: true, fileSize: resource.fileSize, platform: 'Uploaded file' } : {}), ...(resource.academicUseConfirmed && !resource.provider && !resource.storageKey ? { platform: 'External link' } : {}) })),
+        resources: task.linkedResources.map((resource: any) => {
+          const site = resource.storageKey ? null : identifyResourceLink(resource.externalUrl, resource.toolKind);
+          return {
+            id: resource.id, connectionId: resource.connectionId, externalUrl: resource.externalUrl,
+            title: site && /^external link$/i.test(resource.title) ? site.name : resource.title,
+            provider: resource.provider ?? resource.connection?.provider, toolKind: resource.toolKind,
+            platform: resource.storageKey ? 'Uploaded file' : site?.name ??
+              (resource.toolKind === 'google-forms' ? 'Google Forms' : resource.connection?.tool.name ?? providerNames[resource.provider as ProviderId] ?? 'External link'),
+            category: resource.connection?.tool.category ?? '', createdAt: resource.createdAt,
+            ...(resource.storageKey ? { upload: true, fileSize: resource.fileSize } : {}),
+          };
+        }),
         assignees: task.assignments.map((assignment: any) => task.project.members.find((member: any) => member.userId === assignment.assigneeId)?.user).filter(Boolean),
         canUpdateStatus,
         canAssign,
@@ -1214,22 +1252,31 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       activity: [...workflowActivity, ...usageActivity].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 24),
     };
   }
+  private identifyTaskLink(externalUrl: string, provider?: ProviderId | null, toolKind?: string | null) {
+    const site = identifyResourceLink(externalUrl, provider === 'microsoft' ? toolKind : undefined);
+    if (!site) return fail('VALIDATION_FAILED', unsupportedResourceLinkMessage, 400, { externalUrl: unsupportedResourceLinkMessage });
+    if ((provider && provider !== site.provider) || (toolKind && toolKind !== site.toolKind)) {
+      const message = 'This link does not match the selected tool.';
+      fail('VALIDATION_FAILED', message, 400, { externalUrl: message });
+    }
+    return site;
+  }
+
   async linkTaskResource(caller: Caller, taskId: string, input: { connectionId?: string; provider?: ProviderId; toolKind?: string | null; title: string; externalUrl: string; externalId?: string; status?: TaskStatus; academicUse?: true }) {
     const task = await this.task(caller, taskId);
     if (!task.assignments.some((assignment: any) => assignment.assigneeId === caller.id)) fail('RBAC_FORBIDDEN', 'Only the active assignee can attach a file link', 403);
     const connection = input.connectionId ? await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } }) : null;
     if (input.connectionId && !connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before linking a file', 400);
-    const detected = input.academicUse ? identifyResourceLink(input.externalUrl) : null;
-    const provider = input.academicUse ? detected?.provider ?? null : connection?.provider ?? input.provider;
-    const toolKind = input.academicUse ? detected?.toolKind ?? null : input.toolKind ?? null;
-    if (!input.academicUse && !provider) fail('VALIDATION_FAILED', 'Confirm the link is for academic project work', 400);
-    const linkError = input.academicUse ? (detected ? null : 'Use an HTTPS link without embedded credentials.') : resourceLinkError(input.externalUrl, provider, toolKind);
-    if (linkError) fail('VALIDATION_FAILED', linkError, 400, { externalUrl: linkError });
+    const requestedProvider = connection?.provider ?? input.provider;
+    if (!input.academicUse && !requestedProvider) fail('VALIDATION_FAILED', 'Confirm the link is for academic project work', 400);
+    const detected = this.identifyTaskLink(input.externalUrl, requestedProvider, input.academicUse ? undefined : input.toolKind);
+    const { provider, toolKind } = detected;
+    const title = input.academicUse && /^external link$/i.test(input.title) ? detected.name : input.title;
     const changedStatus = input.status && input.status !== task.status;
     const now = new Date();
     const resource = await this.prisma.$transaction(async (tx: any) => {
-      const created = await tx.linkedResource.create({ data: { connectionId: connection?.id ?? null, provider, toolKind, ...(input.academicUse ? { academicUseConfirmed: true } : {}), projectId: task.projectId, taskId, externalId: input.externalId ?? randomBytes(12).toString('hex'), title: input.title, externalUrl: input.externalUrl } });
-      await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: WorkflowEventType.progress_activity, fromValue: 'resource_linked', toValue: input.title } });
+      const created = await tx.linkedResource.create({ data: { connectionId: connection?.id ?? null, provider, toolKind, ...(input.academicUse ? { academicUseConfirmed: true } : {}), projectId: task.projectId, taskId, externalId: input.externalId ?? randomBytes(12).toString('hex'), title, externalUrl: input.externalUrl } });
+      await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: WorkflowEventType.progress_activity, fromValue: 'resource_linked', toValue: title } });
       if (changedStatus) {
         await tx.task.update({ where: { id: taskId }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: input.status === 'completed' ? now : null } });
         await tx.workflowEvent.create({ data: { projectId: task.projectId, taskId, actorId: caller.id, type: input.status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: input.status } });
@@ -1241,7 +1288,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
       await this.notifyTaskStatus(taskId, caller.id, input.status!);
     }
-    return { ...resource, provider, platform: detected?.name ?? connection?.tool.name ?? provider, category: connection?.tool.category ?? '' };
+    return { ...resource, provider, platform: detected.name, category: connection?.tool.category ?? '' };
   }
   async updateLinkedResource(caller: Caller, resourceId: string, input: { connectionId?: string; provider?: ProviderId; toolKind?: string | null; title: string; externalUrl: string; assigneeId?: string; status?: TaskStatus; academicUse?: true }) {
     const resource = await this.prisma.linkedResource.findUniqueOrThrow({ where: { id: resourceId }, include: { connection: true, task: { include: { assignments: { where: { active: true } }, project: { include: { members: true } } } } } });
@@ -1258,18 +1305,21 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (input.assigneeId) await this.projectMember(task.projectId, input.assigneeId);
     const connection = input.connectionId ? await this.prisma.toolConnection.findFirst({ where: { id: input.connectionId, userId: caller.id, status: 'connected' }, include: { tool: true } }) : null;
     if (input.connectionId && !connection) fail('INTEGRATION_UNAVAILABLE', 'Choose one of your connected integrations before saving the file link', 400);
-    const detected = input.academicUse ? identifyResourceLink(input.externalUrl) : null;
-    const provider = input.academicUse ? detected?.provider ?? null : input.provider ?? connection?.provider ?? resource.provider;
-    if (!input.academicUse && !provider && !connection) fail('VALIDATION_FAILED', 'Confirm the link is for academic project work', 400);
-    const linkError = input.academicUse ? (detected ? null : 'Use an HTTPS link without embedded credentials.') : resourceLinkError(input.externalUrl, provider, input.toolKind === undefined ? resource.toolKind : input.toolKind);
-    if (linkError) fail('VALIDATION_FAILED', linkError, 400, { externalUrl: linkError });
+    const requestedProvider = input.academicUse ? connection?.provider : input.provider ?? connection?.provider ?? resource.provider;
+    if (!input.academicUse && !requestedProvider) fail('VALIDATION_FAILED', 'Confirm the link is for academic project work', 400);
+    const toolHint = input.academicUse ? undefined : input.toolKind === undefined ? resource.toolKind : input.toolKind;
+    const detected = this.identifyTaskLink(input.externalUrl, requestedProvider, toolHint);
+    const { provider, toolKind } = detected;
+    const title = input.academicUse && /^external link$/i.test(input.title) ? detected.name : input.title;
     const now = new Date();
     const reassigned = input.assigneeId && input.assigneeId !== activeAssignment?.assigneeId;
     const changedStatus = input.status && input.status !== task.status;
-    const operations = (client: any) => [
-      client.linkedResource.update({ where: { id: resource.id }, data: { ...(input.academicUse ? { connectionId: resource.connection?.provider === provider ? resource.connectionId : null, provider, toolKind: detected?.toolKind ?? null, academicUseConfirmed: true } : input.provider ? { connectionId: resource.connection?.provider === input.provider ? resource.connectionId : null, provider } : { connectionId: connection?.id ?? null }), ...(input.toolKind !== undefined ? { toolKind: input.toolKind } : {}), title: input.title, externalUrl: input.externalUrl } }),
-      ...(reassigned ? [client.taskAssignment.updateMany({ where: { taskId: task.id, active: true }, data: { active: false } }), client.taskAssignment.create({ data: { taskId: task.id, assigneeId: input.assigneeId, assignerId: caller.id } }), client.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: WorkflowEventType.assignment_change, fromValue: activeAssignment?.assigneeId, toValue: input.assigneeId } })] : []),
+    const changedLink = this.hasProjectFieldChanges(resource, { title, externalUrl: input.externalUrl, provider, toolKind });
+    const operations = (client: Prisma.TransactionClient) => [
+      client.linkedResource.update({ where: { id: resource.id }, data: { connectionId: connection?.id ?? ((input.academicUse || input.provider) && resource.connection?.provider === provider ? resource.connectionId : null), provider, toolKind, ...(input.academicUse ? { academicUseConfirmed: true } : {}), title, externalUrl: input.externalUrl } }),
+      ...(reassigned ? [client.taskAssignment.updateMany({ where: { taskId: task.id, active: true }, data: { active: false } }), client.taskAssignment.create({ data: { taskId: task.id, assigneeId: input.assigneeId!, assignerId: caller.id } }), client.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: WorkflowEventType.assignment_change, fromValue: activeAssignment?.assigneeId, toValue: input.assigneeId } })] : []),
       ...(changedStatus ? [client.task.update({ where: { id: task.id }, data: { status: input.status, ...(input.status === 'ongoing' && !task.startedAt ? { startedAt: now } : {}), completedAt: input.status === 'completed' ? now : null } }), client.workflowEvent.create({ data: { projectId: task.projectId, taskId: task.id, actorId: caller.id, type: input.status === 'completed' ? WorkflowEventType.task_completed : WorkflowEventType.status_change, fromValue: task.status, toValue: input.status } })] : []),
+      ...(changedLink && !changedStatus && !reassigned ? [this.recordProjectChange(client, task.projectId, now)] : []),
     ];
     if (reassigned) {
       await this.prisma.$transaction(async (tx: any) => {
@@ -1279,7 +1329,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
         await Promise.all(operations(tx));
       }, { isolationLevel: 'Serializable' });
     } else await this.prisma.$transaction(operations(this.prisma));
-    if (connection && !input.provider) await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Updated “${input.title}” linked to “${task.title}”` } });
+    if (connection && !input.provider) await this.prisma.toolUsage.create({ data: { connectionId: connection.id, action: `Updated “${title}” linked to “${task.title}”` } });
     if (changedStatus || reassigned) await this.jobs.enqueueAnalyticsRecompute(task.projectId).catch(() => undefined);
     if (reassigned && input.assigneeId) await this.notify([input.assigneeId], NotificationType.task_assignment, `You were assigned “${task.title}”`, task.id, 'task').catch(() => undefined);
     if (changedStatus) await this.notifyTaskStatus(task.id, caller.id, input.status!);
@@ -1327,7 +1377,7 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     else if (!resource.connection || resource.connection.userId !== caller.id) fail('RBAC_FORBIDDEN', 'This linked file is not available to you', 403);
     if (resource.storageKey) fail('INVALID_OPERATION', 'Download this attachment using its download action.', 400);
     if (!resource.connection) {
-      if (!identifyResourceLink(resource.externalUrl)) fail('VALIDATION_FAILED', 'This resource does not have a valid HTTPS link', 400);
+      if (!isHttpsResourceLink(resource.externalUrl)) fail('VALIDATION_FAILED', 'This resource does not have a valid HTTPS link', 400);
       return { externalUrl: resource.externalUrl, platform: resource.provider };
     }
     const externalUrl = await connectors[resource.connection.provider as ProviderId].launchUrl({ projectId: resource.projectId ?? undefined, taskId: resource.taskId ?? undefined, externalId: resource.externalId, title: resource.title, externalUrl: resource.externalUrl });
@@ -2342,20 +2392,32 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
   }
   private adminActivityChanged(metric: ActivityMetric) {
     this.events?.emitAdminActivity?.(metric);
-    if (this.prisma.adminActivitySample) void this.recordAdminActivity(metric).catch(() => this.logger.warn('Could not record administrator activity sample'));
+    if (metric === 'users' && this.prisma.adminActivitySample) void this.recordActiveUsers().catch(() => this.logger.warn('Could not record administrator activity sample'));
   }
 
-  private async recordAdminActivity(metric: ActivityMetric) {
+  private hasProjectFieldChanges(previous: object, patch: Record<string, unknown>) {
+    return Object.entries(patch).some(([key, value]) => {
+      const prior = (previous as Record<string, unknown>)[key];
+      return value instanceof Date ? !(prior instanceof Date) || value.getTime() !== prior.getTime() : value !== prior;
+    });
+  }
+
+  private recordProjectChange(client: Prisma.TransactionClient, projectId: string, at = new Date()) {
+    return client.projectActivityDay.createMany({ data: { projectId, date: reportingDate(at) }, skipDuplicates: true });
+  }
+
+  private async recordActiveUsers() {
+    const metric = 'users';
     const date = reportingDate(new Date());
-    const table = metric === 'users' ? this.prisma.user : this.prisma.project;
-    const count = await table.count({ where: { status: 'active' } });
+    const count = await this.prisma.user.count({ where: { status: 'active' } });
     await this.prisma.adminActivitySample.upsert({ where: { metric_date: { metric, date } }, create: { metric, date, count }, update: { count } });
     return { date, count };
   }
 
   async adminActivity(caller: Caller, metric: ActivityMetric, period: ActivityPeriod) {
     await this.admin(caller);
-    const current = await this.recordAdminActivity(metric);
+    if (metric === 'projects') return this.activeProjectChanges(period);
+    const current = await this.recordActiveUsers();
     const ranges = activityRanges(period, current.date);
     const [prior, samples] = await Promise.all([
       this.prisma.adminActivitySample.findFirst({ where: { metric, date: { lt: ranges[0].start } }, orderBy: { date: 'desc' }, select: { date: true, count: true } }),
@@ -2363,6 +2425,37 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     ]);
     const points = activityPoints(ranges, [...(prior ? [prior] : []), ...samples, current]);
     return { current: current.count, points };
+  }
+
+  private async activeProjectChanges(period: ActivityPeriod) {
+    const now = new Date();
+    const today = reportingDate(now);
+    const ranges = activityRanges(period, today);
+    const first = ranges[0].start;
+    // The UTC query includes the whole first local day in any reporting timezone.
+    // Normalize timestamps to local dates before checking whether they fall in a bucket.
+    const since = new Date(first + 'T00:00:00Z');
+    since.setUTCDate(since.getUTCDate() - 1);
+    const dateFilter = { gte: first, lte: today };
+    const recent = { createdAt: { gte: since, lte: now } };
+    const timestamp = { where: recent, select: { createdAt: true } };
+    const projects = await this.prisma.project.findMany({
+      where: { status: 'active', OR: [
+        recent, { activityDays: { some: { date: dateFilter } } },
+        { tasks: { some: recent } }, { workflow: { some: recent } },
+        { linkedResources: { some: recent } }, { members: { some: recent } },
+      ] },
+      select: {
+        createdAt: true, activityDays: { where: { date: dateFilter }, select: { date: true } },
+        tasks: timestamp, workflow: timestamp, linkedResources: timestamp, members: timestamp,
+      },
+    });
+    const dates = projects.map((project) => new Set([
+      ...project.activityDays.map(({ date }) => date),
+      ...[project, ...project.tasks, ...project.workflow, ...project.linkedResources, ...project.members]
+        .map(({ createdAt }) => reportingDate(createdAt)),
+    ]));
+    return projectActivityCounts(ranges, dates, today);
   }
 
   async monitoring(caller: Caller) {
