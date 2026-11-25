@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { Chart, type ChartConfiguration } from 'chart.js/auto';
 
-export function ChartCanvas({ config, height = 220 }: { config: ChartConfiguration; height?: number }) {
+export function ChartCanvas({ config, height = 220, label }: { config: ChartConfiguration; height?: number; label?: string }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const chartRef = useRef<Chart | null>(null);
 
@@ -11,5 +11,5 @@ export function ChartCanvas({ config, height = 220 }: { config: ChartConfigurati
     return () => chartRef.current?.destroy();
   }, [JSON.stringify(config)]);
 
-  return <canvas ref={canvasRef} style={{ maxHeight: height }} />;
+  return <canvas ref={canvasRef} role={label ? 'img' : undefined} aria-label={label} style={{ maxHeight: height }} />;
 }

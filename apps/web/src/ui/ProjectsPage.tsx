@@ -18,7 +18,7 @@ type ConfirmAction = { title: string; description: string; confirmLabel: string;
 
 export function ProjectsPage({ notify, userId, focusedTask, selectedProjectId, onSelectProject }: { notify: (message: string) => void; userId: string; selectedProjectId: string; onSelectProject: (id: string) => void; focusedTask?: { projectId: string; taskId: string } | null }) {
   const today = useLocalDay();
-  const filters = useListFilters();
+  const filters = useListFilters('recent', 'progressStatus');
   const [result, setResult] = useState<ListPage<Project> | null>(null);
   const projects = result?.items ?? null;
   const listRequest = useRef(0);
@@ -175,7 +175,12 @@ export function ProjectsPage({ notify, userId, focusedTask, selectedProjectId, o
     <div className="ph"><h2>My Projects</h2></div>
     <section className="cc">
       <div className="cc-head"><h3>Existing Projects</h3></div>
-      <ListFilters filters={filters} placeholder="Search projects…" statuses={[{ value: 'active', label: 'Active' }, { value: 'completed', label: 'Completed' }, { value: 'on_hold', label: 'On Hold' }, { value: 'archived', label: 'Archived' }]} />
+      <ListFilters filters={filters} placeholder="Search projects…" statuses={[
+        { value: 'pending', label: 'Not started' },
+        { value: 'ongoing', label: 'In progress' },
+        { value: 'for_review', label: 'For review' },
+        { value: 'completed', label: 'Completed' },
+      ]} />
       {projects === null ? <div className="legacy-empty">Loading projects…</div> : projects.length ? <div className="project-table-scroll" role="region" aria-label="Existing projects" tabIndex={0}><table className="tbl projects-table">
         <thead><tr><th>Project</th><th>Group</th><th>Role</th><th>Progress</th><th>Start Date</th><th>End Date</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>{projects.map((project) => {

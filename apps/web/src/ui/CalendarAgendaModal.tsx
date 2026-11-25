@@ -3,6 +3,8 @@ import { agendaCategory, agendaProject, editableAgendaEvent, type CalendarAgenda
 import { request } from '../api';
 import { formatDateOnly, localDateKey } from './dates';
 
+const NOTE_LIMIT = 100;
+
 export function CalendarAgendaModal({ day, items, loading, error, onClose, onEdit, onRetry }: {
   day: Date;
   items: CalendarAgendaItem[];
@@ -58,8 +60,9 @@ export function CalendarAgendaModal({ day, items, loading, error, onClose, onEdi
     </div>
     <section className="calendar-agenda-body">
       <label className="lbl" htmlFor={`${titleId}-note`}>Private note</label>
-      <textarea className="ifield" id={`${titleId}-note`} rows={3} maxLength={2000} value={note} onChange={(event) => setNote(event.target.value)} disabled={!noteReady || noteSaving} />
-      <button className="btn-o btn-sm" type="button" disabled={!noteReady || noteSaving} onClick={() => void saveNote()}>Save note</button>
+      <textarea className="ifield" id={`${titleId}-note`} rows={3} maxLength={NOTE_LIMIT} value={note} onChange={(event) => setNote(event.target.value)} disabled={!noteReady || noteSaving} />
+      {note.length > NOTE_LIMIT ? <p>Shorten this note to {NOTE_LIMIT} characters to save it.</p> : null}
+      <button className="btn-o btn-sm" type="button" disabled={!noteReady || noteSaving || note.length > NOTE_LIMIT} onClick={() => void saveNote()}>Save note</button>
       <span role="status">{noteMessage}</span>
     </section>
     <div className="modal-acts calendar-agenda-footer"><button className="btn-o" type="button" onClick={onClose}>Close</button></div>

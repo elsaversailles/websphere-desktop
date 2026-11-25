@@ -370,7 +370,7 @@ function PrivacyPolicyModal({ onClose, onAccept }: { onClose: () => void; onAcce
         <h3>Data security</h3>
         <p>Passwords are hashed with argon2 and never stored or logged in plain text. External-tool access tokens are encrypted at rest. Sessions use short-lived access tokens with rotating refresh tokens; logging out invalidates them immediately.</p>
         <h3>Your rights</h3>
-        <p>You can edit your profile at any time from Settings, disconnect any external tool at any time (which removes its stored access token), and request account deactivation or deletion through a support ticket.</p>
+        <p>You can edit your profile at any time from Settings, disconnect any external tool at any time (which removes its stored access token), and request account deactivation through a support ticket. Deleting your account from Settings archives it and retains its data. Only an administrator can restore access.</p>
         <h3>Changes to this policy</h3>
         <p>We may update this policy as WebSphere adds features. Material changes will be announced in-app.</p>
       </div>

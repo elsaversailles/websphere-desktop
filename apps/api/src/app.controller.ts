@@ -118,7 +118,10 @@ export class AppController {
   @Get('projects') async projects(@Headers('authorization') auth: string) { return this.app.projects(await this.caller(auth)); }
   @Get('projects/options') async projectOptions(@Headers('authorization') auth: string) { return this.app.projectOptions(await this.caller(auth)); }
   @Get('projects/list') async projectList(@Headers('authorization') auth: string, @Query() query: unknown) {
-    return this.app.projectList(await this.caller(auth), parse(listQuery.extend({ status: z.enum(['active', 'completed', 'on_hold', 'archived']).optional() }), query));
+    return this.app.projectList(await this.caller(auth), parse(listQuery.extend({
+      status: z.enum(['active', 'completed', 'on_hold', 'archived']).optional(),
+      progressStatus: taskStatusSchema.shape.status.optional(),
+    }), query));
   }
   @ProjectScope() @Get('projects/:id') async project(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.project(await this.caller(auth), id); }
   @ProjectScope() @Patch('projects/:id') async updateProject(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.updateProject(await this.caller(auth), id, parse(projectUpdateSchema, body)); }
@@ -177,7 +180,7 @@ export class AppController {
     return this.app.calendarNote(await this.caller(auth), parse(dateKeySchema, date));
   }
   @Put('calendar/notes/:date') async saveNote(@Headers('authorization') auth: string, @Param('date') date: string, @Body() body: unknown) {
-    return this.app.saveCalendarNote(await this.caller(auth), parse(dateKeySchema, date), parse(z.object({ body: z.string().trim().max(2000) }), body).body);
+    return this.app.saveCalendarNote(await this.caller(auth), parse(dateKeySchema, date), parse(z.object({ body: z.string().max(100).trim() }), body).body);
   }
   @Post('calendar/events') async createEvent(@Headers('authorization') auth: string, @Body() body: unknown) { return this.app.createCalendarEvent(await this.caller(auth), parse(calendarEventSchema, body)); }
   @Patch('calendar/events/:id') async updateEvent(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: unknown) { return this.app.updateCalendarEvent(await this.caller(auth), id, parse(calendarEventSchema.partial(), body)); }
@@ -199,8 +202,8 @@ export class AppController {
   @Post('ai/ideas/generate') async generate(@Headers('authorization') auth: string, @Body() body: unknown) { const input = parse(aiAskSchema, body); return this.app.ai(await this.caller(auth), input.prompt, input); }
   @Post('ai/recommendations') async aiRecommendations(@Headers('authorization') auth: string, @Body('prompt') prompt: string) { const caller = await this.caller(auth); const tools = await this.app.integrations(caller); return { prompt, recommendations: tools.map((tool: any) => ({ provider: tool.provider, name: tool.name, category: tool.category })) }; }
   @Get('projects/:id/analytics') async analytics(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.analytics(await this.caller(auth), id); }
-  @ProjectScope() @Get('projects/:id/analytics/workflow') async projectWorkflow(@Headers('authorization') auth: string, @Param('id') id: string, @Query('period') period?: string) {
-    return this.app.workflowReport(await this.caller(auth), id, parse(z.enum(['daily', 'weekly', 'monthly']).default('weekly'), period));
+  @ProjectScope() @Get('projects/:id/analytics/workflow') async projectWorkflow(@Headers('authorization') auth: string, @Param('id') id: string, @Query('period') period?: string, @Query('date') date?: string) {
+    return this.app.workflowReport(await this.caller(auth), id, parse(z.enum(['daily', 'weekly', 'monthly']).default('weekly'), period), parse(z.union([dateKeySchema, z.literal('today')]).optional(), date));
   }
   @Get('projects/:id/analytics/trends') async analyticsTrends(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.analyticsTrends(await this.caller(auth), id); }
   @Get('projects/:id/analytics/summary') async analyticsSummary(@Headers('authorization') auth: string, @Param('id') id: string) { return this.app.analyticsSummary(await this.caller(auth), id); }

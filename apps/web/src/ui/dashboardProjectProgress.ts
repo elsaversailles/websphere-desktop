@@ -1,3 +1,4 @@
+import { projectProgressStatus } from '@websphere/shared';
 import type { Health } from './health';
 
 const TASK_PROGRESS: Record<string, number> = {
@@ -15,9 +16,11 @@ export function dashboardProjectProgress(tasks: Array<{ status: string }>, proje
   let health: Health;
   if (projectStatus === 'archived') health = { tone: 'ac', label: 'Archived' };
   else if (projectStatus === 'on_hold') health = { tone: 'y', label: 'On Hold' };
-  else if (average === 100) health = { tone: 'g', label: 'Completed' };
-  else if (average >= 75) health = { tone: 'ac', label: 'For Review' };
-  else if (average > 0) health = { tone: 'y', label: 'In Progress' };
-  else health = { tone: 'r', label: 'Not Started' };
+  else health = ({
+    completed: { tone: 'g', label: 'Completed' },
+    for_review: { tone: 'ac', label: 'For Review' },
+    ongoing: { tone: 'y', label: 'In Progress' },
+    pending: { tone: 'r', label: 'Not Started' },
+  } satisfies Record<string, Health>)[projectProgressStatus(average)];
   return { progress, health };
 }

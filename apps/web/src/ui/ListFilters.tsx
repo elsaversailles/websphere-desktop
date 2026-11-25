@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 export type ListPage<T> = { items: T[]; page: number; totalPages: number; total: number };
 type Option = { value: string; label: string };
 
-export function useListFilters(defaultSort = 'recent') {
+export function useListFilters(defaultSort = 'recent', statusParam = 'status') {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [term, setTerm] = useState('');
@@ -13,7 +13,7 @@ export function useListFilters(defaultSort = 'recent') {
     const timer = window.setTimeout(() => { setTerm(search.trim()); setPage(1); }, 260);
     return () => window.clearTimeout(timer);
   }, [search]);
-  const query = new URLSearchParams({ page: String(page), sort, ...(term ? { q: term } : {}), ...(status ? { status } : {}) }).toString();
+  const query = new URLSearchParams({ page: String(page), sort, ...(term ? { q: term } : {}), ...(status ? { [statusParam]: status } : {}) }).toString();
   return {
     page, setPage, search, setSearch, status, sort, query,
     setStatus(value: string) { setStatus(value); setPage(1); },

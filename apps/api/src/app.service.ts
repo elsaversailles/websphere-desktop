@@ -1,6 +1,8 @@
+import { workflowBuckets } from './workflow-reporting.js';
 import { maintenanceState } from './maintenance-state.js';
 import { activityPoints, activityRanges, reportingDate, type ActivityMetric, type ActivityPeriod } from './admin-activity.js';
 import { Injectable, Logger, HttpException, HttpStatus, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
+import { Prisma, type ProjectStatus } from '@prisma/client';
 import { hash, verify } from 'argon2';
 import { createRemoteJWKSet, SignJWT, jwtVerify } from 'jose';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
@@ -16,7 +18,7 @@ import { DomainEventsService } from './domain-events.service.js';
 import { AuditLogService } from './audit-log.service.js';
 import { PushService } from './push.service.js';
 import { LocalStorageService } from './local-storage.service.js';
-import { identifyResourceLink, registerSchema, resourceLinkError, passwordRequirements, sameScheduleDate, scheduleDateErrors, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
+import { identifyResourceLink, registerSchema, resourceLinkError, passwordRequirements, projectProgressStatus, workflowPeriodStart, type WorkflowPeriod, sameScheduleDate, scheduleDateErrors, ticketStatusLabels, validatePassword, type PasswordRequirementId, type TicketStatus } from '@websphere/shared';
 
 const Role = { Administrator: 'Administrator', Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
 const ProjectRole = { Project_Leader: 'Project_Leader', Project_Member: 'Project_Member' } as const;
@@ -660,43 +662,14 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     const updated = Object.keys(updates).length ? await this.prisma.user.update({ where: { id: caller.id }, data: updates }) : current!;
     return { ...this.publicUser(updated), ...(emailChangePending ? { emailChangePending: true } : {}) };
   }
-  /** Erases personal data while retaining an anonymized author row so shared project history remains intact. */
   async deleteMyAccount(caller: Caller, password: string) {
-    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: caller.id }, select: { id: true, role: true, passwordHash: true, passwordEnabled: true } });
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: caller.id },
+      select: { id: true, email: true, passwordHash: true, passwordEnabled: true },
+    });
     if (user.passwordEnabled === false || !await verify(user.passwordHash, password)) fail('AUTH_INVALID_CREDENTIALS', 'Current password is incorrect.', 401, { password: 'incorrect' });
-    const [ledGroups, ledProjects, connections] = await Promise.all([
-      this.prisma.groupMember.findMany({ where: { userId: user.id, role: ProjectRole.Project_Leader }, select: { groupId: true } }),
-      this.prisma.projectMember.findMany({ where: { userId: user.id, role: ProjectRole.Project_Leader }, select: { projectId: true } }),
-      this.prisma.toolConnection.findMany({ where: { userId: user.id }, select: { id: true } }),
-    ]);
-    for (const membership of ledGroups) {
-      const successor = await this.prisma.groupMember.findFirst({ where: { groupId: membership.groupId, userId: { not: user.id } }, orderBy: { joinedAt: 'asc' } });
-      if (successor) await this.prisma.groupMember.update({ where: { id: successor.id }, data: { role: ProjectRole.Project_Leader } });
-    }
-    for (const membership of ledProjects) {
-      const successor = await this.prisma.projectMember.findFirst({ where: { projectId: membership.projectId, userId: { not: user.id } }, orderBy: { id: 'asc' } });
-      if (successor) await this.prisma.projectMember.update({ where: { id: successor.id }, data: { role: ProjectRole.Project_Leader } });
-    }
-    const connectionIds = connections.map((connection: any) => connection.id);
-    await this.removeRefreshSessions(user.id);
-    await this.prisma.$transaction([
-      ...(connectionIds.length ? [this.prisma.toolUsage.deleteMany({ where: { connectionId: { in: connectionIds } } }), this.prisma.linkedResource.deleteMany({ where: { connectionId: { in: connectionIds } } }), this.prisma.toolConnection.deleteMany({ where: { id: { in: connectionIds } } })] : []),
-      this.prisma.notification.deleteMany({ where: { userId: user.id } }),
-      this.prisma.pushSubscription.deleteMany({ where: { userId: user.id } }),
-      this.prisma.mobilePushToken.deleteMany({ where: { userId: user.id } }),
-      this.prisma.notificationPreference.deleteMany({ where: { userId: user.id } }),
-      this.prisma.vote.deleteMany({ where: { voterId: user.id } }),
-      this.prisma.aiInteraction.deleteMany({ where: { userId: user.id } }),
-      this.prisma.supportTicket.deleteMany({ where: { userId: user.id } }),
-      this.prisma.announcement.deleteMany({ where: { authorId: user.id } }),
-      this.prisma.groupMember.deleteMany({ where: { userId: user.id } }),
-      this.prisma.projectMember.deleteMany({ where: { userId: user.id } }),
-      this.prisma.admin.deleteMany({ where: { userId: user.id } }),
-      this.prisma.calendarNote.deleteMany({ where: { ownerId: user.id } }),
-      this.prisma.user.update({ where: { id: user.id }, data: { email: `deleted-${user.id}@invalid.local`, fullName: 'Deleted user', middleName: null, googleSubject: null, passwordHash: await hash(randomBytes(32).toString('hex')), institution: null, course: null, avatarUrl: null, status: 'removed', failedLogins: 0, lockedAt: null, archivedAt: null, tokenVersion: { increment: 1 } } }),
-    ]);
-    this.adminActivityChanged('users');
-    await this.audit.log('Privacy', 'account_deleted', 'info', 'User removed their account and personal data was anonymized', user.id);
+    await this.archiveAccount({ id: user.id, status: 'active', tokenVersion: caller.tv }, user.email);
+    await this.audit.log('Privacy', 'account_archived', 'info', 'User archived their own account', user.id);
     return { ok: true };
   }
   async member(groupId: string, userId: string, leader = false) { const membership = await this.prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId } } }); if (!membership || (leader && membership.role !== ProjectRole.Project_Leader)) fail('RBAC_FORBIDDEN', 'Group membership does not grant this action', 403); return membership; }
@@ -872,7 +845,19 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     return project;
   }
   async projectOptions(caller: Caller) {
-    return this.prisma.project.findMany({ where: this.projectAccessWhere(caller.id), select: { id: true, title: true }, orderBy: [{ title: 'asc' }, { id: 'asc' }] });
+    return this.prisma.project.findMany({ where: this.projectAccessWhere(caller.id), select: { id: true, title: true, createdAt: true }, orderBy: [{ title: 'asc' }, { id: 'asc' }] });
+  }
+
+  private async projectProgressById(where: Prisma.TaskWhereInput) {
+    const counts = await this.prisma.task.groupBy({ by: ['projectId', 'status'], where, _count: { _all: true } });
+    const progressById = new Map<string, { total: number; points: number }>();
+    for (const row of counts) {
+      const current = progressById.get(row.projectId) ?? { total: 0, points: 0 };
+      current.total += row._count._all;
+      current.points += taskProgress(row.status) * row._count._all;
+      progressById.set(row.projectId, current);
+    }
+    return progressById;
   }
 
   private async projectSummaries(caller: Caller, where: any, options: any) {
@@ -881,16 +866,9 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       group: { select: { id: true, name: true, members: { where: { userId: caller.id }, select: { role: true } } } },
       members: { where: { userId: caller.id }, select: { role: true } }, _count: { select: { members: true } },
     } });
-    const counts = projects.length ? await this.prisma.task.groupBy({
-      by: ['projectId', 'status'], where: { projectId: { in: projects.map((project) => project.id) } }, _count: { _all: true },
-    }) : [];
-    const progressById = new Map<string, { total: number; points: number }>();
-    for (const row of counts) {
-      const current = progressById.get(row.projectId) ?? { total: 0, points: 0 };
-      current.total += row._count._all;
-      current.points += taskProgress(row.status) * row._count._all;
-      progressById.set(row.projectId, current);
-    }
+    const progressById = projects.length
+      ? await this.projectProgressById({ projectId: { in: projects.map((project) => project.id) } })
+      : new Map<string, { total: number; points: number }>();
     return projects.map(({ group, members, ...project }) => {
       const progress = progressById.get(project.id);
       return {
@@ -902,12 +880,25 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     });
   }
 
-  async projectList(caller: Caller, filter: ListFilter) {
-    const where = {
+  async projectList(caller: Caller, filter: Omit<ListFilter, 'status'> & { status?: ProjectStatus; progressStatus?: TaskStatus }) {
+    const where: Prisma.ProjectWhereInput = {
       ...this.projectAccessWhere(caller.id),
       ...(filter.status ? { status: filter.status } : {}),
       ...(filter.q ? { title: { contains: filter.q } } : {}),
     };
+    if (filter.progressStatus) {
+      where.AND = { status: { notIn: ['on_hold', 'archived'] } };
+      if (filter.progressStatus === 'pending') {
+        where.tasks = { none: { status: { not: 'pending' } } };
+      } else if (filter.progressStatus === 'completed') {
+        where.tasks = { some: {}, every: { status: 'completed' } };
+      } else {
+        const progress = await this.projectProgressById({ project: { ...where } });
+        where.id = { in: [...progress].filter(([, value]) =>
+          projectProgressStatus(value.points / value.total) === filter.progressStatus
+        ).map(([id]) => id) };
+      }
+    }
     const sort = filter.sort === 'title' ? { title: 'asc' } : filter.sort === 'deadline' ? { deadline: { sort: 'asc', nulls: 'last' } } : { createdAt: 'desc' };
     const [items, total] = await Promise.all([
       this.projectSummaries(caller, where, { ...pageWindow(filter), orderBy: [sort, { id: 'asc' }] }),
@@ -2037,39 +2028,52 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     })).sort((a: any, b: any) => b.score - a.score || new Date(a.deadline ?? 0).getTime() - new Date(b.deadline ?? 0).getTime());
     return { ...stats, stages, taskRisks, recommendations: recommendations(stats.riskLevel, stats.bottlenecks), tasksCompleted: project.tasks.filter((task: any) => task.status === 'completed').length };
   }
-  async workflowReport(caller: Caller, projectId: string, period: 'daily' | 'weekly' | 'monthly') {
+  async workflowReport(caller: Caller, projectId: string, period: WorkflowPeriod, date?: string) {
     await this.projectMember(projectId, caller.id);
     const now = new Date();
-    const hour = 3600000;
     const timeZone = process.env.APP_TIME_ZONE ?? 'Asia/Manila';
-    const dayStart = new Date(`${reportingDate(now)}T00:00:00Z`);
-    const part = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' }).formatToParts(dayStart).find((item) => item.type === 'timeZoneName')?.value;
-    const offset = /GMT([+-])(\d{2}):(\d{2})/.exec(part ?? '');
-    const offsetMs = offset ? (offset[1] === '-' ? -1 : 1) * (+offset[2] * 60 + +offset[3]) * 60000 : 0;
-    const startOfDay = +dayStart - offsetMs;
-    const width = period === 'daily' ? 4 * hour : 24 * hour;
-    const count = period === 'daily' ? 6 : period === 'weekly' ? 7 : 30;
-    const startAt = period === 'daily' ? startOfDay : startOfDay - (count - 1) * width;
-    const endAt = startAt + width * count;
+    const today = reportingDate(now);
+    const selectedDate = !date || date === 'today' ? today : date;
+    if (workflowPeriodStart(period, selectedDate) > workflowPeriodStart(period, today)) {
+      fail('VALIDATION_FAILED', 'Choose a reporting period that has already started.', 400);
+    }
+    const { start, end, buckets } = workflowBuckets(period, selectedDate, today, timeZone, date !== undefined);
     const [memberships, activeAssignments, events] = await Promise.all([
       this.prisma.projectMember.findMany({ where: { projectId }, select: { role: true, userId: true, user: { select: { fullName: true } }, project: { select: { group: { select: { members: { select: { userId: true, role: true } } } } } } } }),
       this.prisma.taskAssignment.findMany({ where: { active: true, task: { projectId } }, select: { assigneeId: true, task: { select: { status: true } } } }),
-      this.prisma.workflowEvent.findMany({ where: { projectId, createdAt: { gte: new Date(startAt), lt: new Date(Math.min(endAt, +now)) } }, select: { actorId: true, type: true, createdAt: true, taskId: true } }),
+      this.prisma.workflowEvent.findMany({ where: { projectId, createdAt: { gte: buckets[0].start, lt: new Date(Math.min(+buckets.at(-1)!.end, +now)) } }, select: { actorId: true, type: true, createdAt: true, taskId: true } }),
     ]);
     const groupRoles = new Map((memberships[0]?.project.group?.members ?? []).map((member) => [member.userId, member.role]));
-    const axisOptions: Intl.DateTimeFormatOptions = period === 'daily' ? { hour: 'numeric' } : period === 'weekly' ? { weekday: 'short' } : { month: 'short', day: 'numeric' };
-    const labels = Array.from({ length: count }, (_, index) => new Date(startAt + index * width).toLocaleString('en-US', { ...axisOptions, timeZone }));
-    const members = memberships.map((member) => {
-      const contributions = events.filter((event) => event.actorId === member.userId);
-      const completions: number[] = Array(count).fill(0);
-      for (const event of contributions) if (event.type === WorkflowEventType.task_completed) completions[Math.floor((+event.createdAt - startAt) / width)] += 1;
-      return {
-        id: member.userId, fullName: member.user.fullName, role: groupRoles.get(member.userId) ?? member.role,
-        performance: averageTaskProgress(activeAssignments.filter((assignment) => assignment.assigneeId === member.userId).map((assignment) => assignment.task)),
-        totalContributions: contributions.length, completions,
-      };
-    });
-    return { labels, members };
+    const totals = buckets.map(() => 0);
+    const completionsByMember = new Map<string, number[]>();
+    const contributionCounts = new Map<string, number>();
+    const countedTasks = new Set<string>();
+    const chronologicalEvents = [...events].sort((a, b) => +a.createdAt - +b.createdAt);
+    for (const event of chronologicalEvents) {
+      contributionCounts.set(event.actorId, (contributionCounts.get(event.actorId) ?? 0) + 1);
+      if (event.type !== WorkflowEventType.task_completed) continue;
+      const index = buckets.findIndex((bucket) => event.createdAt >= bucket.start && event.createdAt < bucket.end);
+      if (index < 0 || (date && countedTasks.has(event.taskId))) continue;
+      countedTasks.add(event.taskId);
+      totals[index] += 1;
+      const completions = completionsByMember.get(event.actorId) ?? buckets.map(() => 0);
+      completions[index] += 1;
+      completionsByMember.set(event.actorId, completions);
+    }
+    const members = memberships.map((member) => ({
+      id: member.userId, fullName: member.user.fullName, role: groupRoles.get(member.userId) ?? member.role,
+      performance: averageTaskProgress(activeAssignments.filter((assignment) => assignment.assigneeId === member.userId).map((assignment) => assignment.task)),
+      totalContributions: contributionCounts.get(member.userId) ?? 0,
+      completions: completionsByMember.get(member.userId) ?? buckets.map(() => 0),
+    }));
+    const average = members.length ? members.reduce((sum, member) => sum + member.performance, 0) / members.length : 0;
+    return {
+      labels: buckets.map((bucket) => bucket.label),
+      details: buckets.map((bucket) => bucket.detail ?? ''),
+      totals, members, start, end, today, timeZone,
+      tasksCompleted: totals.reduce((sum, value) => sum + value, 0),
+      overallEfficiency: average === 100 ? 100 : Math.min(99, Math.round(average)),
+    };
   }
 
   async analyticsTrends(caller: Caller, projectId: string) {
@@ -2241,13 +2245,33 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
       patch.status = body.status as AdminAccountStatus;
     }
     if (Object.keys(patch).length === 0) fail('VALIDATION_FAILED', 'No valid fields to update', 400);
-    // A status change can lock someone out, so invalidate their sessions when they're no longer active.
-    const bumpTokens = patch.status !== undefined && patch.status !== 'active';
-    const current = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, fullName: true, status: true } });
+    const current = await this.prisma.user.findUnique({ where: { id: targetId }, select: { email: true, fullName: true, status: true, role: true, passwordEnabled: true } });
     if (!current) fail('NOT_FOUND', 'Account not found', 404);
     if (current.status === 'removed') fail('INVALID_OPERATION', 'Deleted accounts cannot be modified', 409);
     if (current.status === 'archived') fail('INVALID_OPERATION', 'Restore the account before modifying it', 409);
-    const updated = await this.prisma.user.update({ where: { id: targetId, status: { notIn: ['removed', 'archived'] } }, data: bumpTokens ? { ...patch, tokenVersion: { increment: 1 } } : patch });
+    const grantingAdmin = patch.role === Role.Administrator && current.role !== Role.Administrator;
+    if (grantingAdmin && (current.status !== 'active' || (patch.status && patch.status !== 'active'))) {
+      fail('INVALID_OPERATION', 'Activate the account before granting administrator access.', 409);
+    }
+    if (grantingAdmin && current.passwordEnabled === false) {
+      fail('INVALID_OPERATION', 'Administrator sign-in requires an account registered with a password.', 409);
+    }
+    const changesAdminAccess = grantingAdmin || (current.role === Role.Administrator && patch.role !== undefined && patch.role !== Role.Administrator);
+    const bumpTokens = changesAdminAccess || (patch.status !== undefined && patch.status !== 'active');
+    const updated = await this.prisma.user.update({
+      where: {
+        id: targetId,
+        status: grantingAdmin ? 'active' : { notIn: ['removed', 'archived'] },
+        ...(patch.role !== undefined ? { role: current.role } : {}),
+        ...(grantingAdmin ? { passwordEnabled: true } : {}),
+      },
+      data: bumpTokens ? { ...patch, tokenVersion: { increment: 1 } } : patch,
+    }).catch((error: unknown) => {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+        fail('INVALID_OPERATION', 'The account changed. Refresh the account list and try again.', 409);
+      }
+      throw error;
+    });
     if (patch.status && patch.status !== current.status) this.adminActivityChanged('users');
     if (patch.status) await this.audit.log('AdminModule', 'account_lifecycle_change', 'info', `Administrator set account ${updated.email} status to ${patch.status}`, caller.id);
     if (patch.role) await this.audit.log('AdminModule', 'account_role_change', 'info', `Administrator set account ${updated.email} role to ${patch.role}`, caller.id);
@@ -2268,13 +2292,27 @@ export class AppService implements OnModuleInit, OnApplicationShutdown {
     if (!target) fail('NOT_FOUND', 'Account not found', 404);
     if (target!.status === 'archived') fail('INVALID_OPERATION', 'That account is already archived', 409);
     if (target!.status === 'removed') fail('INVALID_OPERATION', 'Deleted accounts cannot be archived', 409);
-    await this.prisma.user.update({ where: { id: targetId, status: { not: 'removed' } }, data: { status: 'archived', archivedAt: new Date(), tokenVersion: { increment: 1 } } });
-    this.events?.emitAccountArchived?.(targetId);
-    this.adminActivityChanged('users');
-    await this.revokeArchivedCredentials(targetId, target!.email);
+    await this.archiveAccount({ id: targetId, status: { notIn: ['archived', 'removed'] } }, target!.email);
     await this.audit.log('AdminModule', 'account_archived', 'warning', `Administrator archived account ${target!.email}`, caller.id);
     await Promise.resolve(this.email?.sendAccountStatusChange?.(target!.email, target!.fullName, 'archived')).catch(async () => this.audit.log('AdminModule', 'account_status_email_failed', 'warning', `Account-status email could not be delivered to ${target!.email}`, caller.id));
     return { ok: true };
+  }
+
+  private async archiveAccount(where: Prisma.UserWhereUniqueInput & { id: string }, email: string) {
+    try {
+      await this.prisma.user.update({
+        where,
+        data: { status: 'archived', archivedAt: new Date(), tokenVersion: { increment: 1 } },
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+        fail('INVALID_OPERATION', 'Account status or session changed. Sign in again to continue.', 409);
+      }
+      throw error;
+    }
+    this.events?.emitAccountArchived?.(where.id);
+    this.adminActivityChanged('users');
+    await this.revokeArchivedCredentials(where.id, email);
   }
 
   private async revokeArchivedCredentials(userId: string, email: string) {

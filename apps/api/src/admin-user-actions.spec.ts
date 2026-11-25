@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { hash } from 'argon2';
 import { AppService } from './app.service.js';
 
 type Caller = { id: string; role: 'Administrator'; tv: number };
@@ -50,6 +51,13 @@ describe('adminUpdateUser', () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  it('rejects granting administrator access to an account without a password', async () => {
+    const { service, update, findUnique } = serviceWith();
+    findUnique.mockResolvedValue({ role: 'Project_Member', status: 'active', passwordEnabled: false });
+    await expect(service.adminUpdateUser(admin, 'user-9', { role: 'Administrator' })).rejects.toMatchObject({ status: 409 });
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('invalidates sessions when a status change makes the account inactive', async () => {
     const { service, update } = serviceWith();
 
@@ -78,6 +86,53 @@ describe('adminUpdateUser', () => {
   it('rejects an empty update', async () => {
     const { service } = serviceWith();
     await expect(service.adminUpdateUser(admin, 'user-9', {} as any)).rejects.toThrow();
+  });
+});
+
+describe('self-service account deletion', () => {
+  const caller = { id: 'user-9', role: 'Project_Member', tv: 3 } as const;
+  const password = 'Current-password-1';
+
+  async function fixture() {
+    const user = {
+      id: caller.id, email: 'target@websphere.fun', fullName: 'Target User',
+      passwordHash: await hash(password), passwordEnabled: true, status: 'active',
+    };
+    const update = vi.fn().mockImplementation(async ({ data }) => Object.assign(user, data));
+    const emitAccountArchived = vi.fn();
+    const removeRefreshSessions = vi.fn().mockResolvedValue(undefined);
+    const { service, log } = serviceWith({
+      prisma: { user: { update, findUniqueOrThrow: async () => user, findUnique: async () => user } },
+      events: { emitAccountArchived },
+      redis: { get: vi.fn().mockResolvedValue(null), delete: vi.fn().mockResolvedValue(undefined) },
+      removeRefreshSessions,
+      admin: AppService.prototype.admin,
+    });
+    return { service, user, update, emitAccountArchived, removeRefreshSessions, log };
+  }
+
+  it('archives the account in place and lets only an administrator restore it', async () => {
+    const { service, user, update, emitAccountArchived, removeRefreshSessions, log } = await fixture();
+    await expect(service.deleteMyAccount(caller, password)).resolves.toEqual({ ok: true });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: caller.id, status: 'active', tokenVersion: caller.tv },
+      data: { status: 'archived', archivedAt: expect.any(Date), tokenVersion: { increment: 1 } },
+    });
+    expect(emitAccountArchived).toHaveBeenCalledWith(caller.id);
+    expect(removeRefreshSessions).toHaveBeenCalledWith(caller.id);
+    expect(log).toHaveBeenCalledWith('Privacy', 'account_archived', 'info', expect.any(String), caller.id);
+    await expect(service.login(user.email, password)).rejects.toMatchObject({ response: { code: 'ACCOUNT_ARCHIVED' } });
+    await expect(service.adminRestoreUser(caller, caller.id)).rejects.toMatchObject({ response: { code: 'RBAC_FORBIDDEN' } });
+    await expect(service.adminRestoreUser(admin, caller.id)).resolves.toEqual({ ok: true });
+    expect(user).toMatchObject({ status: 'active', archivedAt: null, email: 'target@websphere.fun', fullName: 'Target User' });
+  });
+
+  it('requires the current password before archiving', async () => {
+    const { service, update, emitAccountArchived, removeRefreshSessions } = await fixture();
+    await expect(service.deleteMyAccount(caller, 'wrong password')).rejects.toMatchObject({ response: { code: 'AUTH_INVALID_CREDENTIALS' } });
+    expect(update).not.toHaveBeenCalled();
+    expect(emitAccountArchived).not.toHaveBeenCalled();
+    expect(removeRefreshSessions).not.toHaveBeenCalled();
   });
 });
 

@@ -17,6 +17,49 @@ function serviceWith(overrides: Record<string, unknown> = {}) {
   return service as AppService & any;
 }
 
+it('allows two administrators to sign in independently after an account is promoted', async () => {
+  const first = { id: 'admin-1', email: 'admin1@example.edu', role: 'Administrator', status: 'active', passwordEnabled: true, tokenVersion: 0, passwordHash: await hash('First!Pass9') };
+  const second = { id: 'user-2', email: 'admin2@example.edu', role: 'Project_Member', status: 'active', passwordEnabled: true, tokenVersion: 0, passwordHash: await hash('Second!Pass9') };
+  const users = [first, second];
+  const cache = new Map<string, string>();
+  const secret = new TextEncoder().encode('admin-session-test-secret');
+  const service = serviceWith({
+    accessSecret: secret,
+    refreshSecret: secret,
+    config: { get: () => '1h' },
+    prisma: {
+      user: {
+        findUnique: async ({ where }: { where: { id?: string; email?: string } }) => users.find((user) => user.id === where.id || user.email === where.email),
+        update: async ({ where, data }: { where: { id: string }; data: { role?: string; tokenVersion?: { increment: number } } }) => {
+          const user = users.find((entry) => entry.id === where.id)!;
+          if (data.role) user.role = data.role;
+          if (data.tokenVersion) user.tokenVersion += data.tokenVersion.increment;
+          return { ...user };
+        },
+      },
+      systemSetting: { findUnique: async () => null },
+    },
+    redis: {
+      set: async (key: string, value: string) => { cache.set(key, value); },
+      get: async (key: string) => cache.get(key),
+      delete: async (key: string) => { cache.delete(key); },
+      addToSet: async () => undefined,
+    },
+  });
+
+  const firstLogin = await service.login(first.email, 'First!Pass9', true);
+  const oldLogin = await service.login(second.email, 'Second!Pass9');
+  const admin = await service.caller(`Bearer ${firstLogin.access}`);
+  const member = await service.caller(`Bearer ${oldLogin.access}`);
+  await expect(service.adminUpdateUser(member, second.id, { role: 'Administrator' })).rejects.toMatchObject({ status: 403 });
+  await service.adminUpdateUser(admin, second.id, { role: 'Administrator' });
+  await expect(service.caller(`Bearer ${oldLogin.access}`)).rejects.toMatchObject({ status: 401 });
+
+  const secondLogin = await service.login(second.email, 'Second!Pass9', true);
+  await expect(service.caller(`Bearer ${firstLogin.access}`)).resolves.toMatchObject({ id: first.id, role: 'Administrator' });
+  await expect(service.caller(`Bearer ${secondLogin.access}`)).resolves.toMatchObject({ id: second.id, role: 'Administrator' });
+});
+
 describe('guided and locked password reset lifecycle', () => {
   it('keeps only the newest web login active for an account', async () => {
     const passwordHash = await hash('Valid!Pass9');
