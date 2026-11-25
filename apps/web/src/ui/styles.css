@@ -699,18 +699,127 @@ fieldset.tracker-platform-options{border:0;padding:0;min-width:0}fieldset.tracke
 .list-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; align-items: center; }
 .list-filters input[type="search"] { flex: 1 1 180px; }
 .list-filters select { flex: 0 1 auto; }
-.admin-activity-grid { margin-bottom: 16px; }
-.admin-activity-chart { min-width: 0; border: 1px solid #17417e; }
-.admin-activity-chart .cc-head { flex-wrap: wrap; }
-.admin-periods { display: flex; border: 1px solid #17417e; border-radius: 8px; overflow: hidden; }
-.admin-periods button { border: 0; border-right: 1px solid #17417e; padding: 6px 10px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+/* Web administrator dashboard */
+.admin-workspace .sidebar { padding: 18px 10px; }
+.admin-workspace .sb-head { padding: 0 8px 24px; }
+.admin-workspace .sb-brand-word { font-size: 17px; }
+.admin-workspace .sb-item { min-height: 40px; font-size: 14px; padding: 9px 10px; gap: 7px; }
+.admin-workspace .sb-label { white-space: nowrap; }
+.admin-workspace .sb-sec-label { font-size: 10px; padding: 8px 10px 5px; }
+.admin-workspace .sb-ico svg { width: 17px; height: 17px; }
+.admin-ticket-badge { margin-left: auto; background: #cf3036; color: #fff; font-size: 11px; font-weight: 800; padding: 1px 7px; border-radius: 99px; }
+.admin-workspace .uchip .ava { background: #087fa8; }
+.admin-workspace .user-detail { min-width: 0; overflow-wrap: anywhere; }
+.admin-workspace .sidebar-footer-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 9px; gap: 8px; }
+.admin-workspace .logout-btn { margin: 0 0 0 auto; }
+.admin-workspace .logout-btn svg, .admin-notifications svg { width: 16px; height: 16px; vertical-align: middle; }
+.admin-notifications { border: 1px solid transparent; border-radius: 7px; background: transparent; color: #fff; padding: 7px; }
+.admin-notifications:hover, .admin-notifications[aria-current=page] { background: #ffffff28; border-color: #ffffff48; }
+.admin-dashboard .ph { margin-bottom: 21px; }
+.admin-dashboard .ph h2 { font-size: clamp(21px, 1.55vw, 28px); }
+.admin-dashboard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.admin-dashboard-grid > .cc, .admin-dashboard-grid > .kpi {
+  min-width: 0;
+  border: 1px solid #00388f;
+  background: rgba(234, 246, 252, .78);
+  box-shadow: none;
+  margin: 0;
+}
+.admin-activity-chart, .admin-monitoring-card { padding: clamp(16px, 1.45vw, 26px); }
+.admin-activity-chart .cc-head { flex-wrap: wrap; gap: 12px; margin-bottom: 13px; }
+.cc-head .admin-chart-title { display: flex; align-items: baseline; gap: 8px; font-size: 15px; font-weight: 800; }
+.admin-chart-title strong { line-height: 1; font-size: clamp(28px, 2.1vw, 38px); font-weight: 800; }
+.admin-periods { display: flex; border: 1px solid #00388f; border-radius: 8px; overflow: hidden; }
+.admin-periods button { border: 0; border-right: 1px solid #00388f; padding: 5px 10px; background: transparent; color: #35748e; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .admin-periods button:last-child { border-right: 0; }
-.admin-periods button[aria-pressed=true] { background: #1741ab; color: white; }
-.admin-active-now strong { font-size: 2rem; }
-.admin-activity-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 12px 0 20px; }
-.admin-activity-stats div { background: #85b5dd26; padding: 8px 10px; border-radius: 8px; }
-.admin-activity-stats dt { font-size: .8rem; }
-.admin-activity-stats dd { margin: 0; font-weight: 700; }
-.workflow-periods { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.admin-periods button:hover { background: #c7e4f6; }
+.admin-periods button:focus-visible { outline: 2px solid #3168c8; outline-offset: -3px; }
+.admin-periods button[aria-pressed=true] { background: #0038a8; color: #fff; }
+.admin-chart-plot { position: relative; min-width: 0; height: clamp(215px, 16.5vw, 260px); }
+.admin-chart-message { display: grid; place-content: center; gap: 8px; height: 100%; text-align: center; color: var(--sub); }
+.admin-chart-history { display: block; margin-top: 5px; color: #35748e; font-size: 11px; }
+.admin-dashboard-grid > .kpi { display: grid; place-content: center; text-align: center; min-height: 91px; padding: 14px; }
+.admin-dashboard-grid .kval { font-size: clamp(27px, 2.15vw, 40px); font-weight: 800; line-height: 1; }
+.admin-dashboard-grid .kval.grn { color: #178852; }
+.admin-dashboard-grid .kval.yel { color: #a86409; }
+.admin-dashboard-grid .klbl { margin-top: 9px; color: #35748e; font-size: 12px; font-weight: 700; }
+.admin-monitoring-card .cc-head h3 { font-size: 15px; font-weight: 800; }
+.admin-monitoring-card .health-row { gap: 8px; min-height: 58px; padding: 10px 14px; background: #d9eef0; border: 1px solid #addbd5; border-radius: 10px; }
+.admin-monitoring-card .health-row:last-child { margin-bottom: 0; }
+.admin-monitoring-card .health-row strong { font-size: 14px; font-weight: 800; }
+.admin-monitoring-card .health-row small { color: #35748e; font-size: 12px; }
+.admin-monitoring-card .health-row .bdg { flex-shrink: 0; }
+.admin-monitoring-message { margin-bottom: 10px; color: var(--sub); }
+@media (max-width: 1050px) {
+  .admin-dashboard-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 780px) {
+  .admin-workspace .mobile-header { gap: 8px; }
+  .admin-workspace .mobile-header select { width: auto; min-width: 0; max-width: 52%; }
+  .admin-workspace .mobile-header .sb-brand-word { display: none; }
+}
+/* Workflow Analytics prototype layout */
+.main:has(> .workflow-analytics) { padding: 20px; }
+.sidebar-reopen + .workspace-body .main:has(> .workflow-analytics) { padding-top: 60px; }
+.workflow-header, .workflow-heading, .workflow-periods, .workflow-period-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.workflow-header { justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.workflow-heading { flex-wrap: wrap; gap: 10px; }
+.workflow-heading h2 { font-size: 16px; font-weight: 800; }
+.workflow-heading .legacy-select { width: auto; max-width: min(215px, 70vw); }
+.workflow-header p { margin-top: 2px; font-size: 11px; color: #35748e; }
+.workflow-periods { flex-wrap: wrap; }
+.workflow-period-buttons button, .workflow-analytics .legacy-select {
+  min-height: 27px;
+  padding: 4px 11px;
+  border: 1px solid #477388;
+  border-radius: 7px;
+  background: #e7f4fb;
+  color: #0b3a52;
+  font-size: 12px;
+  font-weight: 700;
+}
+.workflow-period-buttons button[aria-pressed=true] { background: #0038a8; border-color: #0038a8; color: #fff; }
+.workflow-period-buttons button:hover:not([aria-pressed=true]), .workflow-range button:hover:not(:disabled) { background: #d3edf9; }
+.workflow-range { display: grid; grid-template-columns: 32px minmax(0, 1fr) 32px; align-items: center; gap: 12px; margin: 13px 0 14px; }
+.workflow-range h3 { font-size: 16px; font-weight: 800; text-align: center; }
+.workflow-range button { width: 31px; height: 31px; border: 1px solid #7397b2; border-radius: 50%; background: #eaf6fc; color: #144b74; font-size: 20px; line-height: 1; }
+.workflow-range button:disabled { opacity: .38; }
+.workflow-analytics .workflow-kpis, .workflow-analytics .workflow-top-grid { gap: 13px; margin-bottom: 14px; }
+.workflow-analytics .workflow-kpis .kpi { min-height: 69px; padding: 10px 14px; border-width: 1px; border-color: #5379a6; border-radius: 12px; }
+.workflow-analytics .workflow-kpis .kval { font-size: 24px; font-weight: 800; }
+.workflow-analytics .workflow-kpis .klbl { margin-top: 6px; font-size: 11px; }
+.workflow-analytics .cc { padding: 16px; border: 1px solid #5379a6; border-radius: 12px; margin-bottom: 0; }
+.workflow-analytics .workflow-chart, .workflow-analytics .team-performance { min-height: 150px; min-width: 0; }
+.workflow-analytics .cc-head { gap: 8px; margin-bottom: 12px; padding-bottom: 0; border: 0; }
+.workflow-analytics .cc-head h3 { font-size: 13px; font-weight: 800; }
+.workflow-analytics .cc-head small { color: #35748e; font-size: 10px; text-align: right; }
+.workflow-bars { display: flex; gap: 5px; padding: 6px 6px 0; margin: 0; list-style: none; }
+.workflow-bars li { flex: 1 1 0; display: flex; flex-direction: column; align-items: stretch; min-width: 0; color: #35748e; text-align: center; font-size: 10px; }
+.workflow-bars strong { margin-top: 5px; }
+.workflow-bars small { font-size: 9px; }
+.workflow-bar-track { display: flex; align-items: flex-end; height: 67px; margin-top: 5px; border-bottom: 1px solid #c1dae9; }
+.workflow-bar-track > div { width: 100%; border-radius: 4px 4px 0 0; }
+.workflow-analytics .performance-list { gap: 8px; }
+.workflow-analytics .performance-label { margin-bottom: 3px; font-size: 11px; font-weight: 500; }
+.workflow-analytics .performance-label strong { font-size: 11px; }
+.workflow-analytics .performance-track { height: 5px; }
+.workflow-analytics .workflow-bottlenecks, .workflow-analytics .workflow-bottom-grid { margin-top: 14px; }
+.workflow-analytics .workflow-bottlenecks { overflow-x: auto; }
+.workflow-analytics .workflow-bottlenecks .tbl { min-width: 450px; }
+.workflow-analytics .workflow-bottlenecks .tbl th { border-bottom: 1px solid #7295a9; }
+.workflow-analytics .workflow-bottlenecks .tbl td { padding-block: 7px; }
+.workflow-analytics .workflow-summary { min-height: 0; background: #c6eafa55; border-color: #a4d4ee88; }
+.workflow-analytics .summary-insights { gap: 6px; }
+.workflow-analytics .summary-insight { padding: 8px 11px; border-radius: 6px; font-size: 12px; }
+@media (max-width: 780px) {
+  .main:has(> .workflow-analytics) { padding-inline: 16px; }
+  .workflow-header { gap: 12px; }
+  .workflow-analytics .workflow-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .workflow-analytics .workflow-kpis .kpi { padding-inline: 5px; }
+}
 
 @media (max-height: 900px) { .auth-wrap:has(.register-box) { align-items: flex-start; } .auth-wrap .register-box { margin-block: auto; } }

@@ -1,12 +1,47 @@
 import { useEffect, useState } from 'react';
+import type { Plugin, ScriptableContext } from 'chart.js';
 import { request } from '../api';
 import { ChartCanvas } from './ChartCanvas';
 import { workspaceSubscription } from './workspaceSocket';
 
 type Metric = 'users' | 'projects';
-const periods = [{ value: 'weekly', label: 'Weekly' }, { value: 'monthly', label: 'Monthly' }, { value: 'six-months', label: 'Last 6 Months' }] as const;
+const periods = [{ value: 'weekly', label: 'Weekly' }, { value: 'monthly', label: 'Monthly' }, { value: 'six-months', label: '6 Months' }] as const;
 type Period = (typeof periods)[number]['value'];
 type Activity = { current: number; points: Array<{ label: string; value: number | null }> };
+
+const chartValues: Plugin = {
+  id: 'adminActivityValues',
+  afterDatasetsDraw(chart) {
+    const { ctx } = chart;
+    const dataset = chart.data.datasets[0];
+    const elements = chart.getDatasetMeta(0).data;
+    const isBar = chart.getDatasetMeta(0).type === 'bar';
+    const stride = Math.max(1, Math.ceil(elements.length / (chart.width / 46)));
+    ctx.save();
+    ctx.font = '700 12px Outfit, sans-serif';
+    ctx.fillStyle = typeof dataset.borderColor === 'string' ? dataset.borderColor : '#0038a8';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    elements.forEach((element, index) => {
+      const value = dataset.data[index];
+      if (typeof value !== 'number' || (index % stride && index !== elements.length - 1)) return;
+      if (isBar && value === 0) return;
+      ctx.fillText(String(value), element.x, element.y - 8);
+    });
+    ctx.restore();
+  },
+};
+
+function chartFill({ chart }: ScriptableContext<'bar' | 'line'>, projects: boolean) {
+  const area = chart.chartArea;
+  const start = projects ? '#6389c6' : '#1c99616b';
+  const end = projects ? '#a8c1e0' : '#1c996100';
+  if (!area) return start;
+  const gradient = chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+  gradient.addColorStop(0, start);
+  gradient.addColorStop(1, end);
+  return gradient;
+}
 
 export function AdminActivityChart({ metric, initialPeriod = 'weekly' }: { metric: Metric; initialPeriod?: Period }) {
   const [period, setPeriod] = useState<Period>(initialPeriod);
@@ -30,28 +65,60 @@ export function AdminActivityChart({ metric, initialPeriod = 'weekly' }: { metri
     }).catch((problem: Error) => { if (!controller.signal.aborted) setError(problem.message); });
     return () => controller.abort();
   }, [metric, period, revision]);
-  const points = activity?.points.filter((point) => point.value !== null) ?? [];
-  const values = points.map((point) => point.value!);
-  const first = values[0];
-  const change = values.length > 1 ? values.at(-1)! - first : null;
-  const tint = projects ? '#1741ab' : '#19875b';
+  const tint = projects ? '#0038a8' : '#19965e';
+  const hasGaps = activity?.points.some((point) => point.value === null);
   return <section className="cc admin-activity-chart">
-    <div className="cc-head"><h3>{title}</h3><div className="admin-periods" aria-label={`${title} reporting period`}>
-      {periods.map((option) => <button key={option.value} type="button" aria-pressed={period === option.value} onClick={() => { if (period !== option.value) setActivity(null); setPeriod(option.value); }}>{option.label}</button>)}
-    </div></div>
-    {error ? <p role="alert">{error}</p> : null}
-    {activity ? <>
-      <p className="admin-active-now"><strong style={{ color: tint }}>{activity.current}</strong> active now</p>
-      <dl className="admin-activity-stats">
-        <div><dt>Average</dt><dd>{(values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1)}</dd></div>
-        <div><dt>Peak</dt><dd>{Math.max(...values)}</dd></div>
-        <div><dt>Change</dt><dd>{change === null ? '—' : `${change > 0 ? '+' : ''}${change}${first ? ` (${Math.round(change / first * 100)}%)` : ''}`}</dd></div>
-      </dl>
-      <ChartCanvas height={270} config={{ type: projects ? 'bar' : 'line', data: {
-        labels: activity.points.map((point) => point.label),
-        datasets: [{ label: title, data: activity.points.map((point) => point.value), borderColor: tint, backgroundColor: projects ? tint : '#19875b27', fill: !projects, tension: .25, borderRadius: 5 }],
-      }, options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { maxTicksLimit: 8 } }, y: { beginAtZero: true, ticks: { precision: 0 } } } } }} />
-      {points.length < activity.points.length ? <small>History begins with the first recorded count.</small> : null}
-    </> : error ? <button type="button" className="btn-o" onClick={() => setRevision((value) => value + 1)}>Retry</button> : <p role="status">Loading activity…</p>}
+    <div className="cc-head"><h3 className="admin-chart-title"><strong style={{ color: tint }}>{activity?.current ?? '—'}</strong>{title}</h3>
+      <div className="admin-periods" role="group" aria-label={`${title} reporting period`}>
+        {periods.map((option) => <button key={option.value} type="button" aria-pressed={period === option.value} onClick={() => {
+          if (period !== option.value) { setActivity(null); setError(''); setPeriod(option.value); }
+        }}>{option.label}</button>)}
+      </div>
+    </div>
+    <div className="admin-chart-plot">
+      {activity ? <ChartCanvas height={260} label={`${title}. ${activity.points.map(({ label, value }) => `${label}: ${value ?? 'no data'}`).join(', ')}`} config={{
+        type: projects ? 'bar' : 'line',
+        data: {
+          labels: activity.points.map((point) => point.label),
+          datasets: [{
+            label: title,
+            data: activity.points.map((point) => point.value),
+            borderColor: tint,
+            backgroundColor: (context: ScriptableContext<'bar' | 'line'>) => chartFill(context, projects),
+            hoverBackgroundColor: tint,
+            fill: !projects,
+            cubicInterpolationMode: 'monotone',
+            borderWidth: projects ? 0 : 4,
+            borderRadius: 6,
+            borderSkipped: false,
+            pointRadius: activity.points.length > 12 ? 2 : 3.5,
+            pointBorderWidth: 2,
+            pointBackgroundColor: '#fff',
+          }],
+        },
+        plugins: [chartValues],
+        options: {
+          maintainAspectRatio: false,
+          layout: { padding: { top: 17, right: 5 } },
+          interaction: { mode: 'nearest', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: { backgroundColor: '#0b3a52', padding: 10, displayColors: false },
+          },
+          scales: {
+            x: {
+              offset: true, grid: { display: false }, border: { color: '#9bb7da' },
+              ticks: { color: '#397a96', font: { family: 'Outfit, Arial, sans-serif', weight: 600 }, maxRotation: 0, maxTicksLimit: 8 },
+            },
+            y: {
+              beginAtZero: true, grace: 1, grid: { color: '#c9def2', drawTicks: false },
+              border: { display: false, dash: [3, 4] },
+              ticks: { color: '#397a96', font: { family: 'Outfit, Arial, sans-serif', weight: 600 }, precision: 0, maxTicksLimit: 5, padding: 7 },
+            },
+          },
+        },
+      }} /> : error ? <div className="admin-chart-message"><p role="alert">{error}</p><button type="button" className="btn-o" onClick={() => { setError(''); setRevision((value) => value + 1); }}>Retry</button></div> : <p className="admin-chart-message" role="status">Loading activity…</p>}
+    </div>
+    {hasGaps ? <small className="admin-chart-history">History begins with the first recorded count.</small> : null}
   </section>;
 }

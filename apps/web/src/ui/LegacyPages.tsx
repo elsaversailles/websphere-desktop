@@ -1,11 +1,10 @@
 import { ListFilters, ListPager, useListFilters, type ListPage } from './ListFilters';
 import { startGoogle } from '../googleAuth';
 import { workspaceSubscription } from './workspaceSocket';
-import { identifyResourceLink } from '@websphere/shared';
+import { identifyResourceLink, schedulingDay, shiftWorkflowPeriod, workflowPeriods, workflowPeriodStart, type WorkflowPeriod } from '@websphere/shared';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiRequestError, apiUrl, getAccessToken, request, type User } from '../api';
 import { disablePush, enablePush, pushStatus as getPushStatus, type PushStatus } from '../push';
-import { ChartCanvas } from './ChartCanvas';
 import { EventAnnouncementCard, type EventAnnouncement } from './EventAnnouncement';
 import { ToolLogo } from './ToolLogo';
 import { TrackerActivityIcon } from './TrackerActivityIcon';
@@ -21,19 +20,13 @@ import { agendaForDay, calendarItems, type CalendarData } from './calendar';
 type Notice = (message: string) => void;
 type ConfirmAction = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => void };
 type Task = { id: string; title: string; projectId: string; deadline?: string | null; completedAt?: string | null; assignedAt?: string; priority: string; status: string; project?: { id: string; title: string }; assignedBy?: string; progress?: number };
-type Project = { id: string; title: string; status: string; deadline?: string | null; group: { name: string }; members?: Array<{ role: string }>; tasks: Array<{ status: string }> };
+type Project = { id: string; title: string; createdAt?: string; status: string; deadline?: string | null; group: { name: string }; members?: Array<{ role: string }>; tasks: Array<{ status: string }> };
 
-const workflowPeriods = ['daily', 'weekly', 'monthly'] as const;
-type WorkflowPeriod = (typeof workflowPeriods)[number];
-type WorkflowMember = { id: string; fullName: string; role: string; totalContributions: number; performance: number; completions: number[] };
-type WorkflowReport = { labels: string[]; members: WorkflowMember[] };
+type WorkflowMember = { id: string; fullName: string; role: string; totalContributions: number; performance: number };
+type WorkflowReport = { labels: string[]; details: string[]; totals: number[]; members: WorkflowMember[]; today: string; timeZone: string; tasksCompleted: number; overallEfficiency: number };
 const periodLabel = (value: WorkflowPeriod) => value[0].toUpperCase() + value.slice(1);
-const memberPalette = ['#436dc3', '#248457', '#a96618', '#7657c9', '#087e9e', '#b85260', '#58672b'];
-function memberChartColor(id: string) {
-  let hash = 0;
-  for (const letter of id) hash = (hash * 31 + letter.charCodeAt(0)) >>> 0;
-  return memberPalette[hash % memberPalette.length];
-}
+const workflowBarColors = ['#3057a7', '#36a665', '#bd8739', '#664ac4', '#30a3ba', '#269654', '#c74e5c'];
+const performanceColors = ['#0038a8', '#19935a', '#b2701c', '#397f9c'];
 type WorkflowSummary = { summary: string; recommendations: string[]; insights: Array<{ tone: 'great' | 'notice' | 'action'; label: string; text: string }> };
 type TaskRisk = { taskId: string; title: string; status: string; deadline?: string | null; projectTitle: string; assignees: string[]; score: number; level: 'high' | 'medium' | 'low'; predictedCompletion: string; delayDays: number };
 
@@ -133,18 +126,6 @@ export function TasksPage({ notify, focusedTaskId }: { notify: Notice; focusedTa
 }
 
 export function CalendarPage({ notify }: { notify: Notice }) {
-  const [connectingOutlook, setConnectingOutlook] = useState(false);
-  async function connectOutlook() {
-    setConnectingOutlook(true);
-    try {
-      const returnUrl = new URL('/calendar', window.location.origin);
-      const { authorizeUrl } = await request<{ authorizeUrl: string }>(`/integrations/microsoft/authorize?redirectUri=${encodeURIComponent(returnUrl.href)}`);
-      window.location.assign(authorizeUrl);
-    } catch (error) {
-      notify(error instanceof Error ? error.message : 'Outlook could not be connected.');
-      setConnectingOutlook(false);
-    }
-  }
   useEffect(() => {
     const url = new URL(window.location.href);
     if (url.searchParams.get('connected') !== 'microsoft') return;
@@ -235,7 +216,6 @@ export function CalendarPage({ notify }: { notify: Notice }) {
         <span className="cal-month-label" aria-live="polite">{cursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span>
         <button className="cal-nav-btn" onClick={() => setCursor(shiftMonth(cursor, 1))} aria-label="Next month">›</button>
         <button className="cal-today-btn" onClick={() => setCursor(new Date())}>Today</button>
-        <button className="btn-o btn-sm" disabled={connectingOutlook} onClick={() => void connectOutlook()}>Connect Outlook</button>
         <button className="btn btn-sm" onClick={() => openCreate()}>+ New Event</button>
       </div>
     </div>
@@ -284,6 +264,9 @@ export function ProjectsAnalyticsPage({ kind, notify }: { kind: 'workflow' | 'pr
   const [selected, setSelected] = useState('');
   const [analytics, setAnalytics] = useState<any>(null);
   const [period, setPeriod] = useState<WorkflowPeriod>('weekly');
+  const [reportDate, setReportDate] = useState('today');
+  const [reportCalendar, setReportCalendar] = useState<{ today: string; timeZone: string } | null>(null);
+  const [reportError, setReportError] = useState('');
   const [report, setReport] = useState<WorkflowReport | null>(null);
   const [summary, setSummary] = useState<WorkflowSummary | null>(null);
   const [revision, setRevision] = useState(0);
@@ -316,23 +299,83 @@ export function ProjectsAnalyticsPage({ kind, notify }: { kind: 'workflow' | 'pr
   useEffect(() => {
     if (!selected || kind !== 'workflow') return;
     const abort = new AbortController();
-    void request<WorkflowReport>(`/projects/${selected}/analytics/workflow?period=${period}`, { signal: abort.signal }).then((result) => {
-      if (!abort.signal.aborted) setReport(result);
-    }).catch((error: Error) => { if (!abort.signal.aborted) notify(error.message); });
+    const query = new URLSearchParams({ period, date: reportDate });
+    setReportError('');
+    void request<WorkflowReport>(`/projects/${selected}/analytics/workflow?${query}`, { signal: abort.signal }).then((result) => {
+      if (abort.signal.aborted) return;
+      setReport(result);
+      setReportCalendar({ today: result.today, timeZone: result.timeZone });
+    }).catch((error: Error) => { if (!abort.signal.aborted) setReportError(error.message); });
     return () => abort.abort();
-  }, [selected, period, kind, revision, notify]);
-  const changePeriod = (next: WorkflowPeriod) => { if (period !== next) setReport(null); setPeriod(next); };
-  const periodControls = <div className="workflow-periods">
-    <div className="admin-periods" aria-label="Reporting period">{workflowPeriods.map((option) => <button key={option} type="button" aria-pressed={period === option} onClick={() => changePeriod(option)}>{periodLabel(option)}</button>)}</div>
-    <select className="legacy-select" aria-label="Reporting period" value={period} onChange={(event) => changePeriod(event.target.value as WorkflowPeriod)}>{workflowPeriods.map((option) => <option key={option} value={option}>{periodLabel(option)}</option>)}</select>
-  </div>;
-  const picker = <select className="legacy-select" value={selected} onChange={(event) => { setReport(null); setAnalytics(null); setSummary(null); setSelected(event.target.value); }}><option value="">Select a project</option>{projects?.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select>;
-  if (kind === 'workflow') return <section className="sp on workflow-analytics"><Head title="Workflow Analytics" action={picker} /><div className="krow c3 workflow-kpis"><Kpi value={analytics ? `${Math.round((analytics.overallEfficiency ?? 0) * 100)}%` : '—'} label="Overall Efficiency" /><Kpi value={analytics?.bottlenecks?.length ?? '—'} label="Bottlenecks Detected" tone="yel" /><Kpi value={analytics?.tasksCompleted ?? '—'} label="Tasks Completed" tone="grn" /></div><div className="g2 workflow-top-grid"><TrendChartCard report={report} period={period} controls={periodControls} /><TeamPerformanceCard members={report?.members ?? null} /></div><BottleneckAnalysis stages={analytics?.stages ?? null} /><div className="workflow-bottom-grid"><WorkflowSummaryCard summary={summary} /></div></section>;
+  }, [selected, period, reportDate, kind, revision]);
+  const today = reportCalendar?.today ?? schedulingDay();
+  const currentPeriod = workflowPeriodStart(period, today);
+  const selectedPeriod = reportDate === 'today' ? currentPeriod : workflowPeriodStart(period, reportDate);
+  const projectCreatedAt = projects?.find((project) => project.id === selected)?.createdAt;
+  const projectStart = projectCreatedAt ? schedulingDay(new Date(projectCreatedAt), reportCalendar?.timeZone) : today;
+  const firstPeriod = workflowPeriodStart(period, projectStart < today ? projectStart : today);
+  const periodName = workflowPeriodLabel(period, selectedPeriod);
+  function selectPeriod(next: WorkflowPeriod, date: string) {
+    const key = workflowPeriodStart(next, date);
+    const latest = workflowPeriodStart(next, today);
+    const first = workflowPeriodStart(next, projectStart < today ? projectStart : today);
+    const value = key >= latest ? 'today' : key >= first ? key : first;
+    if (next === period && value === reportDate) return;
+    setReport(null);
+    setPeriod(next);
+    setReportDate(value);
+  }
+  const picker = <select className="legacy-select" aria-label="Project" value={selected} onChange={(event) => {
+    setReport(null); setReportDate('today'); setAnalytics(null); setSummary(null); setSelected(event.target.value);
+  }}><option value="">Select a project</option>{projects?.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select>;
+  if (kind === 'workflow') {
+    const currentLabel = period === 'daily' ? 'Today' : period === 'weekly' ? 'This week' : 'This month';
+    const options = new Map<string, Array<{ key: string; label: string }>>();
+    for (let key = currentPeriod; key >= firstPeriod; key = shiftWorkflowPeriod(period, key, -1)) {
+      const group = period === 'daily' ? workflowPeriodLabel('monthly', key) : '';
+      const entries = options.get(group) ?? [];
+      const label = workflowPeriodLabel(period, key, true);
+      entries.push({ key, label: key === currentPeriod ? `${label} (${currentLabel})` : label });
+      options.set(group, entries);
+    }
+    const rangeCaption = selectedPeriod === currentPeriod ? (period === 'monthly' ? 'Month to date' : currentLabel) : null;
+    return <section className="sp on workflow-analytics">
+      <header className="workflow-header">
+        <div><div className="workflow-heading"><h2>Workflow Analytics</h2>{picker}</div><p>{periodName}{rangeCaption ? ` · ${rangeCaption}` : ''}</p></div>
+        <div className="workflow-periods">
+          <div className="workflow-period-buttons" role="group" aria-label="Reporting period">
+            {workflowPeriods.map((option) => <button key={option} type="button" aria-pressed={period === option} onClick={() => selectPeriod(option, reportDate === 'today' ? today : reportDate)}>{periodLabel(option)}</button>)}
+          </div>
+          <select className="legacy-select" aria-label="Reporting date range" value={selectedPeriod} disabled={!selected} onChange={(event) => selectPeriod(period, event.target.value)}>
+            {[...options].map(([group, entries]) => group ? <optgroup key={group} label={group}>{entries.map(({ key, label }) => <option key={key} value={key}>{label}</option>)}</optgroup> :
+              entries.map(({ key, label }) => <option key={key} value={key}>{label}</option>))}
+          </select>
+        </div>
+      </header>
+      <div className="workflow-range">
+        <button type="button" aria-label="Previous reporting period" disabled={!selected || selectedPeriod <= firstPeriod} onClick={() => selectPeriod(period, shiftWorkflowPeriod(period, selectedPeriod, -1))}>‹</button>
+        <h3 aria-live="polite">{periodName}</h3>
+        <button type="button" aria-label="Next reporting period" disabled={!selected || selectedPeriod >= currentPeriod} onClick={() => selectPeriod(period, shiftWorkflowPeriod(period, selectedPeriod, 1))}>›</button>
+      </div>
+      {reportError ? <div className="calendar-error" role="alert">{reportError} <button type="button" onClick={() => setRevision((value) => value + 1)}>Retry</button></div> : null}
+      <div className="krow c3 workflow-kpis">
+        <Kpi value={report ? `${report.overallEfficiency}%` : '—'} label="Overall Efficiency" />
+        <Kpi value={analytics?.bottlenecks?.length ?? '—'} label="Bottlenecks Detected" tone="yel" />
+        <Kpi value={report?.tasksCompleted ?? '—'} label="Tasks Completed" tone="grn" />
+      </div>
+      <div className="g2 workflow-top-grid">
+        <TrendChartCard report={report} period={period} caption={workflowPeriodLabel(period, selectedPeriod, true)} />
+        <TeamPerformanceCard members={report?.members ?? null} showCurrent={selectedPeriod !== currentPeriod} />
+      </div>
+      <BottleneckAnalysis stages={analytics?.stages ?? null} />
+      <div className="workflow-bottom-grid"><WorkflowSummaryCard summary={summary} /></div>
+    </section>;
+  }
   const taskRisks: TaskRisk[] = analytics?.taskRisks ?? [];
   const highRiskTasks = taskRisks.filter((task) => task.level === 'high');
-  const delayedTasks = taskRisks.filter((task) => task.delayDays > 0);
+  const mediumRiskTasks = taskRisks.filter((task) => task.level === 'medium');
   const onTrackTasks = taskRisks.filter((task) => task.level === 'low');
-  return <section className="sp on predictive-monitoring"><Head title="Predictive Monitoring" action={picker} /><div className="krow c3 predictive-kpis"><Kpi value={analytics ? highRiskTasks.length : '—'} label="High Risk Tasks" tone="red" /><Kpi value={analytics ? delayedTasks.length : '—'} label="Possible Delays" tone="yel" /><Kpi value={analytics ? onTrackTasks.length : '—'} label="On-Track Tasks" tone="grn" /></div><div className="cc predictive-risk-assessment"><div className="cc-head"><h3>Risk Assessment by Task</h3></div>{analytics ? taskRisks.length ? <div className="risk-cards">{taskRisks.map((task) => <TaskRiskCard task={task} key={task.taskId} />)}</div> : <Empty>Tasks will appear here once they are added to this project.</Empty> : <Empty>Project risk and progress insights will appear here once you have project data.</Empty>}</div><PredictionAlerts tasks={taskRisks} recommendations={analytics?.recommendations ?? []} /><div className="cc predicted-timeline"><div className="cc-head"><h3>Predicted Timeline</h3></div>{analytics ? taskRisks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Assigned Member</th><th>Project</th><th>Original Deadline</th><th>Predicted Completion</th><th>Risk</th><th>Recommendation</th></tr></thead><tbody>{taskRisks.map((task) => <tr key={task.taskId}><td>{task.title}</td><td>{assigneeLabel(task)}</td><td>{task.projectTitle}</td><td>{formatDateOnly(task.deadline)}</td><td className={`timeline-${task.level}`}>{date(task.predictedCompletion)}{task.delayDays ? ` (${task.delayDays > 0 ? '+' : ''}${task.delayDays} days)` : ''}</td><td><Badge value={task.level} /></td><td>{taskRecommendation(task)}</td></tr>)}</tbody></table> : <Empty>Predicted timelines will appear here.</Empty> : <Empty>Predicted timelines will appear here.</Empty>}</div></section>;
+  return <section className="sp on predictive-monitoring"><Head title="Predictive Monitoring" action={picker} /><div className="krow c3 predictive-kpis"><Kpi value={analytics ? highRiskTasks.length : '—'} label="High Risk Tasks" tone="red" /><Kpi value={analytics ? mediumRiskTasks.length : '—'} label="Possible Delays" tone="yel" /><Kpi value={analytics ? onTrackTasks.length : '—'} label="On-Track Tasks" tone="grn" /></div><div className="cc predictive-risk-assessment"><div className="cc-head"><h3>Risk Assessment by Task</h3></div>{analytics ? taskRisks.length ? <div className="risk-cards">{taskRisks.map((task) => <TaskRiskCard task={task} key={task.taskId} />)}</div> : <Empty>Tasks will appear here once they are added to this project.</Empty> : <Empty>Project risk and progress insights will appear here once you have project data.</Empty>}</div><PredictionAlerts tasks={taskRisks} recommendations={analytics?.recommendations ?? []} /><div className="cc predicted-timeline"><div className="cc-head"><h3>Predicted Timeline</h3></div>{analytics ? taskRisks.length ? <table className="tbl"><thead><tr><th>Task</th><th>Assigned Member</th><th>Project</th><th>Original Deadline</th><th>Predicted Completion</th><th>Risk</th><th>Recommendation</th></tr></thead><tbody>{taskRisks.map((task) => <tr key={task.taskId}><td>{task.title}</td><td>{assigneeLabel(task)}</td><td>{task.projectTitle}</td><td>{formatDateOnly(task.deadline)}</td><td className={`timeline-${task.level}`}>{date(task.predictedCompletion)}{task.delayDays ? ` (${task.delayDays > 0 ? '+' : ''}${task.delayDays} days)` : ''}</td><td><Badge value={task.level} /></td><td>{taskRecommendation(task)}</td></tr>)}</tbody></table> : <Empty>Predicted timelines will appear here.</Empty> : <Empty>Predicted timelines will appear here.</Empty>}</div></section>;
 }
 
 export function AnnouncementsPage({ notify }: { notify: Notice }) {
@@ -480,13 +523,13 @@ export function ProfilePage({ user, onUserUpdated, onSessionInvalidated, notify 
     setDeleting(true);
     try {
       await request('/users/me', { method: 'DELETE', body: JSON.stringify({ confirmation: values.get('confirmation'), password: values.get('password') }) });
-      notify('Your account and personal data have been removed.');
+      notify('Your account has been archived. Only an administrator can restore it.');
       onSessionInvalidated();
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not delete your account.'); }
     finally { setDeleting(false); }
   }
   const browserPushDescription = browserPush === 'enabled' ? 'Browser notifications are enabled for this device.' : browserPush === 'blocked' ? 'Browser permission is blocked. Enable notifications in your browser settings.' : browserPush === 'unsupported' ? 'This browser does not support push notifications.' : 'Get alerts even when WebSphere is closed.';
-  return <section className="sp on"><Head title="Profile & Settings" /><div className="profile-grid"><form className="cc no-bottom" onSubmit={(event) => void saveProfile(event)}><div className="profile-hero">{user.avatarUrl ? <img className="profile-avatar profile-avatar-image" src={user.avatarUrl} alt="Profile" /> : <div className={`profile-avatar tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</div>}<div className="profile-identity"><div className="profile-name-row"><strong>{user.fullName}</strong><div className="profile-photo-menu" ref={photoMenu}><button type="button" className="profile-photo-menu-trigger" aria-label="Profile photo options" aria-expanded={photoMenuOpen} disabled={uploading} onClick={() => setPhotoMenuOpen((open) => !open)}>⋯</button>{photoMenuOpen ? <div className="profile-photo-menu-list"><button type="button" onClick={() => { setPhotoMenuOpen(false); photoInput.current?.click(); }}>Change photo</button><button type="button" disabled={!user.avatarUrl} onClick={() => void removeAvatar()}>Remove photo</button></div> : null}</div></div>{uploading ? <span>Updating photo…</span> : null}<input ref={photoInput} className="sr-only" type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} aria-label="Choose profile photo" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; void uploadAvatar(file); }} /></div></div><div className="profile-edit-heading"><span className="lbl">Profile details</span>{editingProfile ? <button type="button" className="btn-o btn-sm" onClick={cancelProfileEdit}>Cancel</button> : <button type="button" className="btn-o btn-sm" onClick={() => setEditingProfile(true)}>Edit</button>}</div>{([['fullName', 'Full Name'], ['email', 'Email'], ['institution', 'School'], ['course', 'Course']] as const).map(([field, label]) => <label className="profile-field" key={field}><span className="lbl">{label}</span><input value={profile[field]} type={field === 'email' ? 'email' : 'text'} disabled={!editingProfile} aria-invalid={Boolean(errors[field])} onChange={(event) => setField(field, event.target.value)} placeholder={`Your ${label.toLowerCase()}`} /><span className="profile-error">{errors[field]}</span></label>)}{editingProfile ? <button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save Profile'}</button> : null}</form><div className="cc no-bottom"><div className="cc-head"><h3>Settings</h3></div><SettingsTitle>Notifications</SettingsTitle><Toggle title="Task Reminders" description="Get assignment, update, and task-deadline alerts" checked={prefs.tasks} onChange={() => toggle('tasks')} /><Toggle title="Group Chat Alerts" description="Notify me when someone messages the group" checked={prefs.groupActivity} onChange={() => toggle('groupActivity')} /><Toggle title="Deadline Alerts" description="Notify me 24 hours before project deadlines" checked={prefs.deadlines} onChange={() => toggle('deadlines')} /><Toggle title="AI Suggestions" description="Receive AI-generated project recommendations" checked={prefs.aiSuggestions} onChange={() => toggle('aiSuggestions')} /><Toggle title="Email Notifications" description="Send notification alerts to your email" checked={prefs.emailEnabled} onChange={() => toggle('emailEnabled')} /><Toggle title="Browser Push Notifications" description={browserPushDescription} checked={browserPush === 'enabled'} disabled={changingBrowserPush || browserPush === 'unsupported'} onChange={() => void toggleBrowserPush()} /><SettingsTitle>Privacy</SettingsTitle><Toggle title="Profile Photo Visibility" description="Allow group members to see your profile photo" checked={prefs.profileVisibility} onChange={() => toggle('profileVisibility')} /><Toggle title="Activity Status" description="Show others when you are online" checked={prefs.activityStatus} onChange={() => toggle('activityStatus')} /><SettingsTitle>Security</SettingsTitle>{user.googleLinked ? <p>Google account linked</p> : <Security title="Google sign-in" description="Link a Google account to sign in with it" action="Link Google" onClick={() => void startGoogle('link').catch((error: Error) => notify(error.message))} />}{user.passwordEnabled !== false ? <Security title="Change Password" description="Update your account password" action="Change" onClick={() => setChangingPassword(true)} /> : null}<Security danger title="Delete Account" description="Permanently erase your account and personal data" action="Delete" onClick={() => setDeleteOpen(true)} /></div></div>{changingPassword ? <SecurityModal title="Change Password" onClose={() => { if (!saving) setChangingPassword(false); }}><form onSubmit={(event) => void changePassword(event)}><p className="security-modal-help">Changing your password signs you out of your active sessions.</p><label className="lbl" htmlFor="profile-current-password">Current password</label><input id="profile-current-password" className="ifield" name="oldPassword" type="password" autoComplete="current-password" required autoFocus /><label className="lbl" htmlFor="profile-new-password">New password</label><input id="profile-new-password" className="ifield" name="password" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><label className="lbl" htmlFor="profile-confirm-password">Confirm new password</label><input id="profile-confirm-password" className="ifield" name="confirm" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><div className="modal-acts"><button type="button" className="btn-o" disabled={saving} onClick={() => setChangingPassword(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Changing…' : 'Change Password'}</button></div></form></SecurityModal> : null}{deleteOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleting) setDeleteOpen(false); }}><div className="modal-box" role="dialog" aria-modal="true" aria-labelledby="delete-account-title"><div className="modal-ttl"><span id="delete-account-title">Delete account</span><button type="button" className="modal-close" aria-label="Close account deletion" disabled={deleting} onClick={() => setDeleteOpen(false)}>×</button></div><form onSubmit={(event) => void deleteAccount(event)}><p className="security-modal-help">This permanently erases your personal account data. Shared project history will be kept under an anonymous author.</p><label className="lbl">Current password</label><input className="ifield" name="password" type="password" autoComplete="current-password" required /><label className="lbl">Type DELETE to confirm</label><input className="ifield" name="confirmation" autoComplete="off" required /><div className="modal-acts"><button type="button" className="btn-o" disabled={deleting} onClick={() => setDeleteOpen(false)}>Cancel</button><button className="btn danger" disabled={deleting}>{deleting ? 'Deleting…' : 'Delete account'}</button></div></form></div></div> : null}</section>;
+  return <section className="sp on"><Head title="Profile & Settings" /><div className="profile-grid"><form className="cc no-bottom" onSubmit={(event) => void saveProfile(event)}><div className="profile-hero">{user.avatarUrl ? <img className="profile-avatar profile-avatar-image" src={user.avatarUrl} alt="Profile" /> : <div className={`profile-avatar tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</div>}<div className="profile-identity"><div className="profile-name-row"><strong>{user.fullName}</strong><div className="profile-photo-menu" ref={photoMenu}><button type="button" className="profile-photo-menu-trigger" aria-label="Profile photo options" aria-expanded={photoMenuOpen} disabled={uploading} onClick={() => setPhotoMenuOpen((open) => !open)}>⋯</button>{photoMenuOpen ? <div className="profile-photo-menu-list"><button type="button" onClick={() => { setPhotoMenuOpen(false); photoInput.current?.click(); }}>Change photo</button><button type="button" disabled={!user.avatarUrl} onClick={() => void removeAvatar()}>Remove photo</button></div> : null}</div></div>{uploading ? <span>Updating photo…</span> : null}<input ref={photoInput} className="sr-only" type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} aria-label="Choose profile photo" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; void uploadAvatar(file); }} /></div></div><div className="profile-edit-heading"><span className="lbl">Profile details</span>{editingProfile ? <button type="button" className="btn-o btn-sm" onClick={cancelProfileEdit}>Cancel</button> : <button type="button" className="btn-o btn-sm" onClick={() => setEditingProfile(true)}>Edit</button>}</div>{([['fullName', 'Full Name'], ['email', 'Email'], ['institution', 'School'], ['course', 'Course']] as const).map(([field, label]) => <label className="profile-field" key={field}><span className="lbl">{label}</span><input value={profile[field]} type={field === 'email' ? 'email' : 'text'} disabled={!editingProfile} aria-invalid={Boolean(errors[field])} onChange={(event) => setField(field, event.target.value)} placeholder={`Your ${label.toLowerCase()}`} /><span className="profile-error">{errors[field]}</span></label>)}{editingProfile ? <button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Save Profile'}</button> : null}</form><div className="cc no-bottom"><div className="cc-head"><h3>Settings</h3></div><SettingsTitle>Notifications</SettingsTitle><Toggle title="Task Reminders" description="Get assignment, update, and task-deadline alerts" checked={prefs.tasks} onChange={() => toggle('tasks')} /><Toggle title="Group Chat Alerts" description="Notify me when someone messages the group" checked={prefs.groupActivity} onChange={() => toggle('groupActivity')} /><Toggle title="Deadline Alerts" description="Notify me 24 hours before project deadlines" checked={prefs.deadlines} onChange={() => toggle('deadlines')} /><Toggle title="AI Suggestions" description="Receive AI-generated project recommendations" checked={prefs.aiSuggestions} onChange={() => toggle('aiSuggestions')} /><Toggle title="Email Notifications" description="Send notification alerts to your email" checked={prefs.emailEnabled} onChange={() => toggle('emailEnabled')} /><Toggle title="Browser Push Notifications" description={browserPushDescription} checked={browserPush === 'enabled'} disabled={changingBrowserPush || browserPush === 'unsupported'} onChange={() => void toggleBrowserPush()} /><SettingsTitle>Privacy</SettingsTitle><Toggle title="Profile Photo Visibility" description="Allow group members to see your profile photo" checked={prefs.profileVisibility} onChange={() => toggle('profileVisibility')} /><Toggle title="Activity Status" description="Show others when you are online" checked={prefs.activityStatus} onChange={() => toggle('activityStatus')} /><SettingsTitle>Security</SettingsTitle>{user.googleLinked ? <p>Google account linked</p> : <Security title="Google sign-in" description="Link a Google account to sign in with it" action="Link Google" onClick={() => void startGoogle('link').catch((error: Error) => notify(error.message))} />}{user.passwordEnabled !== false ? <Security title="Change Password" description="Update your account password" action="Change" onClick={() => setChangingPassword(true)} /> : null}<Security danger title="Delete Account" description="Archive your account and sign out on all devices" action="Delete" onClick={() => setDeleteOpen(true)} /></div></div>{changingPassword ? <SecurityModal title="Change Password" onClose={() => { if (!saving) setChangingPassword(false); }}><form onSubmit={(event) => void changePassword(event)}><p className="security-modal-help">Changing your password signs you out of your active sessions.</p><label className="lbl" htmlFor="profile-current-password">Current password</label><input id="profile-current-password" className="ifield" name="oldPassword" type="password" autoComplete="current-password" required autoFocus /><label className="lbl" htmlFor="profile-new-password">New password</label><input id="profile-new-password" className="ifield" name="password" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><label className="lbl" htmlFor="profile-confirm-password">Confirm new password</label><input id="profile-confirm-password" className="ifield" name="confirm" type="password" autoComplete="new-password" minLength={8} maxLength={64} required /><div className="modal-acts"><button type="button" className="btn-o" disabled={saving} onClick={() => setChangingPassword(false)}>Cancel</button><button className="btn" disabled={saving}>{saving ? 'Changing…' : 'Change Password'}</button></div></form></SecurityModal> : null}{deleteOpen ? <div className="modal-ov open" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleting) setDeleteOpen(false); }}><div className="modal-box" role="dialog" aria-modal="true" aria-labelledby="delete-account-title"><div className="modal-ttl"><span id="delete-account-title">Delete account</span><button type="button" className="modal-close" aria-label="Close account deletion" disabled={deleting} onClick={() => setDeleteOpen(false)}>×</button></div><form onSubmit={(event) => void deleteAccount(event)}><p className="security-modal-help">Your account will be archived and signed out on all devices. Your data will be kept, and only an administrator can restore access.</p><label className="lbl">Current password</label><input className="ifield" name="password" type="password" autoComplete="current-password" required /><label className="lbl">Type DELETE to confirm</label><input className="ifield" name="confirmation" autoComplete="off" required /><div className="modal-acts"><button type="button" className="btn-o" disabled={deleting} onClick={() => setDeleteOpen(false)}>Cancel</button><button className="btn danger" disabled={deleting}>{deleting ? 'Deleting…' : 'Delete account'}</button></div></form></div></div> : null}</section>;
 }
 
 const trackerFilters = ['all', 'pending', 'ongoing', 'for_review', 'completed'] as const;
@@ -503,8 +546,6 @@ function LinkFields({ resource }: { resource?: TrackerResource }) {
   const [url, setUrl] = useState(resource?.externalUrl ?? '');
   const detected = url ? identifyResourceLink(url) : null;
   return <>
-    <label className="lbl" htmlFor="tracker-link-title">Link name</label>
-    <input className="ifield" id="tracker-link-title" name="title" required minLength={2} maxLength={180} defaultValue={resource?.title} />
     <label className="lbl" htmlFor="tracker-link-url">External URL</label>
     <input className="ifield" id="tracker-link-url" name="externalUrl" type="url" required value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://…" />
     {detected ? <p className="tracker-auto-progress-note"><ToolLogo provider={detected.provider} name={detected.name} size="xs" /> {detected.name}</p> : null}
@@ -512,11 +553,12 @@ function LinkFields({ resource }: { resource?: TrackerResource }) {
   </>;
 }
 
-function academicLink(form: FormData) {
+function academicLink(form: FormData, existingTitle?: string) {
   const externalUrl = String(form.get('externalUrl') ?? '').trim();
-  if (!identifyResourceLink(externalUrl)) throw new Error('Use an HTTPS link without embedded credentials.');
+  const detected = identifyResourceLink(externalUrl);
+  if (!detected) throw new Error('Use an HTTPS link without embedded credentials.');
   if (!form.has('academicUse')) throw new Error('Confirm the link is for academic project work.');
-  return { title: form.get('title'), externalUrl, academicUse: true };
+  return { title: existingTitle ?? detected.name, externalUrl, academicUse: true };
 }
 
 export function TrackerPage({ notify }: { notify: Notice }) {
@@ -588,7 +630,7 @@ export function TrackerPage({ notify }: { notify: Notice }) {
     const form = new FormData(event.currentTarget);
     setSaving(true);
     try {
-      await request(`/resources/${editingResource.id}`, { method: 'PATCH', body: JSON.stringify({ ...academicLink(form), ...(editingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
+      await request(`/resources/${editingResource.id}`, { method: 'PATCH', body: JSON.stringify({ ...academicLink(form, editingResource.title), ...(editingTask.canUpdateStatus ? { status: editStatus } : {}) }) });
       await refresh();
       setEditingTaskId(null); setEditingResourceId(null);
       notify('External file link updated.');
@@ -825,31 +867,47 @@ export function AdminSettingsPage({ notify, onSessionInvalidated }: { notify: No
 }
 
 function Kpi({ value, label, tone }: { value: string | number; label: string; tone?: string }) { return <div className="kpi"><div className={`kval ${tone ?? ''}`}>{value}</div><div className="klbl">{label}</div></div>; }
-function TrendChartCard({ report, period, controls }: { report: WorkflowReport | null; period: WorkflowPeriod; controls: React.ReactNode }) {
-  return <div className="cc workflow-chart">
-    <div className="cc-head"><h3>Task Completion — {periodLabel(period)}</h3></div>{controls}
-    {report?.members.length ? <ChartCanvas height={200} config={{
-      type: 'line',
-      data: { labels: report.labels, datasets: report.members.map((member) => ({ label: member.fullName, data: member.completions, borderColor: memberChartColor(member.id), backgroundColor: memberChartColor(member.id), tension: .2 })) },
-      options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { maxTicksLimit: 8 } }, y: { beginAtZero: true, ticks: { precision: 0 } } } },
-    }} /> : <Empty>Project completions will appear here.</Empty>}
-  </div>;
+function workflowPeriodLabel(period: WorkflowPeriod, key: string, compact = false) {
+  const start = new Date(`${key}T00:00:00Z`);
+  if (period === 'monthly') return start.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    month: compact ? 'short' : 'long', day: 'numeric', ...(compact ? {} : { year: 'numeric' }), timeZone: 'UTC',
+    ...(period === 'daily' ? { weekday: compact ? 'short' : 'long' } : {}),
+  });
+  return period === 'daily' ? formatter.format(start) : formatter.formatRange(start, new Date(`${shiftWorkflowPeriod('daily', key, 6)}T00:00:00Z`));
 }
-function TeamPerformanceCard({ members }: { members: WorkflowMember[] | null }) {
+function TrendChartCard({ report, period, caption }: { report: WorkflowReport | null; period: WorkflowPeriod; caption: string }) {
+  const max = Math.max(1, ...(report?.totals ?? []));
+  const colors = period === 'monthly' ? ['#1b3f98'] : period === 'daily' ? ['#1b3f98', '#36a665', '#36a665', '#1b3f98'] : workflowBarColors;
+  return <section className="cc workflow-chart">
+    <div className="cc-head"><h3>Task Completion — {periodLabel(period)}</h3><small>{caption}{period === 'monthly' ? ' · by week' : period === 'daily' ? ' · by time of day' : ''}</small></div>
+    {report ? <ol className="workflow-bars" aria-label="Completed tasks by time">
+      {report.labels.map((label, index) => {
+        const count = report.totals[index];
+        const description = `${report.details[index] || label}: ${count} completed ${count === 1 ? 'task' : 'tasks'}`;
+        return <li key={label} title={description} aria-label={description}>
+          <div className="workflow-bar-track"><div style={{ height: `${(count / max) * 100}%`, background: colors[index % colors.length] }} /></div>
+          <strong>{label}</strong>{report.details[index] ? <small>{report.details[index]}</small> : null}
+        </li>;
+      })}
+    </ol> : <Empty>Project completions will appear here.</Empty>}
+  </section>;
+}
+function TeamPerformanceCard({ members, showCurrent }: { members: WorkflowMember[] | null; showCurrent: boolean }) {
   const hasData = !!members?.length;
   const sortedMembers = members ? [...members].sort((a, b) => b.performance - a.performance || b.totalContributions - a.totalContributions || a.fullName.localeCompare(b.fullName)) : [];
   return <div className="cc team-performance">
-    <div className="cc-head"><h3>Team Member Performance</h3></div>
+    <div className="cc-head"><h3>Team Member Performance</h3>{showCurrent ? <small>Current progress</small> : null}</div>
     {!hasData ? <Empty>{members ? 'No project members found.' : 'Project members will appear here when a project is selected.'}</Empty> : <>
-      <div className="performance-list">{sortedMembers.map((member) => <div className="performance-row" key={member.id}>
+      <div className="performance-list">{sortedMembers.map((member, index) => <div className="performance-row" key={member.id} style={{ '--progress': performanceColors[index % performanceColors.length] } as React.CSSProperties}>
         <div className="performance-label"><span>{member.fullName}{member.role === 'Project_Leader' ? ' (Leader)' : ''}</span><strong>{member.performance}%</strong></div>
-        <div className="performance-track"><i style={{ '--performance-progress': member.performance / 100, background: memberChartColor(member.id) } as React.CSSProperties} /></div>
+        <div className="performance-track"><i style={{ '--performance-progress': member.performance / 100 } as React.CSSProperties} /></div>
       </div>)}</div>
     </>}
   </div>;
 }
 function BottleneckAnalysis({ stages }: { stages: Array<{ taskId: string; stage: string; averageDays: number | null; expectedDays: number | null; delayDays: number; impact: 'high' | 'medium' | 'none' }> | null }) {
-  return <div className="cc workflow-bottlenecks"><div className="cc-head"><h3>Bottleneck Analysis</h3></div>{stages?.length ? <table className="tbl"><thead><tr><th>Stage</th><th>Avg Time Spent</th><th>Delay</th><th>Impact</th></tr></thead><tbody>{stages.map((stage) => <tr key={stage.taskId}><td>{stage.stage}</td><td>{stage.averageDays === null ? 'Not started' : formatDays(stage.averageDays)}</td><td className={`delay-${stage.impact}`}>{stage.delayDays > 0 ? `+${formatDays(stage.delayDays)}` : 'On Track'}</td><td><span className={`bdg ${stage.impact === 'high' ? 'r' : stage.impact === 'medium' ? 'y' : 'g'}`}>{stage.impact}</span></td></tr>)}</tbody></table> : <Empty>Stages with scheduled dates will appear here once work begins.</Empty>}</div>;
+  return <div className="cc workflow-bottlenecks"><div className="cc-head"><h3>Bottleneck Analysis</h3><small>Current project</small></div>{stages?.length ? <table className="tbl"><thead><tr><th>Stage</th><th>Avg Time Spent</th><th>Expected</th><th>Delay</th><th>Impact</th></tr></thead><tbody>{stages.map((stage) => <tr key={stage.taskId}><td>{stage.stage}</td><td>{stage.averageDays === null ? 'Not started' : formatDays(stage.averageDays)}</td><td>{stage.expectedDays === null ? '—' : formatDays(stage.expectedDays)}</td><td className={`delay-${stage.impact}`}>{stage.delayDays > 0 ? `+${formatDays(stage.delayDays)}` : 'On Track'}</td><td><span className={`bdg ${stage.impact === 'high' ? 'r' : stage.impact === 'medium' ? 'y' : 'g'}`}>{stage.impact}</span></td></tr>)}</tbody></table> : <Empty>Stages with scheduled dates will appear here once work begins.</Empty>}</div>;
 }
 function WorkflowSummaryCard({ summary }: { summary: WorkflowSummary | null }) { return <div className="cc workflow-summary"><div className="cc-head"><h3>Workflow Summary</h3></div>{summary ? <div className="summary-insights">{summary.insights.map((insight, index) => <div className={`summary-insight ${insight.tone}`} key={index}><strong>{insight.label}:</strong> {insight.text}</div>)}</div> : <Empty>Your workflow summary will appear here.</Empty>}</div>; }
 function formatDays(value: number) { const rounded = Math.round(value * 10) / 10; return `${rounded % 1 === 0 ? rounded.toFixed(0) : rounded} day${rounded === 1 ? '' : 's'}`; }

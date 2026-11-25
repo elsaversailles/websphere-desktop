@@ -1,8 +1,16 @@
 import { z } from 'zod';
+export { workflowPeriods, workflowPeriodStart, shiftWorkflowPeriod, type WorkflowPeriod } from './workflow-period.js';
 export { SCHEDULING_TIME_ZONE, sameScheduleDate, scheduleDateErrors, schedulingDay, type ScheduleDate, type ScheduleErrors, type ScheduleKind } from './scheduling.js';
 
 export const roles = ['Administrator', 'Project_Leader', 'Project_Member'] as const;
 export type Role = (typeof roles)[number];
+export function projectProgressStatus(average: number) {
+  if (average >= 100) return 'completed';
+  if (average >= 75) return 'for_review';
+  if (average > 0) return 'ongoing';
+  return 'pending';
+}
+
 export const CHAT_MESSAGE_MAX_LENGTH = 10_000;
 export const chatMessageSchema = z.object({ groupId: z.string().min(1), body: z.string().trim().min(1).max(CHAT_MESSAGE_MAX_LENGTH, 'Messages can contain up to 10,000 characters') });
 

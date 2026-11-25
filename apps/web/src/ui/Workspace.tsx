@@ -7,6 +7,7 @@ import { clearSession, invalidateSession, request, saveSessionUser, type Session
 import { AiAssistantModal, useAiAssistant } from './AiAssistantModal';
 import { Dashboard } from './Dashboard';
 import { avatarTone } from './health';
+import { ConfirmDialog } from './ConfirmDialog';
 import { GroupChatPage, loadSavedCall, removeSavedCall } from './GroupChatPage';
 import { GroupsPage } from './GroupsPage';
 import { IdeasPage } from './IdeasPage';
@@ -30,7 +31,7 @@ const userSections: Array<{ title: string; links: Link[] }> = [
   { title: 'Account', links: [{ id: 'profile', label: 'Profile & Settings', icon: '♙' }, { id: 'support', label: 'My Support Requests', icon: '?' }, { id: 'feedback', label: 'Feedback', icon: '☆' }] },
 ];
 const adminSections: Array<{ title: string; links: Link[] }> = [
-  { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'archive', label: 'Archived Accounts', icon: '🗄' }, { id: 'notifications', label: 'Notifications', icon: '♧' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
+  { title: 'System Admin', links: [{ id: 'admin', label: 'User Activity', icon: '▣' }, { id: 'accounts', label: 'Account Management', icon: '♧' }, { id: 'archive', label: 'Archive Accounts', icon: '🗄' }, { id: 'feedback', label: 'User Feedback', icon: '☆' }, { id: 'settings', label: 'System Settings', icon: '◉' }] },
 ];
 
 // The sidebar sections are the source of truth for which pages a role may land on, so a restored
@@ -63,7 +64,7 @@ function navPath(nav: NavState) {
 
 export function Workspace({ session, onSessionChange, onLogout, notify }: WorkspaceProps) {
   const administrator = session.role === 'Administrator';
-  const drawerName = administrator ? 'Admin Administrator' : session.user.fullName;
+  const drawerName = session.user.fullName;
   const userId = session.user.id;
   const [nav, setNav] = useState(() => readNavState(administrator));
   const { page, selectedGroupId = '', selectedProjectId = '', selectedTaskId = '', selectedTicketId = '' } = nav;
@@ -115,6 +116,22 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const sections = administrator ? adminSections : userSections;
+  const [monitoring, setMonitoring] = useState<Monitoring | null>(null);
+  const [monitoringError, setMonitoringError] = useState('');
+  const [monitoringRevision, setMonitoringRevision] = useState(0);
+  const openTickets = monitoring?.activity.openSupportTickets ?? 0;
+
+  useEffect(() => {
+    if (!administrator) return;
+    const controller = new AbortController();
+    setMonitoringError('');
+    void request<Monitoring>('/admin/monitoring', { signal: controller.signal }).then((data) => {
+      if (!controller.signal.aborted) setMonitoring(data);
+    }).catch((error: Error) => {
+      if (!controller.signal.aborted) setMonitoringError(error.message);
+    });
+    return () => controller.abort();
+  }, [administrator, monitoringRevision, page]);
 
   useEffect(() => {
     let cancelled = false;
@@ -180,11 +197,13 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       if (event.initiatorUserId !== userId) setIncomingCall({ groupId: event.groupId, kind: event.kind });
     });
     on('call:ended', (event: { groupId: string }) => setIncomingCall((current) => current?.groupId === event.groupId ? null : current));
+    on('admin:activity', () => { if (administrator) setMonitoringRevision((value) => value + 1); });
     on('notification:new', (notification: { message?: string; relatedType?: string | null }) => {
       if (notification?.message && notification.relatedType?.trim().toLowerCase() !== 'chat') notify(notification.message);
+      if (administrator && notification?.relatedType === 'ticket') setMonitoringRevision((value) => value + 1);
     });
     return () => { dispose(); closeWorkspaceSocket(); };
-  }, [userId, notify]);
+  }, [userId, notify, administrator]);
 
   // A login on another device increments the account token version immediately. Poll without
   // touching the idle timer so an open previous session is returned to the landing page promptly.
@@ -249,20 +268,20 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
     if (next) onSessionChange(next);
   }
 
-  return <main className="page on">{activeCall && (page !== 'chat' || selectedGroupId !== activeCall.groupId) ? <button type="button" className="workspace-active-call" onClick={() => go({ page: 'chat', selectedGroupId: activeCall.groupId })}>● Return to call · {formatCallDuration(callTime - activeCall.startedAt)}</button> : null}{incomingCall && (page !== 'chat' || incomingCall.groupId !== selectedGroupId) ? <div className="workspace-call-invite call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => go({ page: 'chat', selectedGroupId: incomingCall.groupId })}>Join call</button><button className="btn-o btn-sm" onClick={() => setIncomingCall(null)}>Dismiss</button></div> : null}<div className="layout">
+  return <main className="page on">{activeCall && (page !== 'chat' || selectedGroupId !== activeCall.groupId) ? <button type="button" className="workspace-active-call" onClick={() => go({ page: 'chat', selectedGroupId: activeCall.groupId })}>● Return to call · {formatCallDuration(callTime - activeCall.startedAt)}</button> : null}{incomingCall && (page !== 'chat' || incomingCall.groupId !== selectedGroupId) ? <div className="workspace-call-invite call-invite"><span>{incomingCall.kind === 'video' ? 'Video' : 'Voice'} call in progress</span><button className="btn btn-sm" onClick={() => go({ page: 'chat', selectedGroupId: incomingCall.groupId })}>Join call</button><button className="btn-o btn-sm" onClick={() => setIncomingCall(null)}>Dismiss</button></div> : null}<div className={`layout${administrator ? ' admin-workspace' : ''}`}>
     <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
       <div className="sb-head"><button className="sb-brand" onClick={() => setPage(administrator ? 'admin' : 'dashboard')}><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">{systemName}</span></button><button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'} title={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar navigation'}><BurgerIcon /></button></div>
-      <nav aria-label="Main navigation">{sections.map((section) => <div className="sb-inline-sec" key={section.title}><div className="sb-sec-label">{section.title}</div>{section.links.map((link) => <button type="button" className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} onClick={() => setPage(link.id)}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span></button>)}</div>)}</nav>
-      <div className="sb-bot"><div className="uchip">{!administrator && session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className={`ava tone-${avatarTone(session.user.id)}`}>{initials(drawerName)}</span>}<span className="user-detail"><strong className="u-name">{drawerName}</strong>{administrator ? <small className="u-role">websphereeadmin@gmail.com</small> : null}</span></div><button className="logout-btn" onClick={() => setLogoutOpen(true)} title={sidebarCollapsed ? 'Log out' : undefined}><span aria-hidden="true">↪</span><span className="logout-label">Logout</span></button></div>
+      <nav aria-label="Main navigation">{sections.map((section) => <div className="sb-inline-sec" key={section.title}><div className="sb-sec-label">{section.title}</div>{section.links.map((link) => <button type="button" className={`sb-item ${page === link.id ? 'on' : ''}`} key={link.id} aria-current={page === link.id ? 'page' : undefined} onClick={() => setPage(link.id)}><span className="sb-ico"><NavIcon page={link.id} /></span><span className="sb-label">{link.label}</span>{administrator && link.id === 'accounts' && openTickets > 0 ? <span className="admin-ticket-badge" aria-label={`${openTickets} open support tickets`}>{openTickets}</span> : null}</button>)}</div>)}</nav>
+      <div className="sb-bot"><div className="uchip">{!administrator && session.user.avatarUrl ? <img className="ava ava-image" src={session.user.avatarUrl} alt={`${session.user.fullName}'s profile picture`} /> : <span className={`ava tone-${avatarTone(session.user.id)}`}>{initials(drawerName)}</span>}<span className="user-detail"><strong className="u-name">{drawerName}</strong>{administrator ? <small className="u-role" title={session.user.email}>Administrator</small> : null}</span></div><div className="sidebar-footer-actions">{administrator ? <button type="button" className="admin-notifications" aria-label="Notifications" title="Notifications" aria-current={page === 'notifications' ? 'page' : undefined} onClick={() => setPage('notifications')}><NavIcon page="notifications" /></button> : null}<button className="logout-btn" onClick={() => setLogoutOpen(true)} title={sidebarCollapsed ? 'Log out' : undefined}>{administrator ? <LogoutIcon /> : <span aria-hidden="true">↪</span>}<span className="logout-label">Logout</span></button></div></div>
     </aside>
     {sidebarCollapsed ? <button className="sidebar-reopen" type="button" onClick={() => setSidebarCollapsed(false)} aria-label="Show sidebar navigation" title="Show sidebar navigation"><BurgerIcon /></button> : null}
-    <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">{systemName}</span></span><select value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}</select></div><div className="main">
+    <div className="workspace-body"><div className="mobile-header"><span className="sb-brand"><img className="sb-logo" src="/logo.png" alt="" /><span className="sb-brand-word">{systemName}</span></span><select aria-label="Page" value={page} onChange={(event) => setPage(event.target.value as Page)}>{sections.flatMap((section) => section.links).map((link) => <option key={link.id} value={link.id}>{link.label}</option>)}{administrator ? <option value="notifications">Notifications</option> : null}</select>{administrator ? <button type="button" className="admin-notifications" aria-label="Log out" onClick={() => setLogoutOpen(true)}><LogoutIcon /></button> : null}</div><div className="main">
       {page === 'dashboard' ? <Dashboard userId={session.user.id} name={session.user.fullName} notify={notify} onPage={navigate} onNotificationClick={openNotification} /> : null}
       {page === 'groups' ? <GroupsPage selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} onChat={() => setPage('chat')} notify={notify} /> : null}
       {page === 'ideas' ? <IdeasPage userId={session.user.id} selectedGroupId={selectedGroupId} onSelectGroup={setSelectedGroupId} notify={notify} /> : null}
       {page === 'projects' ? <ProjectsPage notify={notify} userId={userId} focusedTask={projectTaskFocus} selectedProjectId={selectedProjectId} onSelectProject={(id) => go({ page: 'projects', selectedProjectId: id })} /> : null}
-      {page === 'admin' ? <AdminPage notify={notify} /> : null}
-      {page === 'accounts' ? <AdminAccounts notify={notify} focusedTicketId={selectedTicketId} /> : null}
+      {page === 'admin' ? <AdminPage data={monitoring} error={monitoringError} onRetry={() => setMonitoringRevision((value) => value + 1)} /> : null}
+      {page === 'accounts' ? <AdminAccounts key="accounts" notify={notify} focusedTicketId={selectedTicketId} onTicketSaved={() => setMonitoringRevision((value) => value + 1)} /> : null}
       {page === 'archive' ? <AdminArchive notify={notify} /> : null}
       {page === 'chat' || activeCall ? <div hidden={page !== 'chat' || (!!activeCall && selectedGroupId !== activeCall.groupId)}><GroupChatPage userId={session.user.id} selectedGroupId={activeCall?.groupId ?? selectedGroupId} onSelectGroup={setSelectedGroupId} onIdeas={() => setPage('ideas')} notify={notify} incomingCall={incomingCall?.groupId === selectedGroupId ? incomingCall : null} onIncomingCallHandled={() => setIncomingCall(null)} onCallChange={setActiveCall} /></div> : null}
       {page === 'tasks' ? <TasksPage notify={notify} focusedTaskId={selectedTaskId} /> : null}
@@ -274,7 +293,7 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
       {page === 'announcements' ? <AnnouncementsPage notify={notify} /> : null}
       {page === 'profile' ? <ProfilePage user={session.user} onUserUpdated={updateUser} onSessionInvalidated={() => { clearSession(); onLogout(); }} notify={notify} /> : null}
       {page === 'settings' ? <AdminSettingsPage notify={notify} onSessionInvalidated={() => { clearSession(); onLogout(); }} /> : null}
-      {page === 'feedback' ? <FeedbackPage notify={notify} /> : null}
+      {page === 'feedback' ? administrator ? <AdminAccounts key="feedback" feedbackOnly notify={notify} onTicketSaved={() => setMonitoringRevision((value) => value + 1)} /> : <FeedbackPage notify={notify} /> : null}
       {page === 'support' ? <SupportRequestsPage notify={notify} focusedTicketId={selectedTicketId} /> : null}
     </div></div>
   </div>
@@ -292,20 +311,38 @@ export function Workspace({ session, onSessionChange, onLogout, notify }: Worksp
   </main>;
 }
 
-function AdminPage({ notify }: { notify: (message: string) => void }) {
-  type Monitoring = { users: { total: number; active: number; locked: number; suspended: number; newSignups7d: number }; projects: { active: number; completed: number }; activity: { tasksCompleted24h: number; openSupportTickets: number }; health: { database: string; redis: string; overall: string } };
-  const [data, setData] = useState<Monitoring | null>(null);
-  async function refresh() {
-    try {
-      setData(await request<Monitoring>('/admin/monitoring'));
-    } catch (error) { notify(error instanceof Error ? error.message : 'Could not load administrator data.'); }
-  }
-  useEffect(() => { void refresh(); }, [notify]);
-  return <section className="sp on">
-    <div className="ph"><div><h2>User Activity</h2></div></div>
-    <div className="g2 admin-activity-grid"><AdminActivityChart metric="projects" initialPeriod="six-months" /><AdminActivityChart metric="users" /></div>
-    <div className="krow">{data ? <><Kpi label="Flagged Inactive" value={data.users.locked + data.users.suspended} tone="yel" /><Kpi label="System Status" value={data.health.overall === 'up' ? 'Online' : 'Degraded'} tone={data.health.overall === 'up' ? 'grn' : 'red'} /></> : <div className="cc">Loading system activity…</div>}</div>
-    <div className="g2"><div className="cc"><div className="cc-head"><h3>System Health</h3></div><Health label="Database" detail="Connected to the WebSphere database" ok={data?.health.database === 'up'} /><Health label="Redis" detail="Session and job queue store" ok={data?.health.redis === 'up'} /><Health label="File Storage" detail="Linux instance storage" ok /></div><div className="cc"><div className="cc-head"><h3>Recent User Activity</h3></div>{data ? <><Health label="New signups (7 days)" detail={`${data.users.newSignups7d} accounts created`} ok /><Health label="Tasks completed (24h)" detail={`${data.activity.tasksCompleted24h} tasks marked complete`} ok /><Health label="Open support tickets" detail={`${data.activity.openSupportTickets} awaiting response`} ok={data.activity.openSupportTickets === 0} /><Health label="Completed projects" detail={`${data.projects.completed} projects completed`} ok /></> : <div className="empty-message">Live audit activity will appear here.</div>}</div></div>
+type Monitoring = {
+  users: { locked: number; suspended: number; newSignups7d: number };
+  projects: { completed: number };
+  activity: { tasksCompleted24h: number; openSupportTickets: number };
+  health: { database: string; redis: string; overall: string };
+};
+
+function AdminPage({ data, error, onRetry }: { data: Monitoring | null; error: string; onRetry: () => void }) {
+  return <section className="sp on admin-dashboard">
+    <header className="ph"><h2>User Activity</h2></header>
+    <div className="admin-dashboard-grid">
+      <AdminActivityChart metric="projects" />
+      <AdminActivityChart metric="users" initialPeriod="six-months" />
+      <Kpi label="Flagged Inactive" value={data ? data.users.locked + data.users.suspended : '—'} tone="yel" />
+      <Kpi label="System Status" value={data ? data.health.overall === 'up' ? 'Online' : 'Degraded' : '—'} tone={data ? data.health.overall === 'up' ? 'grn' : 'red' : undefined} />
+      <section className="cc admin-monitoring-card">
+        <div className="cc-head"><h3>System Health</h3></div>
+        {error ? <p className="admin-monitoring-message" role="alert">{error} <button type="button" className="btn-o btn-sm" onClick={onRetry}>Retry</button></p> : null}
+        <Health label="Database" detail="WebSphere database" ok={data ? data.health.database === 'up' : undefined} />
+        <Health label="Redis" detail="Session and job queue store" ok={data ? data.health.redis === 'up' : undefined} />
+        <Health label="File Storage" detail="Linux instance storage" />
+      </section>
+      <section className="cc admin-monitoring-card">
+        <div className="cc-head"><h3>Recent User Activity</h3></div>
+        {data ? <>
+          <Health label="New signups (7 days)" detail={`${data.users.newSignups7d} accounts created`} ok />
+          <Health label="Tasks completed (24h)" detail={`${data.activity.tasksCompleted24h} tasks marked complete`} ok />
+          <Health label="Open support tickets" detail={`${data.activity.openSupportTickets} awaiting response`} ok={data.activity.openSupportTickets === 0} />
+          <Health label="Completed projects" detail={`${data.projects.completed} projects completed`} ok />
+        </> : <p className="admin-monitoring-message" role="status">{error ? 'Activity unavailable.' : 'Loading recent activity…'}</p>}
+      </section>
+    </div>
   </section>;
 }
 
@@ -340,7 +377,7 @@ type AdminUsersPage = { users: AdminUser[]; total: number; page: number; pageSiz
 const USERS_PAGE_SIZE = 10;
 const SUPPORT_REQUESTS_PAGE_SIZE = 5;
 
-function AdminAccounts({ notify, focusedTicketId }: { notify: (message: string) => void; focusedTicketId?: string }) {
+function AdminAccounts({ notify, focusedTicketId, onTicketSaved, feedbackOnly = false }: { notify: (message: string) => void; focusedTicketId?: string; onTicketSaved: () => void; feedbackOnly?: boolean }) {
   const [data, setData] = useState<AdminUsersPage | null>(null);
   const [tickets, setTickets] = useState<AdminSupportTicket[] | null>(null);
   const [supportPage, setSupportPage] = useState(1);
@@ -350,10 +387,12 @@ function AdminAccounts({ notify, focusedTicketId }: { notify: (message: string) 
   const [term, setTerm] = useState('');
   const [reloadToken, setReloadToken] = useState(0);
   const [archiving, setArchiving] = useState<AdminUser | null>(null);
+  const [grantingAdmin, setGrantingAdmin] = useState<AdminUser | null>(null);
   const refreshUsers = () => setReloadToken((token) => token + 1);
   async function refreshSupportRequests() {
     try {
-      setTickets(await request<AdminSupportTicket[]>('/admin/support/tickets'));
+      const records = await request<AdminSupportTicket[]>('/admin/support/tickets');
+      setTickets(feedbackOnly ? records.filter((ticket) => ticket.category === 'other' && /^Feedback · [1-5]\/5 stars$/.test(ticket.subject)) : records);
       setSupportPage(1);
     } catch (error) { notify(error instanceof Error ? error.message : 'Could not load support requests.'); }
   }
@@ -368,6 +407,7 @@ function AdminAccounts({ notify, focusedTicketId }: { notify: (message: string) 
     return () => clearTimeout(handle);
   }, [search]);
   useEffect(() => {
+    if (feedbackOnly) return;
     let active = true;
     setLoading(true);
     const qs = `/admin/users?page=${page}&pageSize=${USERS_PAGE_SIZE}${term ? `&q=${encodeURIComponent(term)}` : ''}`;
@@ -376,8 +416,8 @@ function AdminAccounts({ notify, focusedTicketId }: { notify: (message: string) 
       .catch((error: Error) => { if (active) notify(error.message); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [page, term, notify, reloadToken]);
-  useEffect(() => { void refreshSupportRequests(); }, [notify]);
+  }, [page, term, notify, reloadToken, feedbackOnly]);
+  useEffect(() => { void refreshSupportRequests(); }, [notify, feedbackOnly]);
   useEffect(() => {
     if (!focusedTicketId || !tickets) return;
     const ticketIndex = tickets.findIndex((ticket) => ticket.id === focusedTicketId);
@@ -404,7 +444,21 @@ function AdminAccounts({ notify, focusedTicketId }: { notify: (message: string) 
       refreshUsers();
     } catch (error) { notify((error as Error).message); }
   }
-  return <section className="sp on"><div className="ph"><div><h2>Account Management</h2></div></div><section className="cc support-request-queue"><div className="cc-head"><div><h3>Support Requests</h3><span className="support-queue-count">{supportTotal} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => { void refreshSupportRequests(); refreshUsers(); }}>Refresh</button></div>{tickets === null ? <div className="empty-message">Loading support requests…</div> : tickets.length ? <><div className="support-ticket-list">{displayedTickets.map((ticket) => <AdminTicketCard key={`${ticket.id}-${ticket.updatedAt}`} ticket={ticket} focused={ticket.id === focusedTicketId} notify={notify} onSaved={() => void refreshSupportRequests()} />)}</div>{supportTotalPages > 1 ? <div className="user-pager support-request-pager"><button type="button" className="btn-o btn-sm" disabled={supportPage <= 1} onClick={() => setSupportPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label" aria-live="polite">{supportRangeStart}–{supportRangeEnd} of {supportTotal} · Page {supportPage} of {supportTotalPages}</span><button type="button" className="btn-o btn-sm" disabled={supportPage >= supportTotalPages} onClick={() => setSupportPage((current) => Math.min(supportTotalPages, current + 1))}>Next</button></div> : null}</> : <div className="empty-message">New support requests will appear here.</div>}</section><div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <AdminUserRow key={user.id} user={user} onArchive={() => setArchiving(user)} onDeactivate={() => setStatus(user, 'deactivated', `${user.fullName} has been deactivated.`)} onActivate={() => setStatus(user, 'active', `${user.fullName} has been reactivated.`)} />) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div>
+  async function grantAdmin(user: AdminUser) {
+    try {
+      await request(`/admin/users/${user.id}`, { method: 'PATCH', body: JSON.stringify({ role: 'Administrator' }) });
+      notify(`${user.fullName} can now sign in as an administrator.`);
+      refreshUsers();
+    } catch (error) { notify((error as Error).message); }
+  }
+  return <section className="sp on"><div className="ph"><div><h2>{feedbackOnly ? 'User Feedback' : 'Account Management'}</h2></div></div><section className="cc support-request-queue"><div className="cc-head"><div><h3>{feedbackOnly ? 'Submitted Feedback' : 'Support Requests'}</h3><span className="support-queue-count">{supportTotal} recent</span></div><button type="button" className="btn-o btn-sm" onClick={() => { void refreshSupportRequests(); refreshUsers(); }}>Refresh</button></div>{tickets === null ? <div className="empty-message">{feedbackOnly ? 'Loading feedback…' : 'Loading support requests…'}</div> : tickets.length ? <><div className="support-ticket-list">{displayedTickets.map((ticket) => <AdminTicketCard key={`${ticket.id}-${ticket.updatedAt}`} ticket={ticket} focused={ticket.id === focusedTicketId} notify={notify} onSaved={() => { void refreshSupportRequests(); onTicketSaved(); }} />)}</div>{supportTotalPages > 1 ? <div className="user-pager support-request-pager"><button type="button" className="btn-o btn-sm" disabled={supportPage <= 1} onClick={() => setSupportPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label" aria-live="polite">{supportRangeStart}–{supportRangeEnd} of {supportTotal} · Page {supportPage} of {supportTotalPages}</span><button type="button" className="btn-o btn-sm" disabled={supportPage >= supportTotalPages} onClick={() => setSupportPage((current) => Math.min(supportTotalPages, current + 1))}>Next</button></div> : null}</> : <div className="empty-message">{feedbackOnly ? 'No feedback has been submitted.' : 'New support requests will appear here.'}</div>}</section>{!feedbackOnly ? <div className="cc"><div className="cc-head"><h3>All Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search users by name or email" /></div>{users.length ? users.map((user) => <AdminUserRow key={user.id} user={user} onGrantAdmin={() => setGrantingAdmin(user)} onArchive={() => setArchiving(user)} onDeactivate={() => setStatus(user, 'deactivated', `${user.fullName} has been deactivated.`)} onActivate={() => setStatus(user, 'active', `${user.fullName} has been reactivated.`)} />) : <div className="empty-message">{loading ? 'Loading accounts…' : term ? `No users match “${term}”.` : 'Registered users will appear here.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div> : null}
+    {grantingAdmin ? <ConfirmDialog
+      title="Grant administrator access?"
+      description={`${grantingAdmin.fullName} (${grantingAdmin.email}) will have full administrator access. They’ll need to sign in again using Admin login.`}
+      confirmLabel="Grant access"
+      onCancel={() => setGrantingAdmin(null)}
+      onConfirm={() => { void grantAdmin(grantingAdmin); setGrantingAdmin(null); }}
+    /> : null}
     {archiving ? <AdminUserArchiveModal user={archiving} onClose={() => setArchiving(null)} onArchived={() => { setArchiving(null); refreshUsers(); }} notify={notify} /> : null}
   </section>;
 }
@@ -454,7 +508,7 @@ function AdminArchive({ notify }: { notify: (message: string) => void }) {
   return <section className="sp on"><div className="ph"><div><h2>Archived Accounts</h2><p className="ph-sub">Archived accounts are hidden from Account Management but their records are kept. Restore an account to return it to the active list.</p></div></div><div className="cc"><div className="cc-head"><h3>Archived Users</h3>{total ? <span className="user-page-count">{rangeStart}–{rangeEnd} of {total}</span> : null}</div><div className="user-search"><input type="search" className="ifield" placeholder="Search archived by name or email…" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search archived accounts by name or email" /></div>{users.length ? users.map((user) => <div className="urow" key={user.id}><span className={`ava tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}{user.archivedAt ? ` · archived ${new Date(user.archivedAt).toLocaleDateString()}` : ''}</small></span><button type="button" className="btn-o btn-sm" disabled={restoringId === user.id} onClick={() => void restore(user)}>{restoringId === user.id ? 'Restoring…' : 'Restore'}</button></div>) : <div className="empty-message">{loading ? 'Loading archived accounts…' : term ? `No archived accounts match “${term}”.` : 'No accounts have been archived yet.'}</div>}{totalPages > 1 ? <div className="user-pager"><button type="button" className="btn-o btn-sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span className="user-pager-label">Page {page} of {totalPages}</span><button type="button" className="btn-o btn-sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button></div> : null}</div></section>;
 }
 
-function AdminUserRow({ user, onArchive, onDeactivate, onActivate }: { user: AdminUser; onArchive: () => void; onDeactivate: () => void; onActivate: () => void }) {
+function AdminUserRow({ user, onGrantAdmin, onArchive, onDeactivate, onActivate }: { user: AdminUser; onGrantAdmin: () => void; onArchive: () => void; onDeactivate: () => void; onActivate: () => void }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -467,7 +521,7 @@ function AdminUserRow({ user, onArchive, onDeactivate, onActivate }: { user: Adm
   }, [open]);
   const inactive = user.status !== 'active';
   const run = (action: () => void) => { setOpen(false); action(); };
-  return <div className="urow"><span className={`ava tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}</small></span><span className={`bdg ${user.status === 'active' ? 'g' : 'y'}`}>{user.status === 'suspended' ? 'deactivated' : user.status}</span><div className="ur-menu" ref={menuRef}><button type="button" className="ur-menu-btn" aria-haspopup="menu" aria-expanded={open} aria-label={`Actions for ${user.fullName}`} onClick={() => setOpen((value) => !value)}><DotsIcon /></button>{open ? <div className="ur-menu-pop" role="menu">{inactive ? <button type="button" role="menuitem" onClick={() => run(onActivate)}>Activate</button> : <button type="button" role="menuitem" onClick={() => run(onDeactivate)}>Deactivate</button>}<button type="button" role="menuitem" className="danger" onClick={() => run(onArchive)}>Archive</button></div> : null}</div></div>;
+  return <div className="urow"><span className={`ava tone-${avatarTone(user.id)}`}>{initials(user.fullName)}</span><span className="ur-info"><strong className="ur-name">{user.fullName}</strong><small className="ur-email">{user.email} · {user.role}</small></span><span className={`bdg ${user.status === 'active' ? 'g' : 'y'}`}>{user.status === 'suspended' ? 'deactivated' : user.status}</span><div className="ur-menu" ref={menuRef}><button type="button" className="ur-menu-btn" aria-haspopup="menu" aria-expanded={open} aria-label={`Actions for ${user.fullName}`} onClick={() => setOpen((value) => !value)}><DotsIcon /></button>{open ? <div className="ur-menu-pop" role="menu">{inactive ? <button type="button" role="menuitem" onClick={() => run(onActivate)}>Activate</button> : <button type="button" role="menuitem" onClick={() => run(onDeactivate)}>Deactivate</button>}{!inactive && user.role !== 'Administrator' ? <button type="button" role="menuitem" onClick={() => run(onGrantAdmin)}>Make administrator</button> : null}<button type="button" role="menuitem" className="danger" onClick={() => run(onArchive)}>Archive</button></div> : null}</div></div>;
 }
 
 function AdminUserArchiveModal({ user, onClose, onArchived, notify }: { user: AdminUser; onClose: () => void; onArchived: () => void; notify: (message: string) => void }) {
@@ -499,7 +553,7 @@ function NavIcon({ page }: { page: Page }) {
   if (page === 'dashboard') return <svg {...common}><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>;
   if (page === 'announcements') return <svg {...common}><path d="M3 11v2a2 2 0 0 0 2 2h3l3 5h2l-1-5 8 3V6L8 9H5a2 2 0 0 0-2 2z"/><path d="M20 9a3 3 0 0 1 0 6"/></svg>;
   if (page === 'groups' || page === 'accounts') return <svg {...common}><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>;
-  if (page === 'chat') return <svg {...common}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>;
+  if (page === 'chat' || page === 'feedback') return <svg {...common}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>;
   if (page === 'projects') return <svg {...common}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>;
   if (page === 'tasks') return <svg {...common}><path d="m9 11 3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>;
   if (page === 'workflow') return <svg {...common}><path d="M18 20V10M12 20V4M6 20v-6"/></svg>;
@@ -515,7 +569,7 @@ function NavIcon({ page }: { page: Page }) {
   return <svg {...common}><circle cx="12" cy="12" r="9"/></svg>;
 }
 function Kpi({ label, value, tone }: { label: string; value: string | number; tone?: string }) { return <div className="kpi"><div className={`kval ${tone ?? ''}`}>{value}</div><div className="klbl">{label}</div></div>; }
-function Health({ label, detail, ok = true }: { label: string; detail: string; ok?: boolean }) { return <div className="health-row"><span><strong>{label}</strong><small>{detail}</small></span><span className={`bdg ${ok ? 'g' : 'r'}`}>{ok ? '● Healthy' : '● Attention'}</span></div>; }
+function Health({ label, detail, ok }: { label: string; detail: string; ok?: boolean }) { return <div className="health-row"><span><strong>{label}</strong><small>{detail}</small></span>{ok !== undefined ? <span className={`bdg ${ok ? 'g' : 'r'}`}>{ok ? '● Healthy' : '● Attention'}</span> : null}</div>; }
 function initials(name: string) { return name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase(); }
 
 function formatCallDuration(milliseconds: number) {

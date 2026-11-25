@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { identifyResourceLink } from '@websphere/shared';
 import { maintenanceState } from './maintenance-state.js';
 import { activityPoints, activityRanges } from './admin-activity.js';
+import { workflowBuckets } from './workflow-reporting.js';
+import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 
 function recoveryFixture() {
@@ -127,6 +129,25 @@ describe('bounded project views', () => {
     expect(groupBy).toHaveBeenCalledWith(expect.objectContaining({ where: { projectId: { in: ['p-1'] } } }));
   });
 
+  it('filters projects by the same task progress shown on their status badges before paging', async () => {
+    const findMany = vi.fn().mockResolvedValue([{ id: 'review', group: null, members: [] }]);
+    const count = vi.fn().mockResolvedValue(1);
+    const groupBy = vi.fn()
+      .mockResolvedValueOnce([
+        { projectId: 'review', status: 'completed', _count: { _all: 3 } },
+        { projectId: 'review', status: 'pending', _count: { _all: 1 } },
+        { projectId: 'ongoing', status: 'ongoing', _count: { _all: 1 } },
+      ])
+      .mockResolvedValue([]);
+    const service = Object.create(AppService.prototype) as any;
+    service.prisma = { project: { findMany, count }, task: { groupBy } };
+    await service.projectList({ id: 'member' }, { page: 2, pageSize: 10, progressStatus: 'for_review' });
+    const filtered = { id: { in: ['review'] }, AND: { status: { notIn: ['on_hold', 'archived'] } } };
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ skip: 10, take: 10, where: expect.objectContaining(filtered) }));
+    expect(count).toHaveBeenCalledWith({ where: expect.objectContaining(filtered) });
+    expect(groupBy).toHaveBeenNthCalledWith(1, expect.objectContaining({ where: { project: expect.objectContaining({ members: { some: { userId: 'member' } } }) } }));
+  });
+
   it('keeps unavailable administrator history empty until the first known count', () => {
     const ranges = activityRanges('weekly', '2026-11-24');
     expect(activityPoints(ranges, [{ date: '2026-11-22', count: 12 }, { date: '2026-11-24', count: 13 }]).map((point) => point.value)).toEqual([null, null, null, null, 12, 12, 13]);
@@ -168,6 +189,53 @@ describe('project workflow and personal notes', () => {
     expect(completed.members[0]).toMatchObject({ performance: 50, completions: [0, 0, 0, 0, 0, 0, 1] });
   });
 
+  it('reports a selected calendar week and includes members at zero progress in overall efficiency', async () => {
+    const service = Object.create(AppService.prototype) as any;
+    service.projectMember = vi.fn().mockResolvedValue({});
+    const start = new Date('2026-11-15T16:00:00Z');
+    const findEvents = vi.fn().mockResolvedValue([
+      { actorId: 'ada', type: 'task_completed', createdAt: start, taskId: 'task-1' },
+      { actorId: 'ada', type: 'task_completed', createdAt: new Date(+start + 1000), taskId: 'task-1' },
+    ]);
+    const assignments = vi.fn().mockResolvedValue([{ assigneeId: 'ada', task: { status: 'completed' } }]);
+    const memberIds = ['ada', 'ben', 'cam'];
+    service.prisma = {
+      projectMember: { findMany: vi.fn().mockResolvedValue(memberIds.map((id) => ({ userId: id, role: 'Project_Member', user: { fullName: id }, project: { group: null } }))) },
+      taskAssignment: { findMany: assignments },
+      workflowEvent: { findMany: findEvents },
+    };
+    vi.stubEnv('APP_TIME_ZONE', 'Asia/Manila');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-25T12:00:00Z'));
+    try {
+      const report = await service.workflowReport({ id: 'ada' }, 'project-1', 'weekly', '2026-11-19');
+      expect(report).toMatchObject({
+        start: '2026-11-16', end: '2026-11-23',
+        labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+        totals: [1, 0, 0, 0, 0, 0, 0], tasksCompleted: 1, overallEfficiency: 33,
+      });
+      expect(report.members.map(({ performance }: { performance: number }) => performance)).toEqual([100, 0, 0]);
+      expect(findEvents).toHaveBeenCalledWith(expect.objectContaining({ where: {
+        projectId: 'project-1', createdAt: { gte: start, lt: new Date('2026-11-22T16:00:00Z') },
+      } }));
+      assignments.mockResolvedValueOnce(memberIds.map((assigneeId) => ({ assigneeId, task: { status: 'completed' } })));
+      await expect(service.workflowReport({ id: 'ada' }, 'project-1', 'weekly', '2026-11-19')).resolves.toMatchObject({ overallEfficiency: 100 });
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('uses local day hours and month-bounded weeks for calendar-aligned reports', () => {
+    const daily = workflowBuckets('daily', '2026-11-25', '2026-11-25', 'Asia/Manila', true);
+    expect(daily.buckets.map((bucket) => bucket.label)).toEqual(['12am', '6am', '12pm', '6pm']);
+    expect(daily.buckets[0].start.toISOString()).toBe('2026-11-24T16:00:00.000Z');
+    const monthly = workflowBuckets('monthly', '2026-02-15', '2026-03-01', 'Asia/Manila', true);
+    expect(monthly.buckets[0].start.toISOString()).toBe('2026-01-31T16:00:00.000Z');
+    expect(monthly.buckets.at(-1)?.end.toISOString()).toBe('2026-02-28T16:00:00.000Z');
+    expect(monthly.buckets.every((bucket, index) => index === 0 || +monthly.buckets[index - 1].end === +bucket.start)).toBe(true);
+  });
+
   it('reads and writes a note using the account and calendar date together', async () => {
     const service = Object.create(AppService.prototype) as any;
     const findUnique = vi.fn().mockResolvedValue(null);
@@ -179,5 +247,20 @@ describe('project workflow and personal notes', () => {
     await expect(service.saveCalendarNote(caller, '2026-11-24', 'Draft methodology')).resolves.toMatchObject({ body: 'Draft methodology' });
     expect(findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: scope }));
     expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ where: scope, create: { ownerId: 'ada', date: '2026-11-24', body: 'Draft methodology' } }));
+  });
+
+  it('accepts a 100-character calendar note and rejects a longer one', async () => {
+    const caller = { id: 'ada' };
+    const saveCalendarNote = vi.fn().mockResolvedValue(undefined);
+    const controller = Object.assign(Object.create(AppController.prototype), {
+      caller: vi.fn().mockResolvedValue(caller),
+      app: { saveCalendarNote },
+    }) as AppController;
+    const date = '2026-11-24';
+    const body = 'x'.repeat(100);
+    await controller.saveNote('Bearer token', date, { body });
+    await expect(controller.saveNote('Bearer token', date, { body: body + 'x' })).rejects.toMatchObject({ status: 400 });
+    expect(saveCalendarNote).toHaveBeenCalledTimes(1);
+    expect(saveCalendarNote).toHaveBeenCalledWith(caller, date, body);
   });
 });
